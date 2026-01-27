@@ -66,6 +66,7 @@ int32_t emu_load_state(Emu* emu, const uint8_t* data, size_t len);
 core/src/
 ├── lib.rs      # C ABI exports and public interface
 ├── emu.rs      # Main emulator orchestrator
+├── cpu.rs      # eZ80 CPU implementation
 ├── bus.rs      # System bus with address decoding
 └── memory.rs   # Flash, RAM, and Port implementations
 ```
@@ -74,10 +75,50 @@ core/src/
 The main emulator struct that owns all subsystems and coordinates execution.
 
 ### CPU (eZ80)
-The eZ80 processor implementation with:
-- Registers and flags
-- Instruction decoder and executor
-- Cycle counting
+The eZ80 processor implementation running at 48 MHz in ADL mode (24-bit addressing).
+
+**Registers:**
+- Main: A, F, BC, DE, HL (24-bit in ADL mode)
+- Shadow: A', F', BC', DE', HL' (for EX AF,AF' and EXX)
+- Index: IX, IY (24-bit in ADL mode)
+- Special: PC, SP (SPL in ADL), I, R, MBASE
+
+**Flags (F register):**
+- S (Sign), Z (Zero), H (Half-carry)
+- PV (Parity/Overflow), N (Subtract), C (Carry)
+- F5, F3 (undocumented, copies of result bits)
+
+**Instruction Set (implemented):**
+- Load: LD r,r' / LD r,n / LD rp,nn / LD (rp),A / LD A,(rp)
+- Arithmetic: ADD, ADC, SUB, SBC, INC, DEC, NEG, DAA
+- Logic: AND, OR, XOR, CP, CPL
+- Rotate (basic): RLCA, RRCA, RLA, RRA
+- Control: JP, JR, DJNZ, CALL, RET, RETI, RETN, RST, HALT
+- Stack: PUSH, POP
+- Exchange: EX AF,AF' / EXX / EX DE,HL / EX (SP),HL
+- Misc: NOP, DI, EI, SCF, CCF, IM 0/1/2
+
+**CB Prefix (bit operations):**
+- Rotate/Shift: RLC, RRC, RL, RR, SLA, SRA, SRL
+- Bit test: BIT n,r
+- Bit manipulation: SET n,r / RES n,r
+
+**ED Prefix (extended operations):**
+- 16-bit arithmetic: ADC HL,rp / SBC HL,rp
+- Block transfer: LDI, LDIR, LDD, LDDR
+- Block compare: CPI, CPIR, CPD, CPDR
+- Rotate decimal: RRD, RLD
+- Register: LD I,A / LD A,I / LD R,A / LD A,R
+- I/O: IN r,(C) / OUT (C),r (blocked on TI-84 CE)
+
+**DD/FD Prefix (indexed operations):**
+- All HL instructions work with IX (DD) or IY (FD)
+- Indexed addressing: (IX+d), (IY+d)
+- Half-register access: IXH, IXL, IYH, IYL
+- DDCB/FDCB: Bit ops on indexed memory
+
+**Opcode decoding:**
+Uses x-y-z-p-q decomposition (standard Z80 decode scheme)
 
 ### Bus
 Memory bus with 24-bit address decoding:
