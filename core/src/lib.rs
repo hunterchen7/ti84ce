@@ -2,7 +2,26 @@
 //!
 //! This crate provides a platform-agnostic emulator core with a stable C ABI.
 //! No OS APIs are used - all I/O is done through byte buffers.
+//!
+//! # Architecture
+//!
+//! The emulator is organized into several modules:
+//! - `memory`: Flash, RAM, and port memory implementations
+//! - `bus`: Address decoding and memory access routing
+//! - `emu`: Main emulator orchestrator
+//!
+//! # Memory Map (24-bit eZ80 address space)
+//!
+//! | Address Range       | Region              |
+//! |---------------------|---------------------|
+//! | 0x000000 - 0x3FFFFF | Flash (4MB)         |
+//! | 0x400000 - 0xCFFFFF | Unmapped            |
+//! | 0xD00000 - 0xD657FF | RAM + VRAM          |
+//! | 0xD65800 - 0xDFFFFF | Unmapped            |
+//! | 0xE00000 - 0xFFFFFF | Memory-mapped I/O   |
 
+pub mod memory;
+pub mod bus;
 mod emu;
 
 use std::ptr;

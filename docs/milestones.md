@@ -12,15 +12,18 @@
 - [x] Reset functionality
 - [x] ROM import UI (loads bytes, unused in dummy core)
 
-## Milestone 2: Bus + Memory Skeleton
+## Milestone 2: Bus + Memory Skeleton ✓
 **Goal:** Implement memory subsystem foundation.
 
 **Deliverables:**
-- [ ] Bus with address decoding
-- [ ] RAM backing store
-- [ ] Flash backing store for ROM
-- [ ] MMIO stubs with debug logging
-- [ ] Memory read/write tests pass
+- [x] Bus with address decoding (24-bit eZ80 address space)
+- [x] RAM backing store (0x65800 bytes at 0xD00000)
+- [x] Flash backing store for ROM (4MB at 0x000000)
+- [x] MMIO port stubs (0xE00000 - 0xFFFFFF)
+- [x] Memory read/write tests pass (44 tests)
+- [x] Cycle counting with accurate wait states
+- [x] Pseudo-random values for unmapped reads
+- [x] peek/poke debug access without cycle cost
 
 ## Milestone 3: eZ80 Interpreter Foundation
 **Goal:** Implement CPU instruction execution.

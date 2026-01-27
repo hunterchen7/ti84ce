@@ -1,0 +1,450 @@
+//! Memory subsystem for TI-84 Plus CE
+//!
+//! This module implements the memory map based on the eZ80's 24-bit address space:
+//! - 0x000000 - 0x3FFFFF: Flash (4MB, read-only from user code)
+//! - 0x400000 - 0xCFFFFF: Unmapped (returns pseudo-random values)
+//! - 0xD00000 - 0xD657FF: RAM (256KB + VRAM, 0x65800 bytes total)
+//! - 0xD65800 - 0xDFFFFF: Unmapped RAM region
+//! - 0xE00000 - 0xFFFFFF: Memory-mapped I/O ports
+//!
+//! Reference: CEmu (https://github.com/CE-Programming/CEmu)
+//! Reference: WikiTI (https://wikiti.brandonw.net)
+
+/// Memory region address constants
+pub mod addr {
+    /// Flash memory start address
+    pub const FLASH_START: u32 = 0x000000;
+    /// Flash memory end address (exclusive)
+    pub const FLASH_END: u32 = 0x400000;
+    /// Flash memory size (4MB)
+    pub const FLASH_SIZE: usize = 0x400000;
+
+    /// Unmapped region 1 start (between Flash and RAM)
+    pub const UNMAPPED1_START: u32 = 0x400000;
+    /// Unmapped region 1 end (exclusive)
+    pub const UNMAPPED1_END: u32 = 0xD00000;
+
+    /// RAM start address
+    pub const RAM_START: u32 = 0xD00000;
+    /// RAM end address (exclusive, includes VRAM)
+    pub const RAM_END: u32 = 0xD65800;
+    /// Total RAM size (256KB user RAM + ~150KB VRAM)
+    pub const RAM_SIZE: usize = 0x65800;
+
+    /// VRAM start address (within RAM region)
+    pub const VRAM_START: u32 = 0xD40000;
+    /// VRAM size (~150KB for 320x240 16-bit display + extra)
+    pub const VRAM_SIZE: usize = 0x25800;
+
+    /// Unmapped region 2 start (between RAM and ports)
+    pub const UNMAPPED2_START: u32 = 0xD65800;
+    /// Unmapped region 2 end (exclusive)
+    pub const UNMAPPED2_END: u32 = 0xE00000;
+
+    /// Memory-mapped I/O start address
+    pub const PORT_START: u32 = 0xE00000;
+    /// Memory-mapped I/O end address (exclusive)
+    pub const PORT_END: u32 = 0x1000000;
+
+    /// Maximum address in 24-bit space
+    pub const ADDR_MASK: u32 = 0xFFFFFF;
+}
+
+/// Flash memory state
+///
+/// The TI-84 Plus CE has 4MB of NOR flash for OS and user programs.
+/// Flash is read-only from user code; writes require special unlock sequences.
+pub struct Flash {
+    /// Flash memory contents
+    data: Vec<u8>,
+    /// Whether flash has been initialized with ROM data
+    initialized: bool,
+}
+
+impl Flash {
+    /// Create a new flash memory instance
+    pub fn new() -> Self {
+        Self {
+            data: vec![0xFF; addr::FLASH_SIZE], // Flash erased state is 0xFF
+            initialized: false,
+        }
+    }
+
+    /// Load ROM data into flash
+    ///
+    /// # Arguments
+    /// * `data` - ROM data to load
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(FlashError)` if data is too large
+    pub fn load_rom(&mut self, data: &[u8]) -> Result<(), FlashError> {
+        if data.len() > addr::FLASH_SIZE {
+            return Err(FlashError::RomTooLarge);
+        }
+
+        // Copy ROM data to start of flash
+        self.data[..data.len()].copy_from_slice(data);
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// Read a byte from flash
+    ///
+    /// # Arguments
+    /// * `addr` - Address relative to flash start (0 to FLASH_SIZE-1)
+    pub fn read(&self, addr: u32) -> u8 {
+        let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
+        self.data[offset]
+    }
+
+    /// Write a byte to flash (for emulator use, not accessible from CPU normally)
+    ///
+    /// In real hardware, flash writes require unlock sequences.
+    /// This method bypasses that for testing/debugging.
+    ///
+    /// # Arguments
+    /// * `addr` - Address relative to flash start
+    /// * `value` - Byte to write
+    pub fn write_direct(&mut self, addr: u32, value: u8) {
+        let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
+        self.data[offset] = value;
+    }
+
+    /// Check if flash is initialized
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+
+    /// Get raw flash data for save states
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Reset flash to erased state
+    pub fn reset(&mut self) {
+        self.data.fill(0xFF);
+        self.initialized = false;
+    }
+}
+
+impl Default for Flash {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Flash memory errors
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlashError {
+    /// ROM data exceeds flash capacity
+    RomTooLarge,
+    /// Flash write protection violation
+    WriteProtected,
+}
+
+/// RAM memory state
+///
+/// The TI-84 Plus CE has 256KB of user RAM plus ~150KB of VRAM,
+/// all in a single contiguous region starting at 0xD00000.
+pub struct Ram {
+    /// RAM contents
+    data: Vec<u8>,
+}
+
+impl Ram {
+    /// Create a new RAM instance
+    pub fn new() -> Self {
+        Self {
+            data: vec![0x00; addr::RAM_SIZE],
+        }
+    }
+
+    /// Read a byte from RAM
+    ///
+    /// # Arguments
+    /// * `addr` - Address relative to RAM start (0 to RAM_SIZE-1)
+    pub fn read(&self, addr: u32) -> u8 {
+        let offset = (addr as usize) % addr::RAM_SIZE;
+        self.data[offset]
+    }
+
+    /// Write a byte to RAM
+    ///
+    /// # Arguments
+    /// * `addr` - Address relative to RAM start
+    /// * `value` - Byte to write
+    pub fn write(&mut self, addr: u32, value: u8) {
+        let offset = (addr as usize) % addr::RAM_SIZE;
+        self.data[offset] = value;
+    }
+
+    /// Read a 16-bit word from RAM (little-endian)
+    pub fn read_word(&self, addr: u32) -> u16 {
+        let lo = self.read(addr) as u16;
+        let hi = self.read(addr.wrapping_add(1)) as u16;
+        lo | (hi << 8)
+    }
+
+    /// Write a 16-bit word to RAM (little-endian)
+    pub fn write_word(&mut self, addr: u32, value: u16) {
+        self.write(addr, value as u8);
+        self.write(addr.wrapping_add(1), (value >> 8) as u8);
+    }
+
+    /// Read a 24-bit address from RAM (little-endian)
+    pub fn read_addr24(&self, addr: u32) -> u32 {
+        let b0 = self.read(addr) as u32;
+        let b1 = self.read(addr.wrapping_add(1)) as u32;
+        let b2 = self.read(addr.wrapping_add(2)) as u32;
+        b0 | (b1 << 8) | (b2 << 16)
+    }
+
+    /// Write a 24-bit address to RAM (little-endian)
+    pub fn write_addr24(&mut self, addr: u32, value: u32) {
+        self.write(addr, value as u8);
+        self.write(addr.wrapping_add(1), (value >> 8) as u8);
+        self.write(addr.wrapping_add(2), (value >> 16) as u8);
+    }
+
+    /// Get VRAM slice for LCD rendering
+    ///
+    /// Returns a slice of the VRAM region (0xD40000-0xD657FF relative to RAM start)
+    pub fn vram(&self) -> &[u8] {
+        let start = (addr::VRAM_START - addr::RAM_START) as usize;
+        let end = start + addr::VRAM_SIZE;
+        &self.data[start..end]
+    }
+
+    /// Get mutable VRAM slice
+    pub fn vram_mut(&mut self) -> &mut [u8] {
+        let start = (addr::VRAM_START - addr::RAM_START) as usize;
+        let end = start + addr::VRAM_SIZE;
+        &mut self.data[start..end]
+    }
+
+    /// Get raw RAM data for save states
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Load RAM data from save state
+    pub fn load_data(&mut self, data: &[u8]) {
+        let len = data.len().min(addr::RAM_SIZE);
+        self.data[..len].copy_from_slice(&data[..len]);
+    }
+
+    /// Clear RAM to zero
+    pub fn reset(&mut self) {
+        self.data.fill(0x00);
+    }
+}
+
+impl Default for Ram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Memory-mapped I/O port placeholder
+///
+/// This will be expanded in later milestones to handle actual hardware ports.
+/// For now, it provides stub implementations that can be tested.
+pub struct Ports {
+    /// Simple register storage for basic port emulation
+    /// In full implementation, this will route to specific controllers
+    registers: Vec<u8>,
+}
+
+impl Ports {
+    /// Port region size (0xE00000 to 0xFFFFFF = 2MB)
+    const SIZE: usize = 0x200000;
+
+    /// Create new port controller
+    pub fn new() -> Self {
+        Self {
+            registers: vec![0x00; Self::SIZE],
+        }
+    }
+
+    /// Read from a memory-mapped port
+    ///
+    /// # Arguments
+    /// * `addr` - Address relative to port region start (0xE00000)
+    pub fn read(&self, addr: u32) -> u8 {
+        let offset = (addr as usize) % Self::SIZE;
+        self.registers[offset]
+    }
+
+    /// Write to a memory-mapped port
+    ///
+    /// # Arguments
+    /// * `addr` - Address relative to port region start
+    /// * `value` - Byte to write
+    pub fn write(&mut self, addr: u32, value: u8) {
+        let offset = (addr as usize) % Self::SIZE;
+        self.registers[offset] = value;
+    }
+
+    /// Reset all ports to default state
+    pub fn reset(&mut self) {
+        self.registers.fill(0x00);
+    }
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod flash_tests {
+        use super::*;
+
+        #[test]
+        fn test_new_flash_is_erased() {
+            let flash = Flash::new();
+            assert!(!flash.is_initialized());
+            // Flash erased state is 0xFF
+            assert_eq!(flash.read(0), 0xFF);
+            assert_eq!(flash.read(0x1000), 0xFF);
+            assert_eq!(flash.read(0x3FFFFF), 0xFF);
+        }
+
+        #[test]
+        fn test_load_rom() {
+            let mut flash = Flash::new();
+            let rom = vec![0x12, 0x34, 0x56, 0x78];
+            assert!(flash.load_rom(&rom).is_ok());
+            assert!(flash.is_initialized());
+
+            assert_eq!(flash.read(0), 0x12);
+            assert_eq!(flash.read(1), 0x34);
+            assert_eq!(flash.read(2), 0x56);
+            assert_eq!(flash.read(3), 0x78);
+            // Rest should still be erased
+            assert_eq!(flash.read(4), 0xFF);
+        }
+
+        #[test]
+        fn test_rom_too_large() {
+            let mut flash = Flash::new();
+            let rom = vec![0u8; addr::FLASH_SIZE + 1];
+            assert_eq!(flash.load_rom(&rom), Err(FlashError::RomTooLarge));
+        }
+
+        #[test]
+        fn test_write_direct() {
+            let mut flash = Flash::new();
+            flash.write_direct(0x100, 0xAB);
+            assert_eq!(flash.read(0x100), 0xAB);
+        }
+
+        #[test]
+        fn test_reset() {
+            let mut flash = Flash::new();
+            let rom = vec![0x12, 0x34];
+            flash.load_rom(&rom).unwrap();
+            flash.reset();
+            assert!(!flash.is_initialized());
+            assert_eq!(flash.read(0), 0xFF);
+        }
+    }
+
+    mod ram_tests {
+        use super::*;
+
+        #[test]
+        fn test_new_ram_is_zeroed() {
+            let ram = Ram::new();
+            assert_eq!(ram.read(0), 0x00);
+            assert_eq!(ram.read(0x1000), 0x00);
+        }
+
+        #[test]
+        fn test_read_write_byte() {
+            let mut ram = Ram::new();
+            ram.write(0x100, 0xAB);
+            assert_eq!(ram.read(0x100), 0xAB);
+        }
+
+        #[test]
+        fn test_read_write_word() {
+            let mut ram = Ram::new();
+            ram.write_word(0x200, 0xBEEF);
+            assert_eq!(ram.read_word(0x200), 0xBEEF);
+            // Check little-endian storage
+            assert_eq!(ram.read(0x200), 0xEF);
+            assert_eq!(ram.read(0x201), 0xBE);
+        }
+
+        #[test]
+        fn test_read_write_addr24() {
+            let mut ram = Ram::new();
+            ram.write_addr24(0x300, 0xD12345);
+            assert_eq!(ram.read_addr24(0x300), 0xD12345);
+            // Check little-endian storage
+            assert_eq!(ram.read(0x300), 0x45);
+            assert_eq!(ram.read(0x301), 0x23);
+            assert_eq!(ram.read(0x302), 0xD1);
+        }
+
+        #[test]
+        fn test_vram_access() {
+            let mut ram = Ram::new();
+            let vram_offset = (addr::VRAM_START - addr::RAM_START) as usize;
+
+            // Write via normal RAM access
+            ram.write(vram_offset as u32, 0x42);
+
+            // Read via VRAM accessor
+            assert_eq!(ram.vram()[0], 0x42);
+        }
+
+        #[test]
+        fn test_vram_size() {
+            let ram = Ram::new();
+            assert_eq!(ram.vram().len(), addr::VRAM_SIZE);
+        }
+
+        #[test]
+        fn test_reset() {
+            let mut ram = Ram::new();
+            ram.write(0x100, 0xFF);
+            ram.reset();
+            assert_eq!(ram.read(0x100), 0x00);
+        }
+
+        #[test]
+        fn test_address_wrapping() {
+            let mut ram = Ram::new();
+            // Address beyond RAM_SIZE should wrap
+            let wrapped_addr = addr::RAM_SIZE as u32 + 0x100;
+            ram.write(wrapped_addr, 0x99);
+            assert_eq!(ram.read(0x100), 0x99);
+        }
+    }
+
+    mod port_tests {
+        use super::*;
+
+        #[test]
+        fn test_read_write() {
+            let mut ports = Ports::new();
+            ports.write(0x1000, 0xAB);
+            assert_eq!(ports.read(0x1000), 0xAB);
+        }
+
+        #[test]
+        fn test_reset() {
+            let mut ports = Ports::new();
+            ports.write(0x100, 0xFF);
+            ports.reset();
+            assert_eq!(ports.read(0x100), 0x00);
+        }
+    }
+}

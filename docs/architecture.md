@@ -33,7 +33,42 @@ The core is single-threaded and deterministic. Threading is owned by the platfor
 - Framebuffer is exposed as a pointer to ARGB8888 data
 - Save states are serialized to/from byte buffers
 
+## C ABI Exports
+
+```c
+// Lifecycle
+Emu* emu_create(void);
+void emu_destroy(Emu* emu);
+void emu_reset(Emu* emu);
+
+// ROM loading
+int32_t emu_load_rom(Emu* emu, const uint8_t* data, size_t len);
+
+// Execution
+int32_t emu_run_cycles(Emu* emu, int32_t cycles);
+
+// Display
+const uint32_t* emu_framebuffer(const Emu* emu, int32_t* w, int32_t* h);
+
+// Input
+void emu_set_key(Emu* emu, int32_t row, int32_t col, int32_t down);
+
+// Save states
+size_t emu_save_state_size(const Emu* emu);
+int32_t emu_save_state(const Emu* emu, uint8_t* out, size_t cap);
+int32_t emu_load_state(Emu* emu, const uint8_t* data, size_t len);
+```
+
 ## Core Components
+
+### Module Structure
+```
+core/src/
+├── lib.rs      # C ABI exports and public interface
+├── emu.rs      # Main emulator orchestrator
+├── bus.rs      # System bus with address decoding
+└── memory.rs   # Flash, RAM, and Port implementations
+```
 
 ### Emu (Orchestrator)
 The main emulator struct that owns all subsystems and coordinates execution.
@@ -45,15 +80,28 @@ The eZ80 processor implementation with:
 - Cycle counting
 
 ### Bus
-Memory bus with address decoding for:
-- RAM
-- Flash (ROM)
-- MMIO regions
+Memory bus with 24-bit address decoding:
+
+| Address Range       | Region              | Size    |
+|---------------------|---------------------|---------|
+| 0x000000 - 0x3FFFFF | Flash               | 4MB     |
+| 0x400000 - 0xCFFFFF | Unmapped            | -       |
+| 0xD00000 - 0xD657FF | RAM + VRAM          | 415KB   |
+| 0xD65800 - 0xDFFFFF | Unmapped            | -       |
+| 0xE00000 - 0xFFFFFF | Memory-mapped I/O   | 2MB     |
+
+Wait states for accurate timing:
+- RAM read: 4 cycles (3 wait states)
+- RAM write: 2 cycles (1 wait state)
+- Flash read: 10 cycles
+- Port access: 3-4 cycles
 
 ### Memory
-RAM and Flash backing stores with:
-- Memory paging
-- Bank switching
+RAM and Flash backing stores:
+- Flash: 4MB, erased state is 0xFF, read-only from CPU
+- RAM: 415KB contiguous region including VRAM
+- VRAM: Last 150KB of RAM (0xD40000 - 0xD657FF)
+- Unmapped reads return pseudo-random values (LFSR-based RNG)
 
 ### Hardware
 Peripheral implementations:
