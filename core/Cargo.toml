@@ -1,0 +1,19 @@
+[package]
+name = "emu-core"
+version = "0.1.0"
+edition = "2021"
+description = "TI-84 Plus CE emulator core"
+license = "MIT"
+
+[lib]
+name = "emu_core"
+crate-type = ["staticlib"]
+
+[dependencies]
+
+[features]
+default = []
+
+[profile.release]
+lto = true
+opt-level = 3

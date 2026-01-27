@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Calculator body -->
+    <path
+        android:fillColor="#2D2D2D"
+        android:pathData="M24,24h60v60h-60z" />
+    <!-- Screen -->
+    <path
+        android:fillColor="#A8D8A8"
+        android:pathData="M28,28h52v20h-52z" />
+    <!-- Buttons row 1 -->
+    <path
+        android:fillColor="#4A4A4A"
+        android:pathData="M28,52h10v8h-10zM42,52h10v8h-10zM56,52h10v8h-10zM70,52h10v8h-10z" />
+    <!-- Buttons row 2 -->
+    <path
+        android:fillColor="#4A4A4A"
+        android:pathData="M28,64h10v8h-10zM42,64h10v8h-10zM56,64h10v8h-10zM70,64h10v8h-10z" />
+    <!-- Plus symbol on button -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M73,66h4v4h-4zM71,68h8v2h-8z" />
+</vector>
