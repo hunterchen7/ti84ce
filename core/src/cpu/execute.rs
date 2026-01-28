@@ -688,6 +688,7 @@ impl Cpu {
         let q = y & 0x01;
 
         match x {
+            0 => self.execute_ed_x0(bus, y, z),
             1 => self.execute_ed_x1(bus, y, z, p, q),
             2 => {
                 // Block instructions (y >= 4, z <= 3)
@@ -697,7 +698,54 @@ impl Cpu {
                     8 // NOP for invalid
                 }
             }
-            _ => 8, // x=0 and x=3 are NONI (no operation, no interrupt)
+            _ => 8, // x=3 is NONI (no operation, no interrupt)
+        }
+    }
+
+    /// Execute ED prefix x=0 opcodes (eZ80-specific I/O instructions)
+    pub fn execute_ed_x0(&mut self, bus: &mut Bus, y: u8, z: u8) -> u32 {
+        match z {
+            0 => {
+                // IN0 r,(n) - read from port 0xFFnn00 (eZ80 mapped I/O)
+                let port = self.fetch_byte(bus) as u32;
+                let addr = 0xFF0000 | port;
+                let val = bus.read_byte(addr);
+                if y != 6 {
+                    self.set_reg8(y, val, bus);
+                }
+                // Set flags for IN0
+                self.set_sz_flags(val);
+                self.set_flag_h(false);
+                self.set_flag_n(false);
+                self.set_flag_pv(Self::parity(val));
+                12
+            }
+            1 => {
+                // OUT0 (n),r - write to port 0xFFnn00 (eZ80 mapped I/O)
+                let port = self.fetch_byte(bus) as u32;
+                let addr = 0xFF0000 | port;
+                let val = self.get_reg8(y, bus);
+                bus.write_byte(addr, val);
+                12
+            }
+            4 => {
+                // TST A,r - test register (eZ80-specific)
+                let val = self.get_reg8(y, bus);
+                let result = self.a & val;
+                self.set_sz_flags(result);
+                self.set_flag_h(true);
+                self.set_flag_n(false);
+                self.set_flag_pv(Self::parity(result));
+                self.set_flag_c(false);
+                8
+            }
+            6 if y == 7 => {
+                // SLP - enter sleep mode (on eZ80, similar to HALT but lower power)
+                // For now, treat as HALT
+                self.halted = true;
+                8
+            }
+            _ => 8, // Other x=0 opcodes are NONI
         }
     }
 

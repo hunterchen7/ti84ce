@@ -246,57 +246,8 @@ impl Default for Ram {
     }
 }
 
-/// Memory-mapped I/O port placeholder
-///
-/// This will be expanded in later milestones to handle actual hardware ports.
-/// For now, it provides stub implementations that can be tested.
-pub struct Ports {
-    /// Simple register storage for basic port emulation
-    /// In full implementation, this will route to specific controllers
-    registers: Vec<u8>,
-}
-
-impl Ports {
-    /// Port region size (0xE00000 to 0xFFFFFF = 2MB)
-    const SIZE: usize = 0x200000;
-
-    /// Create new port controller
-    pub fn new() -> Self {
-        Self {
-            registers: vec![0x00; Self::SIZE],
-        }
-    }
-
-    /// Read from a memory-mapped port
-    ///
-    /// # Arguments
-    /// * `addr` - Address relative to port region start (0xE00000)
-    pub fn read(&self, addr: u32) -> u8 {
-        let offset = (addr as usize) % Self::SIZE;
-        self.registers[offset]
-    }
-
-    /// Write to a memory-mapped port
-    ///
-    /// # Arguments
-    /// * `addr` - Address relative to port region start
-    /// * `value` - Byte to write
-    pub fn write(&mut self, addr: u32, value: u8) {
-        let offset = (addr as usize) % Self::SIZE;
-        self.registers[offset] = value;
-    }
-
-    /// Reset all ports to default state
-    pub fn reset(&mut self) {
-        self.registers.fill(0x00);
-    }
-}
-
-impl Default for Ports {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Re-export Peripherals as Ports for backward compatibility
+pub use crate::peripherals::Peripherals as Ports;
 
 #[cfg(test)]
 mod tests {
@@ -431,20 +382,27 @@ mod tests {
 
     mod port_tests {
         use super::*;
+        use crate::peripherals::{KEYPAD_COLS, KEYPAD_ROWS};
+
+        fn empty_keys() -> [[bool; KEYPAD_COLS]; KEYPAD_ROWS] {
+            [[false; KEYPAD_COLS]; KEYPAD_ROWS]
+        }
 
         #[test]
         fn test_read_write() {
             let mut ports = Ports::new();
+            let keys = empty_keys();
             ports.write(0x1000, 0xAB);
-            assert_eq!(ports.read(0x1000), 0xAB);
+            assert_eq!(ports.read(0x1000, &keys), 0xAB);
         }
 
         #[test]
         fn test_reset() {
             let mut ports = Ports::new();
+            let keys = empty_keys();
             ports.write(0x100, 0xFF);
             ports.reset();
-            assert_eq!(ports.read(0x100), 0x00);
+            assert_eq!(ports.read(0x100, &keys), 0x00);
         }
     }
 }
