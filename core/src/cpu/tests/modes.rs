@@ -863,3 +863,122 @@ fn test_z80_mode_fd_ld_iy_nn() {
 
     assert_eq!(cpu.iy & 0xFFFF, 0xFACE, "Should read from MBASE + nn");
 }
+
+#[test]
+fn test_z80_mode_rrd_uses_mbase() {
+    // RRD should access (HL) using MBASE in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0x2000;
+    cpu.a = 0x12;
+    bus.poke_byte(0xD02000, 0x34); // (HL) at MBASE + HL
+
+    // ED 67 - RRD
+    bus.poke_byte(0xD00100, 0xED);
+    bus.poke_byte(0xD00101, 0x67);
+    cpu.step(&mut bus);
+
+    // RRD: low nibble of (HL) -> low nibble of A
+    //      low nibble of A -> high nibble of (HL)
+    //      high nibble of (HL) -> low nibble of (HL)
+    assert_eq!(cpu.a, 0x14, "A should be 0x14 after RRD");
+    assert_eq!(bus.peek_byte(0xD02000), 0x23, "(HL) should be 0x23 after RRD");
+}
+
+#[test]
+fn test_z80_mode_rld_uses_mbase() {
+    // RLD should access (HL) using MBASE in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0x2000;
+    cpu.a = 0x12;
+    bus.poke_byte(0xD02000, 0x34); // (HL) at MBASE + HL
+
+    // ED 6F - RLD
+    bus.poke_byte(0xD00100, 0xED);
+    bus.poke_byte(0xD00101, 0x6F);
+    cpu.step(&mut bus);
+
+    // RLD: high nibble of (HL) -> low nibble of A
+    //      low nibble of (HL) -> high nibble of (HL)
+    //      low nibble of A -> low nibble of (HL)
+    assert_eq!(cpu.a, 0x13, "A should be 0x13 after RLD");
+    assert_eq!(bus.peek_byte(0xD02000), 0x42, "(HL) should be 0x42 after RLD");
+}
+
+#[test]
+fn test_z80_mode_jp_hl_16bit() {
+    // JP (HL) should use 16-bit HL value without MBASE in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0x1234;
+
+    // E9 - JP (HL)
+    bus.poke_byte(0xD00100, 0xE9);
+    cpu.step(&mut bus);
+
+    // PC should be 0x1234, not 0xD01234
+    assert_eq!(cpu.pc, 0x1234, "JP (HL) should set PC to HL value (16-bit)");
+}
+
+#[test]
+fn test_z80_mode_jp_ix_16bit() {
+    // JP (IX) should use 16-bit IX value in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.ix = 0x5678;
+
+    // DD E9 - JP (IX)
+    bus.poke_byte(0xD00100, 0xDD);
+    bus.poke_byte(0xD00101, 0xE9);
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.pc, 0x5678, "JP (IX) should set PC to IX value (16-bit)");
+}
+
+#[test]
+fn test_z80_mode_ld_sp_hl() {
+    // LD SP,HL should copy HL to SP (16-bit in Z80 mode)
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0xABCD;
+
+    // F9 - LD SP,HL
+    bus.poke_byte(0xD00100, 0xF9);
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.sp, 0xABCD, "SP should equal HL value");
+}
+
+#[test]
+fn test_z80_mode_ex_sp_ix_uses_mbase() {
+    // EX (SP),IX should access stack memory using MBASE
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.sp = 0x4000;
+    cpu.ix = 0x1234;
+    // Store 0x5678 at stack location (MBASE + SP)
+    bus.poke_byte(0xD04000, 0x78);
+    bus.poke_byte(0xD04001, 0x56);
+
+    // DD E3 - EX (SP),IX
+    bus.poke_byte(0xD00100, 0xDD);
+    bus.poke_byte(0xD00101, 0xE3);
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.ix & 0xFFFF, 0x5678, "IX should have value from stack");
+    assert_eq!(bus.peek_byte(0xD04000), 0x34, "Stack low byte should be old IX low");
+    assert_eq!(bus.peek_byte(0xD04001), 0x12, "Stack high byte should be old IX high");
+}

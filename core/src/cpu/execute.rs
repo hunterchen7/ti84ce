@@ -84,7 +84,7 @@ impl Cpu {
                     self.set_flag_n(false);
                     self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
 
-                    self.hl = self.mask_addr(result);
+                    self.hl = self.wrap_pc(result);
                     11
                 }
             }
@@ -393,12 +393,12 @@ impl Cpu {
                         }
                         2 => {
                             // JP (HL)
-                            self.pc = self.hl;
+                            self.pc = self.wrap_pc(self.hl);
                             4
                         }
                         3 => {
                             // LD SP,HL
-                            self.sp = self.hl;
+                            self.sp = self.wrap_pc(self.hl);
                             6
                         }
                         _ => 4,
@@ -739,7 +739,7 @@ impl Cpu {
                     // Overflow: different sign inputs, and result has same sign as subtrahend
                     let overflow = ((hl ^ rp) & sign_bit != 0) && ((hl ^ result) & sign_bit != 0);
 
-                    self.hl = self.mask_addr(result);
+                    self.hl = self.wrap_pc(result);
 
                     self.f = 0;
                     self.set_flag_s((self.hl >> (if self.adl { 23 } else { 15 })) & 1 != 0);
@@ -771,7 +771,7 @@ impl Cpu {
                     let overflow = ((hl ^ rp) & sign_bit == 0) && ((hl ^ result) & sign_bit != 0);
                     let max = if self.adl { 0xFFFFFF } else { 0xFFFF };
 
-                    self.hl = self.mask_addr(result);
+                    self.hl = self.wrap_pc(result);
 
                     self.f = 0;
                     self.set_flag_s((self.hl >> (if self.adl { 23 } else { 15 })) & 1 != 0);
@@ -893,10 +893,11 @@ impl Cpu {
                     }
                     4 => {
                         // RRD
-                        let mem = bus.read_byte(self.hl);
+                        let addr = self.mask_addr(self.hl);
+                        let mem = bus.read_byte(addr);
                         let new_mem = (self.a << 4) | (mem >> 4);
                         self.a = (self.a & 0xF0) | (mem & 0x0F);
-                        bus.write_byte(self.hl, new_mem);
+                        bus.write_byte(addr, new_mem);
 
                         self.set_sz_flags(self.a);
                         self.set_flag_h(false);
@@ -906,10 +907,11 @@ impl Cpu {
                     }
                     5 => {
                         // RLD
-                        let mem = bus.read_byte(self.hl);
+                        let addr = self.mask_addr(self.hl);
+                        let mem = bus.read_byte(addr);
                         let new_mem = (mem << 4) | (self.a & 0x0F);
                         self.a = (self.a & 0xF0) | (mem >> 4);
-                        bus.write_byte(self.hl, new_mem);
+                        bus.write_byte(addr, new_mem);
 
                         self.set_sz_flags(self.a);
                         self.set_flag_h(false);
@@ -1310,9 +1312,9 @@ impl Cpu {
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
 
                         if use_ix {
-                            self.ix = self.mask_addr(result);
+                            self.ix = self.wrap_pc(result);
                         } else {
-                            self.iy = self.mask_addr(result);
+                            self.iy = self.wrap_pc(result);
                         }
                         15
                     } else {
@@ -1327,9 +1329,9 @@ impl Cpu {
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
 
                         if use_ix {
-                            self.ix = self.mask_addr(result);
+                            self.ix = self.wrap_pc(result);
                         } else {
-                            self.iy = self.mask_addr(result);
+                            self.iy = self.wrap_pc(result);
                         }
                         15
                     }
@@ -1381,17 +1383,17 @@ impl Cpu {
                     if q == 0 {
                         // INC IX/IY
                         if use_ix {
-                            self.ix = self.mask_addr(self.ix.wrapping_add(1));
+                            self.ix = self.wrap_pc(self.ix.wrapping_add(1));
                         } else {
-                            self.iy = self.mask_addr(self.iy.wrapping_add(1));
+                            self.iy = self.wrap_pc(self.iy.wrapping_add(1));
                         }
                         10
                     } else {
                         // DEC IX/IY
                         if use_ix {
-                            self.ix = self.mask_addr(self.ix.wrapping_sub(1));
+                            self.ix = self.wrap_pc(self.ix.wrapping_sub(1));
                         } else {
-                            self.iy = self.mask_addr(self.iy.wrapping_sub(1));
+                            self.iy = self.wrap_pc(self.iy.wrapping_sub(1));
                         }
                         10
                     }
@@ -1586,13 +1588,13 @@ impl Cpu {
                         2 => {
                             // JP (IX)/(IY)
                             let index_reg = if use_ix { self.ix } else { self.iy };
-                            self.pc = index_reg;
+                            self.pc = self.wrap_pc(index_reg);
                             8
                         }
                         3 => {
                             // LD SP,IX/IY
                             let index_reg = if use_ix { self.ix } else { self.iy };
-                            self.sp = index_reg;
+                            self.sp = self.wrap_pc(index_reg);
                             10
                         }
                         _ => 4,
@@ -1620,16 +1622,17 @@ impl Cpu {
                     }
                     4 => {
                         // EX (SP),IX/IY
+                        let sp_addr = self.mask_addr(self.sp);
                         let sp_val = if self.adl {
-                            bus.read_addr24(self.sp)
+                            bus.read_addr24(sp_addr)
                         } else {
-                            bus.read_word(self.sp) as u32
+                            bus.read_word(sp_addr) as u32
                         };
                         let index_reg = if use_ix { self.ix } else { self.iy };
                         if self.adl {
-                            bus.write_addr24(self.sp, index_reg);
+                            bus.write_addr24(sp_addr, index_reg);
                         } else {
-                            bus.write_word(self.sp, index_reg as u16);
+                            bus.write_word(sp_addr, index_reg as u16);
                         }
                         if use_ix {
                             self.ix = sp_val;
