@@ -706,7 +706,9 @@ impl Cpu {
     pub fn execute_ed_x0(&mut self, bus: &mut Bus, y: u8, z: u8) -> u32 {
         match z {
             0 => {
-                // IN0 r,(n) - read from port 0xFFnn00 (eZ80 mapped I/O)
+                // IN0 r,(n) - read from port address 0xFF00nn (eZ80 mapped I/O)
+                // The port byte n maps to address 0xFF0000 + n, which corresponds to
+                // the control ports region at 0xE000nn (aliased at 0xFF00nn).
                 let port = self.fetch_byte(bus) as u32;
                 let addr = 0xFF0000 | port;
                 let val = bus.read_byte(addr);
@@ -721,7 +723,9 @@ impl Cpu {
                 12
             }
             1 => {
-                // OUT0 (n),r - write to port 0xFFnn00 (eZ80 mapped I/O)
+                // OUT0 (n),r - write to port address 0xFF00nn (eZ80 mapped I/O)
+                // The port byte n maps to address 0xFF0000 + n, which corresponds to
+                // the control ports region at 0xE000nn (aliased at 0xFF00nn).
                 let port = self.fetch_byte(bus) as u32;
                 let addr = 0xFF0000 | port;
                 let val = self.get_reg8(y, bus);

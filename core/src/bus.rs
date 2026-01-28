@@ -15,7 +15,6 @@
 //! Reference: CEmu (https://github.com/CE-Programming/CEmu)
 
 use crate::memory::{addr, Flash, FlashError, Ports, Ram};
-use crate::peripherals::{KEYPAD_COLS, KEYPAD_ROWS};
 
 /// Bus access type for debugging/tracing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,8 +82,6 @@ pub struct Bus {
     rng: BusRng,
     /// Cycle counter for timing
     cycles: u64,
-    /// Keypad state for peripheral reads
-    key_state: [[bool; KEYPAD_COLS]; KEYPAD_ROWS],
 }
 
 impl Bus {
@@ -105,7 +102,6 @@ impl Bus {
             ports: Ports::new(),
             rng: BusRng::new(),
             cycles: 0,
-            key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
         }
     }
 
@@ -151,7 +147,7 @@ impl Bus {
             }
             MemoryRegion::Ports => {
                 self.cycles += Self::PORT_READ_CYCLES;
-                self.ports.read(addr - addr::PORT_START, &self.key_state)
+                self.ports.read(addr - addr::PORT_START, self.ports.key_state())
             }
             MemoryRegion::Unmapped => {
                 self.cycles += Self::UNMAPPED_CYCLES;
@@ -243,7 +239,7 @@ impl Bus {
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.ram.read(addr - addr::RAM_START)
             }
-            MemoryRegion::Ports => self.ports.read(addr - addr::PORT_START, &self.key_state),
+            MemoryRegion::Ports => self.ports.read(addr - addr::PORT_START, self.ports.key_state()),
             MemoryRegion::Unmapped => 0x00,
         }
     }
@@ -297,22 +293,17 @@ impl Bus {
         self.ports.reset();
         self.cycles = 0;
         self.rng = BusRng::new();
-        self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
         // Note: Flash is NOT reset - ROM data is preserved
     }
 
     /// Set key state for peripheral reads
     pub fn set_key(&mut self, row: usize, col: usize, pressed: bool) {
-        if row < KEYPAD_ROWS && col < KEYPAD_COLS {
-            self.key_state[row][col] = pressed;
-            // Also update peripherals' internal key_state
-            self.ports.set_key(row, col, pressed);
-        }
+        self.ports.set_key(row, col, pressed);
     }
 
-    /// Get key state reference
-    pub fn key_state(&self) -> &[[bool; KEYPAD_COLS]; KEYPAD_ROWS] {
-        &self.key_state
+    /// Get key state reference (delegates to peripherals)
+    pub fn key_state(&self) -> &[[bool; crate::peripherals::KEYPAD_COLS]; crate::peripherals::KEYPAD_ROWS] {
+        self.ports.key_state()
     }
 
     /// Full reset including flash
