@@ -65,13 +65,12 @@ impl Cpu {
             1 => {
                 if q == 0 {
                     // LD rp,nn
+                    // Note: Cycle count doesn't differ by mode - the timing difference
+                    // comes from memory wait states when fetching the 3-byte (ADL) vs
+                    // 2-byte (Z80) immediate, which is handled by the Bus.
                     let nn = self.fetch_addr(bus);
                     self.set_rp(p, nn);
-                    if self.adl {
-                        10
-                    } else {
-                        10
-                    }
+                    10
                 } else {
                     // ADD HL,rp
                     let hl = self.hl;
@@ -379,12 +378,11 @@ impl Cpu {
                     match p {
                         0 => {
                             // RET
+                            // Note: Cycle count doesn't differ by mode - the timing difference
+                            // comes from memory wait states when popping 3 bytes (ADL) vs
+                            // 2 bytes (Z80), which is handled by the Bus.
                             self.pc = self.pop_addr(bus);
-                            if self.adl {
-                                10
-                            } else {
-                                10
-                            }
+                            10
                         }
                         1 => {
                             // EXX
@@ -1278,26 +1276,22 @@ impl Cpu {
                 if q == 0 {
                     if p == 2 {
                         // LD IX/IY,nn
+                        // Note: Cycle count doesn't differ by mode - timing difference
+                        // from fetching 3-byte vs 2-byte immediate is handled by Bus wait states.
                         let nn = self.fetch_addr(bus);
                         if use_ix {
                             self.ix = nn;
                         } else {
                             self.iy = nn;
                         }
-                        if self.adl {
-                            14
-                        } else {
-                            14
-                        }
+                        14
                     } else {
                         // LD rp,nn (not affected by prefix for BC/DE/SP)
+                        // Note: Cycle count doesn't differ by mode - timing difference
+                        // from fetching 3-byte vs 2-byte immediate is handled by Bus wait states.
                         let nn = self.fetch_addr(bus);
                         self.set_rp(p, nn);
-                        if self.adl {
-                            10
-                        } else {
-                            10
-                        }
+                        10
                     }
                 } else {
                     if p == 2 {

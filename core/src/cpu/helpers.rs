@@ -20,74 +20,77 @@ use crate::bus::Bus;
 
 impl Cpu {
     // ========== Register Accessors ==========
+    // Note: For 24-bit register pairs (BC, DE, HL), the 8-bit registers access
+    // bits 15-8 (B/D/H) and bits 7-0 (C/E/L). Bits 23-16 are not directly
+    // accessible via 8-bit register operations in Z80/eZ80 architecture.
 
-    /// Get B register (high byte of BC)
+    /// Get B register (bits 15-8 of BC)
     #[inline]
     pub fn b(&self) -> u8 {
         (self.bc >> 8) as u8
     }
 
-    /// Set B register
+    /// Set B register (bits 15-8 of BC)
     #[inline]
     pub fn set_b(&mut self, val: u8) {
         self.bc = (self.bc & 0xFF00FF) | ((val as u32) << 8);
     }
 
-    /// Get C register (low byte of BC)
+    /// Get C register (bits 7-0 of BC)
     #[inline]
     pub fn c(&self) -> u8 {
         self.bc as u8
     }
 
-    /// Set C register
+    /// Set C register (bits 7-0 of BC)
     #[inline]
     pub fn set_c(&mut self, val: u8) {
         self.bc = (self.bc & 0xFFFF00) | (val as u32);
     }
 
-    /// Get D register (high byte of DE)
+    /// Get D register (bits 15-8 of DE)
     #[inline]
     pub fn d(&self) -> u8 {
         (self.de >> 8) as u8
     }
 
-    /// Set D register
+    /// Set D register (bits 15-8 of DE)
     #[inline]
     pub fn set_d(&mut self, val: u8) {
         self.de = (self.de & 0xFF00FF) | ((val as u32) << 8);
     }
 
-    /// Get E register (low byte of DE)
+    /// Get E register (bits 7-0 of DE)
     #[inline]
     pub fn e(&self) -> u8 {
         self.de as u8
     }
 
-    /// Set E register
+    /// Set E register (bits 7-0 of DE)
     #[inline]
     pub fn set_e(&mut self, val: u8) {
         self.de = (self.de & 0xFFFF00) | (val as u32);
     }
 
-    /// Get H register (high byte of HL)
+    /// Get H register (bits 15-8 of HL)
     #[inline]
     pub fn h(&self) -> u8 {
         (self.hl >> 8) as u8
     }
 
-    /// Set H register
+    /// Set H register (bits 15-8 of HL)
     #[inline]
     pub fn set_h(&mut self, val: u8) {
         self.hl = (self.hl & 0xFF00FF) | ((val as u32) << 8);
     }
 
-    /// Get L register (low byte of HL)
+    /// Get L register (bits 7-0 of HL)
     #[inline]
     pub fn l(&self) -> u8 {
         self.hl as u8
     }
 
-    /// Set L register
+    /// Set L register (bits 7-0 of HL)
     #[inline]
     pub fn set_l(&mut self, val: u8) {
         self.hl = (self.hl & 0xFFFF00) | (val as u32);
