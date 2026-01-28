@@ -384,6 +384,50 @@ mod tests {
     }
 
     #[test]
+    fn test_clock_divider_max() {
+        let mut timer = Timer::new();
+        // Max divider bits = 7, so divider = 1 << 7 = 128
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | (7 << ctrl::CLOCK_DIV_SHIFT);
+        timer.counter = 0;
+
+        // 128 cycles = 1 tick
+        timer.tick(128);
+        assert_eq!(timer.counter, 1);
+
+        // 127 cycles = 0 ticks (accumulated)
+        timer.tick(127);
+        assert_eq!(timer.counter, 1);
+
+        // 1 more cycle = another tick (128 accumulated)
+        timer.tick(1);
+        assert_eq!(timer.counter, 2);
+    }
+
+    #[test]
+    fn test_underflow_counter_zero_ticks_one() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::USE_RESET;
+        timer.counter = 0;
+        timer.reset_value = 1000;
+
+        // counter=0, ticks=1: underflow immediately
+        // remaining = 1 - 0 = 1, counter = 1000 - 1 = 999
+        timer.tick(1);
+        assert_eq!(timer.counter, 999);
+    }
+
+    #[test]
+    fn test_underflow_counter_zero_no_reset() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE; // No USE_RESET
+        timer.counter = 0;
+
+        // counter=0, ticks=1: wraps to 0xFFFFFFFF - (1-1) = 0xFFFFFFFF
+        timer.tick(1);
+        assert_eq!(timer.counter, 0xFFFFFFFF);
+    }
+
+    #[test]
     fn test_read_write_counter() {
         let mut timer = Timer::new();
 

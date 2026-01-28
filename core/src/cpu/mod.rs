@@ -104,6 +104,9 @@ pub struct Cpu {
     pub irq_pending: bool,
     /// Pending NMI
     pub nmi_pending: bool,
+    /// ON key wake signal - wakes CPU from HALT even with interrupts disabled
+    /// This is a TI-84 CE specific feature where the ON key can always wake the calculator
+    pub on_key_wake: bool,
 }
 
 impl Cpu {
@@ -145,6 +148,7 @@ impl Cpu {
             // Interrupts
             irq_pending: false,
             nmi_pending: false,
+            on_key_wake: false,
         }
     }
 
@@ -163,6 +167,7 @@ impl Cpu {
         self.halted = false;
         self.irq_pending = false;
         self.nmi_pending = false;
+        self.on_key_wake = false;
         // Other registers are undefined after reset
     }
 
@@ -180,6 +185,17 @@ impl Cpu {
         if self.irq_pending && self.iff1 {
             self.irq_pending = false;
             return self.handle_irq(bus);
+        }
+
+        // Check for ON key wake - can wake CPU even with interrupts disabled
+        // This is a TI-84 CE specific feature
+        if self.on_key_wake {
+            self.on_key_wake = false;
+            if self.halted {
+                self.halted = false;
+                // Just wake, don't jump anywhere - execution resumes after HALT
+                return 4;
+            }
         }
 
         if self.halted {

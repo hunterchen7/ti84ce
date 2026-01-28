@@ -241,6 +241,31 @@ impl Emu {
         self.bus.set_key(row, col, down);
     }
 
+    /// Press the ON key - wakes CPU from HALT even with interrupts disabled
+    /// Also raises the ON_KEY interrupt for normal interrupt handling
+    pub fn press_on_key(&mut self) {
+        use crate::peripherals::interrupt::sources;
+
+        // Set the wake signal - this wakes CPU from HALT regardless of IFF1
+        self.cpu.on_key_wake = true;
+
+        // Also raise the ON_KEY interrupt for normal handling
+        self.bus.ports.interrupt.raise(sources::ON_KEY);
+
+        // Set irq_pending if enabled (will be handled on next step if IFF1 is set)
+        if self.bus.ports.irq_pending() {
+            self.cpu.irq_pending = true;
+        }
+    }
+
+    /// Release the ON key
+    pub fn release_on_key(&mut self) {
+        use crate::peripherals::interrupt::sources;
+
+        // Clear the raw ON_KEY state (source inactive)
+        self.bus.ports.interrupt.clear_raw(sources::ON_KEY);
+    }
+
     /// Render the current VRAM contents to the framebuffer
     /// Converts RGB565 to ARGB8888
     pub fn render_frame(&mut self) {
@@ -532,5 +557,86 @@ mod tests {
         let history = emu.dump_history();
         assert!(history.contains("NOP"));
         assert!(history.contains("HALT"));
+    }
+
+    #[test]
+    fn test_on_key_wakes_from_halt_with_di() {
+        let mut emu = Emu::new();
+        // ROM: DI (F3), HALT (76), NOP (00), NOP (00)
+        // After DI + HALT, interrupts are disabled but ON key should still wake
+        let rom = vec![0xF3, 0x76, 0x00, 0x00];
+        emu.load_rom(&rom).unwrap();
+
+        // Run until HALT
+        emu.run_cycles(100);
+        assert!(emu.cpu.halted);
+        assert!(!emu.cpu.iff1); // Interrupts are disabled
+
+        // Press ON key - should wake CPU even though interrupts are disabled
+        emu.press_on_key();
+
+        // Run some more cycles - CPU should wake and execute NOPs
+        let cycles_before = emu.total_cycles;
+        emu.run_cycles(20);
+
+        // Verify CPU woke up and executed instructions
+        assert!(!emu.cpu.halted);
+        assert!(emu.total_cycles > cycles_before);
+        assert!(emu.cpu.pc > 2); // PC moved past HALT
+    }
+
+    #[test]
+    fn test_on_key_raises_interrupt() {
+        use crate::peripherals::interrupt::sources;
+
+        let mut emu = Emu::new();
+        let rom = vec![0x00]; // NOP
+        emu.load_rom(&rom).unwrap();
+
+        // Press ON key
+        emu.press_on_key();
+
+        // ON_KEY interrupt should be raised in status
+        let status = emu.bus.ports.interrupt.read(0x00);
+        assert_eq!(status & (sources::ON_KEY as u8), sources::ON_KEY as u8);
+    }
+
+    #[test]
+    fn test_on_key_release_clears_raw() {
+        use crate::peripherals::interrupt::sources;
+
+        let mut emu = Emu::new();
+        let rom = vec![0x00]; // NOP
+        emu.load_rom(&rom).unwrap();
+
+        // Press and release ON key
+        emu.press_on_key();
+        emu.release_on_key();
+
+        // Raw state should be cleared
+        let raw = emu.bus.ports.interrupt.read(0x08); // RAW register
+        assert_eq!(raw & (sources::ON_KEY as u8), 0);
+    }
+
+    #[test]
+    fn test_regular_interrupt_cannot_wake_with_di() {
+        let mut emu = Emu::new();
+        // ROM: DI (F3), HALT (76), NOP (00)
+        let rom = vec![0xF3, 0x76, 0x00];
+        emu.load_rom(&rom).unwrap();
+
+        // Run until HALT
+        emu.run_cycles(100);
+        assert!(emu.cpu.halted);
+        assert!(!emu.cpu.iff1);
+
+        // Set regular IRQ pending - should NOT wake because IFF1 is false
+        emu.cpu.irq_pending = true;
+
+        let cycles_before = emu.total_cycles;
+        emu.run_cycles(20);
+
+        // CPU should still be halted (regular IRQ can't wake with DI)
+        assert!(emu.cpu.halted);
     }
 }

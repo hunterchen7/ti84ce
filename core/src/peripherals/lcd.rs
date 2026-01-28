@@ -117,15 +117,16 @@ impl LcdController {
             return false;
         }
 
-        self.frame_cycles += cycles;
-
-        if self.frame_cycles >= CYCLES_PER_FRAME {
-            self.frame_cycles -= CYCLES_PER_FRAME;
-            // Set VBLANK interrupt status
+        let total_cycles = self.frame_cycles as u64 + cycles as u64;
+        if total_cycles >= CYCLES_PER_FRAME as u64 {
+            self.frame_cycles = (total_cycles % CYCLES_PER_FRAME as u64) as u32;
+            // Set VBLANK interrupt status (one bit regardless of frames elapsed)
             self.int_status |= 1;
             // Return true if interrupt is enabled
             return (self.int_mask & 1) != 0;
         }
+
+        self.frame_cycles = total_cycles as u32;
 
         false
     }
@@ -246,6 +247,8 @@ mod tests {
         // Tick a full frame - should not fire interrupt
         let irq = lcd.tick(CYCLES_PER_FRAME);
         assert!(!irq);
+        assert_eq!(lcd.frame_cycles, 0);
+        assert_eq!(lcd.int_status & 1, 0);
     }
 
     #[test]
@@ -311,6 +314,61 @@ mod tests {
         assert!(!irq); // No IRQ returned
         // But status should still be set
         assert_eq!(lcd.int_status & 1, 1);
+    }
+
+    #[test]
+    fn test_vblank_exact_boundary() {
+        let mut lcd = LcdController::new();
+        lcd.control = ctrl::ENABLE;
+        lcd.int_mask = 1;
+
+        // Tick to exactly 1 cycle before frame end
+        let irq = lcd.tick(CYCLES_PER_FRAME - 1);
+        assert!(!irq);
+        assert_eq!(lcd.frame_cycles, CYCLES_PER_FRAME - 1);
+
+        // One more cycle completes the frame
+        let irq = lcd.tick(1);
+        assert!(irq);
+        assert_eq!(lcd.frame_cycles, 0); // Reset after frame
+    }
+
+    #[test]
+    fn test_tick_larger_than_frame() {
+        let mut lcd = LcdController::new();
+        lcd.control = ctrl::ENABLE;
+        lcd.int_mask = 1;
+
+        // Tick more than one frame at once - only one interrupt per tick
+        let irq = lcd.tick(CYCLES_PER_FRAME * 2 + 100);
+        assert!(irq);
+        // frame_cycles should be the remainder within the current frame
+        // (CYCLES_PER_FRAME * 2 + 100) % CYCLES_PER_FRAME = 100
+        assert_eq!(lcd.frame_cycles, 100);
+    }
+
+    #[test]
+    fn test_tick_multiple_frames_remainder_and_status() {
+        let mut lcd = LcdController::new();
+        lcd.control = ctrl::ENABLE;
+        lcd.int_mask = 1;
+
+        let irq = lcd.tick(CYCLES_PER_FRAME * 3 + 5);
+        assert!(irq);
+        assert_eq!(lcd.int_status & 1, 1);
+        assert_eq!(lcd.frame_cycles, 5);
+    }
+
+    #[test]
+    fn test_tick_multiple_frames_masked_sets_status() {
+        let mut lcd = LcdController::new();
+        lcd.control = ctrl::ENABLE;
+        lcd.int_mask = 0;
+
+        let irq = lcd.tick(CYCLES_PER_FRAME * 2 + 7);
+        assert!(!irq);
+        assert_eq!(lcd.int_status & 1, 1);
+        assert_eq!(lcd.frame_cycles, 7);
     }
 
 }
