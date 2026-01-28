@@ -79,16 +79,19 @@
 - [x] Flash controller (0xE10000) - wait states, status registers
 - [ ] Visible OS screen
 
-**Current Status (305 tests passing):**
+**Current Status (307 tests passing):**
 - ROM executes ~4000 cycles of initialization
 - Sets up stack, interrupt mode, CPU speed
 - Writes 0x10 to power port then HALTs at 0x001414
-- ON key can now wake CPU from HALT even with interrupts disabled
+- ON key can wake CPU from HALT even with interrupts disabled
 - Flash controller returns ready status for ROM boot
+- Interrupt sources now match CEmu (KEYPAD=10, LCD=11, WAKE=19)
+- Power port bit 4 always reads as 1 (power stable)
+- ROM wakes from HALT but loops back (4513 cycles per wake)
 
 **Next Steps:**
-1. Investigate what else is needed for ROM to progress past HALT
-2. Investigate CEmu for any other required hardware for early boot
+1. Investigate what condition ROM checks before proceeding past HALT loop
+2. Compare execution trace with CEmu to identify missing hardware behavior
 
 ## Milestone 6: Persistence
 
