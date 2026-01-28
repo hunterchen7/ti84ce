@@ -75,20 +75,20 @@
 - [x] Control ports (0xE00000) - CPU speed, power, flash unlock
 - [x] Peripheral tick integration in emulator loop
 - [x] render_frame() for RGB565 → ARGB8888 conversion
-- [ ] ON key wake-from-HALT (special non-maskable wake signal)
-- [ ] Flash controller (0xE10000) - wait states, status registers
+- [x] ON key wake-from-HALT (special non-maskable wake signal)
+- [x] Flash controller (0xE10000) - wait states, status registers
 - [ ] Visible OS screen
 
-**Current Status (234 tests passing):**
+**Current Status (299 tests passing):**
 - ROM executes ~4000 cycles of initialization
 - Sets up stack, interrupt mode, CPU speed
 - Writes 0x10 to power port then HALTs at 0x001414
-- HALT is with interrupts DISABLED - waiting for ON key wake
+- ON key can now wake CPU from HALT even with interrupts disabled
+- Flash controller returns ready status for ROM boot
 
 **Next Steps:**
-1. Implement ON key wake-from-HALT mechanism (ON key can wake CPU even with DI)
-2. Flash controller status registers (ROM may check flash ready status)
-3. Investigate CEmu for any other required hardware for early boot
+1. Investigate what else is needed for ROM to progress past HALT
+2. Investigate CEmu for any other required hardware for early boot
 
 ## Milestone 6: Persistence
 
