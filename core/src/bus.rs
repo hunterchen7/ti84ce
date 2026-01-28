@@ -76,7 +76,7 @@ pub struct Bus {
     pub flash: Flash,
     /// RAM (including VRAM)
     pub ram: Ram,
-    /// Memory-mapped I/O ports
+    /// Memory-mapped I/O peripherals
     pub ports: Ports,
     /// RNG for unmapped region reads
     rng: BusRng,
@@ -147,7 +147,7 @@ impl Bus {
             }
             MemoryRegion::Ports => {
                 self.cycles += Self::PORT_READ_CYCLES;
-                self.ports.read(addr - addr::PORT_START)
+                self.ports.read(addr - addr::PORT_START, self.ports.key_state())
             }
             MemoryRegion::Unmapped => {
                 self.cycles += Self::UNMAPPED_CYCLES;
@@ -239,7 +239,7 @@ impl Bus {
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.ram.read(addr - addr::RAM_START)
             }
-            MemoryRegion::Ports => self.ports.read(addr - addr::PORT_START),
+            MemoryRegion::Ports => self.ports.read(addr - addr::PORT_START, self.ports.key_state()),
             MemoryRegion::Unmapped => 0x00,
         }
     }
@@ -294,6 +294,16 @@ impl Bus {
         self.cycles = 0;
         self.rng = BusRng::new();
         // Note: Flash is NOT reset - ROM data is preserved
+    }
+
+    /// Set key state for peripheral reads
+    pub fn set_key(&mut self, row: usize, col: usize, pressed: bool) {
+        self.ports.set_key(row, col, pressed);
+    }
+
+    /// Get key state reference (delegates to peripherals)
+    pub fn key_state(&self) -> &[[bool; crate::peripherals::KEYPAD_COLS]; crate::peripherals::KEYPAD_ROWS] {
+        self.ports.key_state()
     }
 
     /// Full reset including flash

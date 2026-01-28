@@ -24,6 +24,7 @@
 pub mod memory;
 pub mod bus;
 pub mod cpu;
+pub mod peripherals;
 mod emu;
 
 use std::ptr;

@@ -61,16 +61,34 @@
 - [x] Bus fault reporting (StopReason enum)
 - [x] ROM executes until missing hardware (HALT at 0x001414)
 
-## Milestone 5: Minimal Peripherals
+## Milestone 5: Minimal Peripherals (In Progress)
 
 **Goal:** Reach visible OS UI.
 
 **Deliverables:**
 
-- [ ] Timers and interrupts
-- [ ] Keypad matrix MMIO
-- [ ] LCD update mechanism
-- [ ] Visible OS screen and partial keypad
+- [x] Interrupt controller (0xF00000) with source tracking
+- [x] CPU interrupt dispatch (Mode 0/1/2, NMI support)
+- [x] General purpose timers (3x at 0xF20000)
+- [x] LCD controller (0xE30000) with VRAM pointer
+- [x] Keypad controller (0xF50000) with 8x8 matrix
+- [x] Control ports (0xE00000) - CPU speed, power, flash unlock
+- [x] Peripheral tick integration in emulator loop
+- [x] render_frame() for RGB565 → ARGB8888 conversion
+- [ ] ON key wake-from-HALT (special non-maskable wake signal)
+- [ ] Flash controller (0xE10000) - wait states, status registers
+- [ ] Visible OS screen
+
+**Current Status (234 tests passing):**
+- ROM executes ~4000 cycles of initialization
+- Sets up stack, interrupt mode, CPU speed
+- Writes 0x10 to power port then HALTs at 0x001414
+- HALT is with interrupts DISABLED - waiting for ON key wake
+
+**Next Steps:**
+1. Implement ON key wake-from-HALT mechanism (ON key can wake CPU even with DI)
+2. Flash controller status registers (ROM may check flash ready status)
+3. Investigate CEmu for any other required hardware for early boot
 
 ## Milestone 6: Persistence
 

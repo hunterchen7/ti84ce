@@ -170,8 +170,21 @@ impl Cpu {
 
     /// Execute one instruction, returns cycles used
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Check for NMI first (highest priority)
+        if self.nmi_pending {
+            self.nmi_pending = false;
+            return self.handle_nmi(bus);
+        }
+
+        // Check for maskable interrupt
+        if self.irq_pending && self.iff1 {
+            self.irq_pending = false;
+            return self.handle_irq(bus);
+        }
+
         if self.halted {
             // CPU is halted, just consume cycles
+            // Interrupts can wake it (handled above on next call)
             return 4;
         }
 
@@ -215,6 +228,62 @@ impl Cpu {
             3 => self.execute_x3(bus, y, z, p, q),
             _ => 4, // Should not happen
         }
+    }
+
+    /// Handle maskable interrupt (IRQ)
+    fn handle_irq(&mut self, bus: &mut Bus) -> u32 {
+        // Wake from halt
+        self.halted = false;
+
+        // Disable interrupts
+        self.iff1 = false;
+        self.iff2 = false;
+
+        match self.im {
+            InterruptMode::Mode0 => {
+                // Mode 0: Execute instruction on data bus
+                // Typically RST 38H on TI calculators
+                self.push_addr(bus, self.pc);
+                self.pc = 0x38;
+                13
+            }
+            InterruptMode::Mode1 => {
+                // Mode 1: Fixed call to 0x0038
+                self.push_addr(bus, self.pc);
+                self.pc = 0x38;
+                13
+            }
+            InterruptMode::Mode2 => {
+                // Mode 2: Vectored interrupts
+                // Vector address = (I register << 8) | data_bus_byte
+                // TI-84 CE uses 0x00 as the data bus byte
+                self.push_addr(bus, self.pc);
+                let vector_addr = ((self.i as u32) << 8) | 0x00;
+                // Read 24-bit handler address from vector table
+                self.pc = if self.adl {
+                    bus.read_addr24(vector_addr)
+                } else {
+                    let addr_with_mbase = ((self.mbase as u32) << 16) | vector_addr;
+                    bus.read_word(addr_with_mbase) as u32
+                };
+                19
+            }
+        }
+    }
+
+    /// Handle non-maskable interrupt (NMI)
+    fn handle_nmi(&mut self, bus: &mut Bus) -> u32 {
+        // Wake from halt
+        self.halted = false;
+
+        // Save IFF1 to IFF2, disable IFF1
+        self.iff2 = self.iff1;
+        self.iff1 = false;
+
+        // Jump to NMI handler at 0x0066
+        self.push_addr(bus, self.pc);
+        self.pc = 0x66;
+        11
     }
 }
 

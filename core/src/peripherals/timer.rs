@@ -1,0 +1,428 @@
+//! TI-84 Plus CE General Purpose Timers
+//!
+//! Memory-mapped at 0xF20000 (port offset 0x120000 from 0xE00000)
+//! Three timers are available, each with 0x10 bytes of registers.
+//!
+//! Timer 1: 0xF20000-0xF2000F
+//! Timer 2: 0xF20010-0xF2001F
+//! Timer 3: 0xF20020-0xF2002F
+
+/// Register offsets within each timer (relative to timer base)
+mod regs {
+    /// Counter value (32-bit, read/write)
+    pub const COUNTER: u32 = 0x00;
+    /// Reset/reload value (32-bit)
+    pub const RESET: u32 = 0x04;
+    /// Match value 1 (32-bit)
+    pub const MATCH1: u32 = 0x08;
+    /// Match value 2 (32-bit)
+    pub const MATCH2: u32 = 0x0C;
+}
+
+/// Control register bits (at offset 0x30 for all timers)
+mod ctrl {
+    /// Timer enable
+    pub const ENABLE: u8 = 1 << 0;
+    /// Count direction: 1=up, 0=down
+    pub const COUNT_UP: u8 = 1 << 1;
+    /// Interrupt on zero/overflow
+    pub const INT_ON_ZERO: u8 = 1 << 2;
+    /// Use reset value on overflow
+    pub const USE_RESET: u8 = 1 << 4;
+    /// Clock divider bits 5-7 (0=1, 1=2, 2=4, 3=8, ...)
+    pub const CLOCK_DIV_SHIFT: u8 = 5;
+    pub const CLOCK_DIV_MASK: u8 = 0x07;
+}
+
+/// A single general-purpose timer
+#[derive(Debug, Clone)]
+pub struct Timer {
+    /// Current counter value
+    counter: u32,
+    /// Reset/reload value
+    reset_value: u32,
+    /// Match value 1
+    match1: u32,
+    /// Match value 2
+    match2: u32,
+    /// Control register
+    control: u8,
+    /// Accumulated cycles (for clock division)
+    accum_cycles: u32,
+}
+
+impl Timer {
+    /// Create a new timer
+    pub fn new() -> Self {
+        Self {
+            counter: 0,
+            reset_value: 0,
+            match1: 0,
+            match2: 0,
+            control: 0,
+            accum_cycles: 0,
+        }
+    }
+
+    /// Reset the timer to initial state
+    pub fn reset(&mut self) {
+        self.counter = 0;
+        self.reset_value = 0;
+        self.match1 = 0;
+        self.match2 = 0;
+        self.control = 0;
+        self.accum_cycles = 0;
+    }
+
+    /// Check if timer is enabled
+    pub fn is_enabled(&self) -> bool {
+        self.control & ctrl::ENABLE != 0
+    }
+
+    /// Check if counting up
+    fn count_up(&self) -> bool {
+        self.control & ctrl::COUNT_UP != 0
+    }
+
+    /// Check if interrupt on zero/overflow is enabled
+    fn int_on_zero(&self) -> bool {
+        self.control & ctrl::INT_ON_ZERO != 0
+    }
+
+    /// Check if reset value should be used on overflow
+    fn use_reset(&self) -> bool {
+        self.control & ctrl::USE_RESET != 0
+    }
+
+    /// Get clock divider (1, 2, 4, 8, 16, 32, 64, 128)
+    fn clock_divider(&self) -> u32 {
+        let div_bits = (self.control >> ctrl::CLOCK_DIV_SHIFT) & ctrl::CLOCK_DIV_MASK;
+        1 << div_bits
+    }
+
+    /// Tick the timer with given CPU cycles
+    /// Returns true if an interrupt should be generated
+    pub fn tick(&mut self, cycles: u32) -> bool {
+        if !self.is_enabled() {
+            return false;
+        }
+
+        // Accumulate cycles and apply divider
+        self.accum_cycles += cycles;
+        let divider = self.clock_divider();
+        let ticks = self.accum_cycles / divider;
+        self.accum_cycles %= divider;
+
+        if ticks == 0 {
+            return false;
+        }
+
+        let mut interrupt = false;
+
+        if self.count_up() {
+            // Count up
+            let (new_val, overflow) = self.counter.overflowing_add(ticks);
+            self.counter = new_val;
+
+            if overflow {
+                // The wrapped value (new_val) represents ticks past the overflow point
+                // After reload, continue counting up from reset_value
+                if self.use_reset() {
+                    self.counter = self.reset_value.wrapping_add(new_val);
+                }
+                if self.int_on_zero() {
+                    interrupt = true;
+                }
+            }
+        } else {
+            // Count down
+            if self.counter >= ticks {
+                self.counter -= ticks;
+            } else {
+                // Underflow: counter would go below 0
+                // Calculate how many ticks remain after reaching 0:
+                // - It takes `counter` ticks to go from `counter` to 0
+                // - Remaining ticks = ticks - counter
+                // After reload, continue counting down from reset_value
+                let remaining = ticks - self.counter;
+                if self.use_reset() {
+                    self.counter = self.reset_value.wrapping_sub(remaining);
+                } else {
+                    // Wrap around from 0xFFFFFFFF
+                    self.counter = 0xFFFFFFFF_u32.wrapping_sub(remaining - 1);
+                }
+                if self.int_on_zero() {
+                    interrupt = true;
+                }
+            }
+        }
+
+        interrupt
+    }
+
+    /// Read a register byte
+    /// addr is offset within this timer (0-0x0F)
+    pub fn read(&self, addr: u32) -> u8 {
+        let reg = addr & 0x0C;
+        let byte_offset = (addr & 0x03) * 8;
+
+        let value = match reg {
+            regs::COUNTER => self.counter,
+            regs::RESET => self.reset_value,
+            regs::MATCH1 => self.match1,
+            regs::MATCH2 => self.match2,
+            _ => 0,
+        };
+
+        ((value >> byte_offset) & 0xFF) as u8
+    }
+
+    /// Write a register byte
+    /// addr is offset within this timer (0-0x0F)
+    pub fn write(&mut self, addr: u32, value: u8) {
+        let reg = addr & 0x0C;
+        let byte_offset = (addr & 0x03) * 8;
+        let mask = 0xFF_u32 << byte_offset;
+        let shifted_value = (value as u32) << byte_offset;
+
+        match reg {
+            regs::COUNTER => {
+                self.counter = (self.counter & !mask) | (shifted_value & mask);
+            }
+            regs::RESET => {
+                self.reset_value = (self.reset_value & !mask) | (shifted_value & mask);
+            }
+            regs::MATCH1 => {
+                self.match1 = (self.match1 & !mask) | (shifted_value & mask);
+            }
+            regs::MATCH2 => {
+                self.match2 = (self.match2 & !mask) | (shifted_value & mask);
+            }
+            _ => {}
+        }
+    }
+
+    /// Read control register
+    pub fn read_control(&self) -> u8 {
+        self.control
+    }
+
+    /// Write control register
+    pub fn write_control(&mut self, value: u8) {
+        self.control = value;
+    }
+}
+
+impl Default for Timer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_new() {
+        let timer = Timer::new();
+        assert!(!timer.is_enabled());
+        assert_eq!(timer.counter, 0);
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut timer = Timer::new();
+        timer.counter = 0x12345678;
+        timer.reset_value = 0x1000;
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP;
+        timer.accum_cycles = 100;
+
+        timer.reset();
+        assert_eq!(timer.counter, 0);
+        assert_eq!(timer.reset_value, 0);
+        assert_eq!(timer.control, 0);
+        assert_eq!(timer.accum_cycles, 0);
+        assert!(!timer.is_enabled());
+    }
+
+    #[test]
+    fn test_disabled_timer_no_tick() {
+        let mut timer = Timer::new();
+        timer.counter = 100;
+        // Timer is disabled by default
+
+        let irq = timer.tick(50);
+        assert!(!irq);
+        assert_eq!(timer.counter, 100); // Should not change
+    }
+
+    #[test]
+    fn test_count_up() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP;
+        timer.counter = 0;
+
+        let irq = timer.tick(100);
+        assert!(!irq);
+        assert_eq!(timer.counter, 100);
+    }
+
+    #[test]
+    fn test_count_down() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE;
+        timer.counter = 100;
+
+        let irq = timer.tick(50);
+        assert!(!irq);
+        assert_eq!(timer.counter, 50);
+    }
+
+    #[test]
+    fn test_underflow_interrupt() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::INT_ON_ZERO;
+        timer.counter = 5;
+
+        // Tick more than counter value should underflow
+        let irq = timer.tick(10);
+        assert!(irq);
+    }
+
+    #[test]
+    fn test_underflow_with_reset() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::USE_RESET;
+        timer.counter = 5;
+        timer.reset_value = 1000;
+
+        // Underflow should reload from reset value and continue counting
+        // 5 ticks to reach 0, then reload to 1000, then 5 more ticks
+        // Expected: 1000 - 5 = 995
+        timer.tick(10);
+        assert_eq!(timer.counter, 995);
+    }
+
+    #[test]
+    fn test_underflow_exact_boundary() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::USE_RESET;
+        timer.counter = 5;
+        timer.reset_value = 1000;
+
+        // 6 ticks: 5→4→3→2→1→0→(reload to 1000)→999
+        timer.tick(6);
+        assert_eq!(timer.counter, 999);
+    }
+
+    #[test]
+    fn test_underflow_no_reset_wraps() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE; // No USE_RESET flag
+        timer.counter = 5;
+
+        // 6 ticks: 5→4→3→2→1→0→(wrap to 0xFFFFFFFF)
+        timer.tick(6);
+        assert_eq!(timer.counter, 0xFFFFFFFF);
+
+        // Reset and try 10 ticks: wraps to 0xFFFFFFFF then counts down 4 more
+        timer.counter = 5;
+        timer.tick(10);
+        assert_eq!(timer.counter, 0xFFFFFFFF - 4); // 0xFFFFFFFB
+    }
+
+    #[test]
+    fn test_overflow_interrupt() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | ctrl::INT_ON_ZERO;
+        timer.counter = 0xFFFFFFFF;
+
+        let irq = timer.tick(2);
+        assert!(irq);
+    }
+
+    #[test]
+    fn test_overflow_no_interrupt_when_disabled() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP; // INT_ON_ZERO not set
+        timer.counter = 0xFFFFFFFF;
+
+        let irq = timer.tick(2);
+        assert!(!irq); // No interrupt because INT_ON_ZERO is not set
+    }
+
+    #[test]
+    fn test_clock_divider() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | (2 << ctrl::CLOCK_DIV_SHIFT);
+        timer.counter = 0;
+
+        // Divider is 4, so 8 cycles = 2 ticks
+        let irq = timer.tick(8);
+        assert!(!irq);
+        assert_eq!(timer.counter, 2);
+    }
+
+    #[test]
+    fn test_clock_divider_accumulation() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | (3 << ctrl::CLOCK_DIV_SHIFT);
+        // Divider is 8
+
+        // Tick 3 cycles - not enough for a tick
+        timer.tick(3);
+        assert_eq!(timer.counter, 0);
+
+        // Tick 5 more = 8 total, should get 1 tick
+        timer.tick(5);
+        assert_eq!(timer.counter, 1);
+
+        // Tick 17 more = 2 ticks with 1 leftover
+        timer.tick(17);
+        assert_eq!(timer.counter, 3);
+    }
+
+    #[test]
+    fn test_read_write_counter() {
+        let mut timer = Timer::new();
+
+        timer.write(0, 0x12);
+        timer.write(1, 0x34);
+        timer.write(2, 0x56);
+        timer.write(3, 0x78);
+
+        assert_eq!(timer.counter, 0x78563412);
+        assert_eq!(timer.read(0), 0x12);
+        assert_eq!(timer.read(1), 0x34);
+        assert_eq!(timer.read(2), 0x56);
+        assert_eq!(timer.read(3), 0x78);
+    }
+
+    #[test]
+    fn test_reset_on_overflow() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | ctrl::USE_RESET;
+        timer.counter = 0xFFFFFFFE;
+        timer.reset_value = 0x1000;
+
+        // Trace: 0xFFFFFFFE → 0xFFFFFFFF → 0x00000000 (overflow, reload to 0x1000) → 0x1001
+        // 2 ticks to overflow, then reload to reset_value, then 1 more tick
+        // Expected: 0x1000 + 1 = 0x1001
+        timer.tick(3);
+        assert_eq!(timer.counter, 0x1001);
+    }
+
+    #[test]
+    fn test_overflow_exact_boundary() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::COUNT_UP | ctrl::USE_RESET;
+        timer.counter = 0xFFFFFFFE;
+        timer.reset_value = 0x1000;
+
+        // Trace: 0xFFFFFFFE → 0xFFFFFFFF → 0x00000000 (overflow, reload to 0x1000)
+        // Exactly 2 ticks to overflow, wrapped value is 0, so counter = reset_value + 0
+        timer.tick(2);
+        assert_eq!(timer.counter, 0x1000);
+    }
+}

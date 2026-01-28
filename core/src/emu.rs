@@ -9,9 +9,6 @@ use crate::cpu::Cpu;
 pub const SCREEN_WIDTH: usize = 320;
 pub const SCREEN_HEIGHT: usize = 240;
 
-/// Keypad dimensions (8x8 matrix)
-const KEY_ROWS: usize = 8;
-const KEY_COLS: usize = 8;
 
 /// Number of entries in the PC/opcode history ring buffer
 const HISTORY_SIZE: usize = 64;
@@ -107,9 +104,6 @@ pub struct Emu {
     /// Framebuffer in ARGB8888 format
     framebuffer: Vec<u32>,
 
-    /// Keypad state matrix (true = pressed)
-    key_state: [[bool; KEY_COLS]; KEY_ROWS],
-
     /// ROM loaded flag
     rom_loaded: bool,
 
@@ -130,7 +124,6 @@ impl Emu {
             cpu: Cpu::new(),
             bus: Bus::new(),
             framebuffer: vec![0xFF000000; SCREEN_WIDTH * SCREEN_HEIGHT],
-            key_state: [[false; KEY_COLS]; KEY_ROWS],
             rom_loaded: false,
             history: ExecutionHistory::new(),
             last_stop: StopReason::CyclesComplete,
@@ -154,7 +147,6 @@ impl Emu {
     pub fn reset(&mut self) {
         self.cpu.reset();
         self.bus.reset();
-        self.key_state = [[false; KEY_COLS]; KEY_ROWS];
         self.history.clear();
         self.last_stop = StopReason::CyclesComplete;
         self.total_cycles = 0;
@@ -184,6 +176,11 @@ impl Emu {
 
             // Record in history
             self.history.record(pc, &opcode[..opcode_len]);
+
+            // Tick peripherals and check for interrupts
+            if self.bus.ports.tick(cycles_used) {
+                self.cpu.irq_pending = true;
+            }
 
             cycles_remaining -= cycles_used as i32;
             self.total_cycles += cycles_used as u64;
@@ -241,8 +238,38 @@ impl Emu {
 
     /// Set key state
     pub fn set_key(&mut self, row: usize, col: usize, down: bool) {
-        if row < KEY_ROWS && col < KEY_COLS {
-            self.key_state[row][col] = down;
+        self.bus.set_key(row, col, down);
+    }
+
+    /// Render the current VRAM contents to the framebuffer
+    /// Converts RGB565 to ARGB8888
+    pub fn render_frame(&mut self) {
+        let upbase = self.bus.ports.lcd.upbase();
+
+        // Read VRAM and convert to ARGB8888
+        for y in 0..SCREEN_HEIGHT {
+            for x in 0..SCREEN_WIDTH {
+                let pixel_offset = (y * SCREEN_WIDTH + x) * 2;
+                let vram_addr = upbase + pixel_offset as u32;
+
+                // Read RGB565 pixel (little-endian)
+                let lo = self.bus.peek_byte(vram_addr) as u16;
+                let hi = self.bus.peek_byte(vram_addr + 1) as u16;
+                let rgb565 = lo | (hi << 8);
+
+                // Convert RGB565 to ARGB8888
+                let r = ((rgb565 >> 11) & 0x1F) as u8;
+                let g = ((rgb565 >> 5) & 0x3F) as u8;
+                let b = (rgb565 & 0x1F) as u8;
+
+                // Expand to 8-bit (replicate high bits into low bits)
+                let r8 = (r << 3) | (r >> 2);
+                let g8 = (g << 2) | (g >> 4);
+                let b8 = (b << 3) | (b >> 2);
+
+                let argb = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+                self.framebuffer[y * SCREEN_WIDTH + x] = argb;
+            }
         }
     }
 
@@ -274,6 +301,11 @@ impl Emu {
     /// Get total cycles executed
     pub fn total_cycles(&self) -> u64 {
         self.total_cycles
+    }
+
+    /// Peek at a memory byte without affecting emulation state
+    pub fn peek_byte(&self, addr: u32) -> u8 {
+        self.bus.peek_byte(addr)
     }
 
     /// Dump execution history for debugging
@@ -447,9 +479,9 @@ mod tests {
     fn test_key_state() {
         let mut emu = Emu::new();
         emu.set_key(0, 0, true);
-        assert!(emu.key_state[0][0]);
+        assert!(emu.bus.key_state()[0][0]);
         emu.set_key(0, 0, false);
-        assert!(!emu.key_state[0][0]);
+        assert!(!emu.bus.key_state()[0][0]);
     }
 
     #[test]
@@ -485,7 +517,7 @@ mod tests {
         emu.reset();
 
         assert_eq!(emu.cpu.pc, 0);
-        assert!(!emu.key_state[1][1]);
+        assert!(!emu.bus.key_state()[1][1]);
         assert_eq!(emu.total_cycles, 0);
     }
 
