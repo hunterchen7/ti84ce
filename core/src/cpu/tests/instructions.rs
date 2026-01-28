@@ -1145,6 +1145,54 @@ fn test_add_ix_bc() {
 }
 
 #[test]
+fn test_add_ix_bc_flags_f3_f5_adl() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    // ADL mode: F3/F5 from high byte of 24-bit result
+    cpu.ix = 0x280000;
+    cpu.bc = 0x000100;
+    cpu.f = 0;
+
+    // ADD IX,BC (DD 09)
+    bus.poke_byte(0, 0xDD);
+    bus.poke_byte(1, 0x09);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.ix, 0x280100);
+    assert_eq!(
+        cpu.f & (flags::F5 | flags::F3),
+        flags::F5 | flags::F3,
+        "ADL: F3/F5 should match high byte (0x28)"
+    );
+}
+
+#[test]
+fn test_add_iy_iy_flags_f3_f5_z80() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.adl = false;
+    cpu.mbase = 0x00; // Clear MBASE so PC=0 reads from address 0
+    cpu.iy = 0x1000;
+    cpu.f = flags::F5 | flags::F3; // ensure flags get overwritten
+
+    // ADD IY,IY (FD 29)
+    bus.poke_byte(0, 0xFD);
+    bus.poke_byte(1, 0x29);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.iy, 0x2000);
+    assert_eq!(
+        cpu.f & (flags::F5 | flags::F3),
+        flags::F5,
+        "Z80: F3/F5 should match high byte (0x20)"
+    );
+}
+
+#[test]
 fn test_inc_ix() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();

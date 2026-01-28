@@ -1295,7 +1295,7 @@ impl Cpu {
                     }
                 } else {
                     if p == 2 {
-                        // ADD IX/IY,rp
+                        // ADD IX/IY,IX/IY
                         let index_reg = if use_ix { self.ix } else { self.iy };
                         let rp = self.get_index_rp(p, use_ix);
                         let result = index_reg.wrapping_add(rp);
@@ -1305,11 +1305,20 @@ impl Cpu {
                         self.set_flag_n(false);
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
 
+                        let wrapped = self.wrap_pc(result);
                         if use_ix {
-                            self.ix = self.wrap_pc(result);
+                            self.ix = wrapped;
                         } else {
-                            self.iy = self.wrap_pc(result);
+                            self.iy = wrapped;
                         }
+                        // F3/F5 from high byte of result
+                        let high_byte = if self.adl {
+                            (wrapped >> 16) as u8
+                        } else {
+                            (wrapped >> 8) as u8
+                        };
+                        self.f =
+                            (self.f & !(flags::F5 | flags::F3)) | (high_byte & (flags::F5 | flags::F3));
                         15
                     } else {
                         // ADD IX/IY,rp (for BC/DE/SP)
@@ -1322,11 +1331,20 @@ impl Cpu {
                         self.set_flag_n(false);
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
 
+                        let wrapped = self.wrap_pc(result);
                         if use_ix {
-                            self.ix = self.wrap_pc(result);
+                            self.ix = wrapped;
                         } else {
-                            self.iy = self.wrap_pc(result);
+                            self.iy = wrapped;
                         }
+                        // F3/F5 from high byte of result
+                        let high_byte = if self.adl {
+                            (wrapped >> 16) as u8
+                        } else {
+                            (wrapped >> 8) as u8
+                        };
+                        self.f =
+                            (self.f & !(flags::F5 | flags::F3)) | (high_byte & (flags::F5 | flags::F3));
                         15
                     }
                 }

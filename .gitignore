@@ -17,6 +17,10 @@ Cargo.lock
 *.a
 *.dylib
 
+# ROM files (copyrighted, must be user-provided)
+*.rom
+*.ROM
+
 # OS
 .DS_Store
 Thumbs.db

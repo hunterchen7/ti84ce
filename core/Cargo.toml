@@ -7,7 +7,7 @@ license = "MIT"
 
 [lib]
 name = "emu_core"
-crate-type = ["staticlib"]
+crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 
