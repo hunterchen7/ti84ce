@@ -79,7 +79,7 @@
 - [x] Flash controller (0xE10000) - wait states, status registers
 - [ ] Visible OS screen
 
-**Current Status (299 tests passing):**
+**Current Status (305 tests passing):**
 - ROM executes ~4000 cycles of initialization
 - Sets up stack, interrupt mode, CPU speed
 - Writes 0x10 to power port then HALTs at 0x001414
