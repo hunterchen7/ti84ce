@@ -14,6 +14,10 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 - Use minimal ROM buffers in tests - flash defaults to 0xFF, so only include the bytes actually needed
 - **Always assert exact expected values** - When testing arithmetic, counters, or state transitions, calculate and assert the specific expected result, not just a range or property. Weak assertions like `assert!(x < 1000)` can pass for both correct and buggy implementations. Instead, trace through the expected behavior step-by-step and use `assert_eq!(x, 995)`.
 
+## Workflow
+
+- **Update milestones when completing features** - After implementing a feature from [docs/milestones.md](docs/milestones.md), mark it as complete (`[x]`) and update the test count and status section.
+
 ## Architecture
 
 - See [docs/architecture.md](docs/architecture.md) for system design
