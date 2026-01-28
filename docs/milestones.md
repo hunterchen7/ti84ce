@@ -25,24 +25,15 @@
 - [x] Pseudo-random values for unmapped reads
 - [x] peek/poke debug access without cycle cost
 
-## Milestone 3: eZ80 Interpreter Foundation ✓
+## Milestone 3: eZ80 Interpreter Foundation
 **Goal:** Implement CPU instruction execution.
 
 **Deliverables:**
-- [x] Register file and flags (A, F, BC, DE, HL, IX, IY + shadows)
-- [x] PC/SP and interrupt state (IFF1/IFF2, IM, ADL mode)
-- [x] Core instruction subset:
-  - LD r,r' / LD r,n / LD rp,nn
-  - ADD/ADC/SUB/SBC/AND/OR/XOR/CP
-  - INC/DEC (8-bit and 16-bit)
-  - JP/JR/DJNZ (conditional and unconditional)
-  - CALL/RET/RST
-  - PUSH/POP
-  - EX AF,AF' / EXX / EX DE,HL
-  - DI/EI/HALT
-  - Rotate instructions (RLCA, RRCA, RLA, RRA)
-- [x] Cycle counting (per-instruction)
-- [x] Instruction execution tests (38 CPU tests, 82 total)
+- [ ] Register file and flags
+- [ ] PC/SP and interrupt state
+- [ ] Core instruction subset (loads, arithmetic, jumps, calls, stack)
+- [ ] Cycle counting (approximate)
+- [ ] Toy program execution tests
 
 ## Milestone 4: ROM Fetch + Early Boot
 **Goal:** Execute real ROM code.

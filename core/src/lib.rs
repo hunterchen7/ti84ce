@@ -8,7 +8,6 @@
 //! The emulator is organized into several modules:
 //! - `memory`: Flash, RAM, and port memory implementations
 //! - `bus`: Address decoding and memory access routing
-//! - `cpu`: eZ80 CPU implementation
 //! - `emu`: Main emulator orchestrator
 //!
 //! # Memory Map (24-bit eZ80 address space)
@@ -23,7 +22,6 @@
 
 pub mod memory;
 pub mod bus;
-pub mod cpu;
 mod emu;
 
 use std::ptr;

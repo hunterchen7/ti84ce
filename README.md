@@ -33,34 +33,6 @@ cd android
 ./gradlew assembleDebug
 ```
 
-## Testing
-
-### Core (Rust)
-
-```bash
-cd core
-cargo test
-```
-
-This runs the test suite covering:
-- Memory subsystem (Flash, RAM, VRAM, ports)
-- Bus address decoding and wait states
-- eZ80 CPU instructions and flag behavior
-- ADL mode 24-bit operations
-- TI-84 CE memory map verification
-
-To run a specific test:
-
-```bash
-cargo test test_name
-```
-
-To see test output:
-
-```bash
-cargo test -- --nocapture
-```
-
 ## Usage
 
 1. Obtain a TI-84 Plus CE ROM file legally (dump from your own calculator)
