@@ -42,16 +42,16 @@
   - DI/EI/HALT
   - Rotate instructions (RLCA, RRCA, RLA, RRA)
 - [x] Cycle counting (per-instruction)
-- [x] Instruction execution tests (38 CPU tests, 82 total)
+- [x] Instruction execution tests (198 total, including Z80/ADL mode coverage)
 
-## Milestone 4: ROM Fetch + Early Boot
+## Milestone 4: ROM Fetch + Early Boot ✓
 **Goal:** Execute real ROM code.
 
 **Deliverables:**
-- [ ] Initial memory mapping for ROM start
-- [ ] Crash diagnostics (PC/opcode ring buffer)
-- [ ] Bus fault reporting
-- [ ] ROM executes until missing hardware
+- [x] Initial memory mapping for ROM start
+- [x] Crash diagnostics (PC/opcode ring buffer)
+- [x] Bus fault reporting (StopReason enum)
+- [x] ROM executes until missing hardware (HALT at 0x001414)
 
 ## Milestone 5: Minimal Peripherals
 **Goal:** Reach visible OS UI.

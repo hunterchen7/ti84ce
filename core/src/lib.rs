@@ -199,8 +199,9 @@ mod tests {
     #[test]
     fn test_run_cycles() {
         let emu = emu_create();
+        // Without ROM, should return 0
         let executed = emu_run_cycles(emu, 1000);
-        assert_eq!(executed, 1000);
+        assert_eq!(executed, 0);
         emu_destroy(emu);
     }
 
