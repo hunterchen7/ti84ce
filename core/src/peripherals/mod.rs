@@ -2,18 +2,21 @@
 //!
 //! This module contains the memory-mapped peripheral controllers:
 //! - Control Ports (0xE00000, 0xFF0000)
+//! - Flash Controller (0xE10000)
 //! - Interrupt Controller (0xF00000)
 //! - Timers (0xF20000)
 //! - LCD Controller (0xE30000)
 //! - Keypad Controller (0xF50000)
 
 pub mod control;
+pub mod flash;
 pub mod interrupt;
 pub mod keypad;
 pub mod lcd;
 pub mod timer;
 
 pub use control::ControlPorts;
+pub use flash::FlashController;
 pub use interrupt::InterruptController;
 pub use keypad::{KeypadController, KEYPAD_COLS, KEYPAD_ROWS};
 pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
@@ -24,6 +27,8 @@ use interrupt::sources;
 /// Port address regions (offsets from 0xE00000)
 const CONTROL_BASE: u32 = 0x000000; // 0xE00000
 const CONTROL_END: u32 = 0x000100;
+const FLASH_BASE: u32 = 0x010000; // 0xE10000
+const FLASH_END: u32 = 0x010100;
 const CONTROL_ALT_BASE: u32 = 0x1F0000; // 0xFF0000 (accessed via OUT0/IN0)
 const CONTROL_ALT_END: u32 = 0x1F0100;
 const LCD_BASE: u32 = 0x030000; // 0xE30000
@@ -40,6 +45,8 @@ const KEYPAD_END: u32 = 0x150040;
 pub struct Peripherals {
     /// Control ports (0xE00000, 0xFF0000)
     pub control: ControlPorts,
+    /// Flash controller (0xE10000)
+    pub flash: FlashController,
     /// Interrupt controller
     pub interrupt: InterruptController,
     /// Timer 1
@@ -66,6 +73,7 @@ impl Peripherals {
     pub fn new() -> Self {
         Self {
             control: ControlPorts::new(),
+            flash: FlashController::new(),
             interrupt: InterruptController::new(),
             timer1: Timer::new(),
             timer2: Timer::new(),
@@ -92,6 +100,7 @@ impl Peripherals {
     /// Reset all peripherals
     pub fn reset(&mut self) {
         self.control.reset();
+        self.flash.reset();
         self.interrupt.reset();
         self.timer1.reset();
         self.timer2.reset();
@@ -109,6 +118,9 @@ impl Peripherals {
         match addr {
             // Control Ports (0xE00000 - 0xE000FF)
             a if a >= CONTROL_BASE && a < CONTROL_END => self.control.read(a - CONTROL_BASE),
+
+            // Flash Controller (0xE10000 - 0xE100FF)
+            a if a >= FLASH_BASE && a < FLASH_END => self.flash.read(a - FLASH_BASE),
 
             // Control Ports alternate (0xFF0000 - 0xFF00FF, via OUT0/IN0)
             a if a >= CONTROL_ALT_BASE && a < CONTROL_ALT_END => {
@@ -162,6 +174,9 @@ impl Peripherals {
         match addr {
             // Control Ports (0xE00000 - 0xE000FF)
             a if a >= CONTROL_BASE && a < CONTROL_END => self.control.write(a - CONTROL_BASE, value),
+
+            // Flash Controller (0xE10000 - 0xE100FF)
+            a if a >= FLASH_BASE && a < FLASH_END => self.flash.write(a - FLASH_BASE, value),
 
             // Control Ports alternate (0xFF0000 - 0xFF00FF, via OUT0/IN0)
             a if a >= CONTROL_ALT_BASE && a < CONTROL_ALT_END => {
@@ -534,5 +549,66 @@ mod tests {
         p.write(addr, 0xCD);
         // Should read back at wrapped address
         assert_eq!(p.read(0x100, &keys), 0xCD);
+    }
+
+    #[test]
+    fn test_flash_controller_routing() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Flash controller is at 0xE10000, offset 0x010000 from 0xE00000
+        // Default state: flash is enabled
+        assert_eq!(p.read(FLASH_BASE + 0x00, &keys), 0x01); // enable
+        assert_eq!(p.read(FLASH_BASE + 0x01, &keys), 0x07); // size config
+        assert_eq!(p.read(FLASH_BASE + 0x02, &keys), 0x00); // map select
+        assert_eq!(p.read(FLASH_BASE + 0x05, &keys), 0x00); // wait states
+        assert_eq!(p.read(FLASH_BASE + 0x08, &keys), 0x00); // control
+
+        // Write to flash controller registers
+        p.write(FLASH_BASE + 0x05, 0x04); // Set wait states to 4
+        assert_eq!(p.read(FLASH_BASE + 0x05, &keys), 0x04);
+
+        // Verify via direct access
+        assert_eq!(p.flash.wait_states(), 0x04);
+        assert_eq!(p.flash.total_wait_cycles(), 10); // 6 + 4
+    }
+
+    #[test]
+    fn test_flash_controller_read_write() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Test enable register
+        p.write(FLASH_BASE + 0x00, 0x00); // Disable flash
+        assert_eq!(p.read(FLASH_BASE + 0x00, &keys), 0x00);
+        assert!(!p.flash.is_enabled());
+
+        p.write(FLASH_BASE + 0x00, 0x01); // Enable flash
+        assert_eq!(p.read(FLASH_BASE + 0x00, &keys), 0x01);
+        assert!(p.flash.is_enabled());
+
+        // Test map select register
+        p.write(FLASH_BASE + 0x02, 0x05);
+        assert_eq!(p.read(FLASH_BASE + 0x02, &keys), 0x05);
+        assert_eq!(p.flash.map_select(), 0x05);
+
+        // Test that unmapped flash registers return 0xFF
+        assert_eq!(p.read(FLASH_BASE + 0x03, &keys), 0xFF);
+        assert_eq!(p.read(FLASH_BASE + 0x04, &keys), 0xFF);
+    }
+
+    #[test]
+    fn test_flash_reset() {
+        let mut p = Peripherals::new();
+
+        // Modify flash state
+        p.flash.write(0x00, 0x00); // Disable
+        p.flash.write(0x05, 0x10); // Wait states
+        assert!(!p.flash.is_enabled());
+
+        // Reset should restore defaults
+        p.reset();
+        assert!(p.flash.is_enabled());
+        assert_eq!(p.flash.wait_states(), 0);
     }
 }
