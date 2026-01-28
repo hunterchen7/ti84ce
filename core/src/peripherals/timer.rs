@@ -137,11 +137,17 @@ impl Timer {
             if self.counter >= ticks {
                 self.counter -= ticks;
             } else {
-                // Underflow
+                // Underflow: counter would go below 0
+                // Calculate how many ticks remain after reaching 0:
+                // - It takes `counter` ticks to go from `counter` to 0
+                // - Remaining ticks = ticks - counter
+                // After reload, continue counting down from reset_value
+                let remaining = ticks - self.counter;
                 if self.use_reset() {
-                    self.counter = self.reset_value.saturating_sub(ticks - self.counter - 1);
+                    self.counter = self.reset_value.wrapping_sub(remaining);
                 } else {
-                    self.counter = 0xFFFFFFFF_u32.saturating_sub(ticks - self.counter - 1);
+                    // Wrap around from 0xFFFFFFFF
+                    self.counter = 0xFFFFFFFF_u32.wrapping_sub(remaining - 1);
                 }
                 if self.int_on_zero() {
                     interrupt = true;
@@ -289,10 +295,39 @@ mod tests {
         timer.counter = 5;
         timer.reset_value = 1000;
 
-        // Underflow should reload from reset value
+        // Underflow should reload from reset value and continue counting
+        // 5 ticks to reach 0, then reload to 1000, then 5 more ticks
+        // Expected: 1000 - 5 = 995
         timer.tick(10);
-        // After underflow, counter wraps with reset_value
-        assert!(timer.counter < 1000);
+        assert_eq!(timer.counter, 995);
+    }
+
+    #[test]
+    fn test_underflow_exact_boundary() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE | ctrl::USE_RESET;
+        timer.counter = 5;
+        timer.reset_value = 1000;
+
+        // 6 ticks: 5→4→3→2→1→0→(reload to 1000)→999
+        timer.tick(6);
+        assert_eq!(timer.counter, 999);
+    }
+
+    #[test]
+    fn test_underflow_no_reset_wraps() {
+        let mut timer = Timer::new();
+        timer.control = ctrl::ENABLE; // No USE_RESET flag
+        timer.counter = 5;
+
+        // 6 ticks: 5→4→3→2→1→0→(wrap to 0xFFFFFFFF)
+        timer.tick(6);
+        assert_eq!(timer.counter, 0xFFFFFFFF);
+
+        // Reset and try 10 ticks: wraps to 0xFFFFFFFF then counts down 4 more
+        timer.counter = 5;
+        timer.tick(10);
+        assert_eq!(timer.counter, 0xFFFFFFFF - 4); // 0xFFFFFFFB
     }
 
     #[test]
