@@ -269,14 +269,6 @@ fn test_adl_rst_pushes_24bit() {
 // ========== Z80 Mode Compatibility Tests ==========
 // These tests verify backward compatibility with Z80 code (ADL=false)
 
-/// Helper to set up CPU in Z80 mode with MBASE pointing to RAM
-fn setup_z80_mode(cpu: &mut Cpu) {
-    cpu.adl = false;
-    cpu.mbase = 0xD0; // RAM starts at 0xD00000
-    cpu.pc = 0x0100; // Typical Z80 program start
-    cpu.sp = 0xFFFF; // Top of 64KB space
-}
-
 #[test]
 fn test_z80_mode_jp_uses_mbase() {
     let mut cpu = Cpu::new();
@@ -602,4 +594,272 @@ fn test_z80_mode_inc_dec_16bit_no_mbase() {
 
     // Should wrap to 0x0000, not 0xD00000
     assert_eq!(cpu.hl & 0xFFFF, 0x0000, "HL should wrap at 16-bit boundary");
+}
+
+// ========== Z80 Mode Memory Access Tests ==========
+// These tests verify that memory operand addresses use MBASE in Z80 mode
+
+#[test]
+fn test_z80_mode_ld_a_hl_indirect() {
+    // LD A,(HL) should access MBASE + HL in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0x1234; // 16-bit address
+    // In Z80 mode, (HL) should access 0xD01234 (MBASE=0xD0)
+    bus.poke_byte(0xD01234, 0x42);
+
+    // LD A,(HL) - opcode 0x7E
+    bus.poke_byte(0xD00100, 0x7E);
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.a, 0x42, "Should read from MBASE + HL = 0xD01234");
+}
+
+#[test]
+fn test_z80_mode_ld_hl_indirect_a() {
+    // LD (HL),A should write to MBASE + HL in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0x1234;
+    cpu.a = 0x55;
+
+    // LD (HL),A - opcode 0x77
+    bus.poke_byte(0xD00100, 0x77);
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        bus.peek_byte(0xD01234),
+        0x55,
+        "Should write to MBASE + HL = 0xD01234"
+    );
+}
+
+#[test]
+fn test_z80_mode_ld_bc_indirect_a() {
+    // LD (BC),A should write to MBASE + BC in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.bc = 0x2000;
+    cpu.a = 0xAB;
+
+    // LD (BC),A - opcode 0x02
+    bus.poke_byte(0xD00100, 0x02);
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        bus.peek_byte(0xD02000),
+        0xAB,
+        "Should write to MBASE + BC = 0xD02000"
+    );
+}
+
+#[test]
+fn test_z80_mode_ld_a_bc_indirect() {
+    // LD A,(BC) should read from MBASE + BC in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.bc = 0x2000;
+    bus.poke_byte(0xD02000, 0xCD);
+
+    // LD A,(BC) - opcode 0x0A
+    bus.poke_byte(0xD00100, 0x0A);
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.a, 0xCD, "Should read from MBASE + BC = 0xD02000");
+}
+
+#[test]
+fn test_z80_mode_ld_de_indirect_a() {
+    // LD (DE),A should write to MBASE + DE in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.de = 0x3000;
+    cpu.a = 0xEF;
+
+    // LD (DE),A - opcode 0x12
+    bus.poke_byte(0xD00100, 0x12);
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        bus.peek_byte(0xD03000),
+        0xEF,
+        "Should write to MBASE + DE = 0xD03000"
+    );
+}
+
+#[test]
+fn test_z80_mode_ld_a_de_indirect() {
+    // LD A,(DE) should read from MBASE + DE in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.de = 0x3000;
+    bus.poke_byte(0xD03000, 0x99);
+
+    // LD A,(DE) - opcode 0x1A
+    bus.poke_byte(0xD00100, 0x1A);
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.a, 0x99, "Should read from MBASE + DE = 0xD03000");
+}
+
+#[test]
+fn test_z80_mode_ed_ld_nn_hl() {
+    // ED LD (nn),HL should write to MBASE + nn in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.hl = 0xBEEF;
+
+    // ED 63 nn nn - LD (nn),HL
+    bus.poke_byte(0xD00100, 0xED);
+    bus.poke_byte(0xD00101, 0x63);
+    bus.poke_byte(0xD00102, 0x00); // nn low byte
+    bus.poke_byte(0xD00103, 0x40); // nn high byte = 0x4000
+    cpu.step(&mut bus);
+
+    // Should write to 0xD04000 (MBASE + 0x4000)
+    assert_eq!(
+        bus.peek_byte(0xD04000),
+        0xEF,
+        "Low byte of HL at MBASE + nn"
+    );
+    assert_eq!(
+        bus.peek_byte(0xD04001),
+        0xBE,
+        "High byte of HL at MBASE + nn + 1"
+    );
+}
+
+#[test]
+fn test_z80_mode_ed_ld_hl_nn() {
+    // ED LD HL,(nn) should read from MBASE + nn in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    // Store 0xCAFE at 0xD04000
+    bus.poke_byte(0xD04000, 0xFE);
+    bus.poke_byte(0xD04001, 0xCA);
+
+    // ED 6B nn nn - LD HL,(nn)
+    bus.poke_byte(0xD00100, 0xED);
+    bus.poke_byte(0xD00101, 0x6B);
+    bus.poke_byte(0xD00102, 0x00);
+    bus.poke_byte(0xD00103, 0x40); // nn = 0x4000
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.hl & 0xFFFF, 0xCAFE, "Should read from MBASE + nn");
+}
+
+#[test]
+fn test_z80_mode_dd_ld_nn_ix() {
+    // DD LD (nn),IX should write to MBASE + nn in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.ix = 0x1234;
+
+    // DD 22 nn nn - LD (nn),IX
+    bus.poke_byte(0xD00100, 0xDD);
+    bus.poke_byte(0xD00101, 0x22);
+    bus.poke_byte(0xD00102, 0x00);
+    bus.poke_byte(0xD00103, 0x50); // nn = 0x5000
+    cpu.step(&mut bus);
+
+    // Should write to 0xD05000 (MBASE + 0x5000)
+    assert_eq!(
+        bus.peek_byte(0xD05000),
+        0x34,
+        "Low byte of IX at MBASE + nn"
+    );
+    assert_eq!(
+        bus.peek_byte(0xD05001),
+        0x12,
+        "High byte of IX at MBASE + nn + 1"
+    );
+}
+
+#[test]
+fn test_z80_mode_dd_ld_ix_nn() {
+    // DD LD IX,(nn) should read from MBASE + nn in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    // Store 0xDEAD at 0xD05000
+    bus.poke_byte(0xD05000, 0xAD);
+    bus.poke_byte(0xD05001, 0xDE);
+
+    // DD 2A nn nn - LD IX,(nn)
+    bus.poke_byte(0xD00100, 0xDD);
+    bus.poke_byte(0xD00101, 0x2A);
+    bus.poke_byte(0xD00102, 0x00);
+    bus.poke_byte(0xD00103, 0x50); // nn = 0x5000
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.ix & 0xFFFF, 0xDEAD, "Should read from MBASE + nn");
+}
+
+#[test]
+fn test_z80_mode_fd_ld_nn_iy() {
+    // FD LD (nn),IY should write to MBASE + nn in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    cpu.iy = 0x5678;
+
+    // FD 22 nn nn - LD (nn),IY
+    bus.poke_byte(0xD00100, 0xFD);
+    bus.poke_byte(0xD00101, 0x22);
+    bus.poke_byte(0xD00102, 0x00);
+    bus.poke_byte(0xD00103, 0x60); // nn = 0x6000
+    cpu.step(&mut bus);
+
+    // Should write to 0xD06000 (MBASE + 0x6000)
+    assert_eq!(
+        bus.peek_byte(0xD06000),
+        0x78,
+        "Low byte of IY at MBASE + nn"
+    );
+    assert_eq!(
+        bus.peek_byte(0xD06001),
+        0x56,
+        "High byte of IY at MBASE + nn + 1"
+    );
+}
+
+#[test]
+fn test_z80_mode_fd_ld_iy_nn() {
+    // FD LD IY,(nn) should read from MBASE + nn in Z80 mode
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    setup_z80_mode(&mut cpu);
+
+    // Store 0xFACE at 0xD06000
+    bus.poke_byte(0xD06000, 0xCE);
+    bus.poke_byte(0xD06001, 0xFA);
+
+    // FD 2A nn nn - LD IY,(nn)
+    bus.poke_byte(0xD00100, 0xFD);
+    bus.poke_byte(0xD00101, 0x2A);
+    bus.poke_byte(0xD00102, 0x00);
+    bus.poke_byte(0xD00103, 0x60); // nn = 0x6000
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.iy & 0xFFFF, 0xFACE, "Should read from MBASE + nn");
 }

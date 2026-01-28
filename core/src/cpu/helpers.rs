@@ -535,7 +535,7 @@ impl Cpu {
             3 => self.e(),
             4 => self.h(),
             5 => self.l(),
-            6 => bus.read_byte(self.hl), // (HL) - uses read_byte for proper cycle accounting
+            6 => bus.read_byte(self.mask_addr(self.hl)), // (HL) - apply MBASE in Z80 mode
             7 => self.a,
             _ => 0,
         }
@@ -550,7 +550,7 @@ impl Cpu {
             3 => self.set_e(val),
             4 => self.set_h(val),
             5 => self.set_l(val),
-            6 => bus.write_byte(self.hl, val), // (HL)
+            6 => bus.write_byte(self.mask_addr(self.hl), val), // (HL) - apply MBASE in Z80 mode
             7 => self.a = val,
             _ => {}
         }
@@ -568,8 +568,10 @@ impl Cpu {
     }
 
     /// Set 16/24-bit register pair by index
+    /// Note: Uses wrap_pc-style masking (no MBASE) since register values
+    /// should not have MBASE embedded - only memory addresses need MBASE
     pub(super) fn set_rp(&mut self, idx: u8, val: u32) {
-        let masked = self.mask_addr(val);
+        let masked = self.wrap_pc(val);
         match idx {
             0 => self.bc = masked,
             1 => self.de = masked,

@@ -66,7 +66,12 @@ int32_t emu_load_state(Emu* emu, const uint8_t* data, size_t len);
 core/src/
 ├── lib.rs      # C ABI exports and public interface
 ├── emu.rs      # Main emulator orchestrator
-├── cpu.rs      # eZ80 CPU implementation
+├── cpu/        # eZ80 CPU implementation
+│   ├── mod.rs      # Cpu struct, step(), module exports
+│   ├── flags.rs    # Flag bit constants
+│   ├── helpers.rs  # Register access, fetch, push/pop, ALU
+│   ├── execute.rs  # Instruction execution functions
+│   └── tests/      # CPU test suite
 ├── bus.rs      # System bus with address decoding
 └── memory.rs   # Flash, RAM, and Port implementations
 ```

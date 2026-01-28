@@ -1743,25 +1743,6 @@ fn test_dec_hl_indirect_cycle_count() {
 // These tests validate all 8 flag bits (including undocumented F3/F5)
 // Reference: ZEXALL Z80 instruction exerciser validates against real hardware
 
-/// Helper to check all flags at once for easier debugging
-#[allow(dead_code)]
-fn assert_flags(cpu: &Cpu, expected: u8, context: &str) {
-    assert_eq!(
-            cpu.f, expected,
-            "{}: flags mismatch. Expected {:08b}, got {:08b} (S={} Z={} F5={} H={} F3={} PV={} N={} C={})",
-            context,
-            expected, cpu.f,
-            if cpu.flag_s() { 1 } else { 0 },
-            if cpu.flag_z() { 1 } else { 0 },
-            if cpu.f & flags::F5 != 0 { 1 } else { 0 },
-            if cpu.flag_h() { 1 } else { 0 },
-            if cpu.f & flags::F3 != 0 { 1 } else { 0 },
-            if cpu.flag_pv() { 1 } else { 0 },
-            if cpu.flag_n() { 1 } else { 0 },
-            if cpu.flag_c() { 1 } else { 0 },
-        );
-}
-
 #[test]
 fn test_add_all_flags() {
     // Test ADD with comprehensive flag validation

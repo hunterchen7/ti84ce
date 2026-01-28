@@ -92,12 +92,12 @@ impl Cpu {
                 match (p, q) {
                     (0, 0) => {
                         // LD (BC),A
-                        bus.write_byte(self.bc, self.a);
+                        bus.write_byte(self.mask_addr(self.bc), self.a);
                         7
                     }
                     (1, 0) => {
                         // LD (DE),A
-                        bus.write_byte(self.de, self.a);
+                        bus.write_byte(self.mask_addr(self.de), self.a);
                         7
                     }
                     (2, 0) => {
@@ -792,7 +792,8 @@ impl Cpu {
             }
             3 => {
                 // LD (nn),rp / LD rp,(nn)
-                let nn = self.fetch_addr(bus);
+                let addr = self.fetch_addr(bus);
+                let nn = self.mask_addr(addr);
                 if q == 0 {
                     // LD (nn),rp
                     let rp = self.get_rp(p);
@@ -1338,7 +1339,8 @@ impl Cpu {
                 match (p, q) {
                     (2, 0) => {
                         // LD (nn),IX/IY
-                        let nn = self.fetch_addr(bus);
+                        let addr = self.fetch_addr(bus);
+                        let nn = self.mask_addr(addr);
                         let index_reg = if use_ix { self.ix } else { self.iy };
                         if self.adl {
                             bus.write_addr24(nn, index_reg);
@@ -1350,7 +1352,8 @@ impl Cpu {
                     }
                     (2, 1) => {
                         // LD IX/IY,(nn)
-                        let nn = self.fetch_addr(bus);
+                        let addr = self.fetch_addr(bus);
+                        let nn = self.mask_addr(addr);
                         let val = if self.adl {
                             bus.read_addr24(nn)
                         } else {
