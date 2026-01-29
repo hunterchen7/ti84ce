@@ -90,7 +90,7 @@
 
 ### 5c: Missing Peripheral Stubs
 - [ ] Watchdog timer (port 0x6) - basic stub
-- [ ] RTC (port 0x8) - read-only stub returning safe values
+- [x] RTC (port 0x8) - read-only stub returning safe values
 - [ ] SHA256 accelerator (port 0x2) - stub or full implementation
 - [x] SPI controller (port 0xD) - status stub returning reset values
 
@@ -105,11 +105,13 @@
 - [ ] Execution continues past RAM initialization
 - [ ] LCD shows boot screen or OS UI
 
-**Current Status (322 tests passing):**
+**Current Status (327 tests passing):**
 - Control port defaults now match CEmu (CPU speed, flash, PWR interrupt, protection)
 - Added privileged boundary register (ports 0x1D-0x1F) and is_unprivileged() check
 - Fixed battery_status, LCD enable nibble duplication, USB control masking
 - **Boot trace matches CEmu for 40,000+ steps** (full trace comparison)
+- Fixed LCD register offsets (control at 0x18, upbase at 0x10 - matches CEmu)
+- LCD properly enabled with control value 0x92D (16bpp RGB565, power on)
 - ROM boots to initialization loop, VRAM filled with white pixels
 - CPU reaches main initialization code at ~50M cycles
 
