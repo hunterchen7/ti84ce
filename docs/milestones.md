@@ -123,11 +123,18 @@
 - [x] Updated LDIR test for internal looping behavior
 
 **Key Progress:**
-- Boot trace comparison methodology documented (docs/trace-comparison.md)
-- CEmu reference clone configured for trace comparison
 - Execution trace matches CEmu for 40,001+ steps
 - VRAM is being written (screen shows all white pixels)
 - ROM is now waiting on port 0x0D (LCD enable) status
+
+**Trace Comparison Commands:**
+```bash
+# Capture emu-core trace
+cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log
+
+# Capture CEmu trace (requires cemu-ref/ clone with trace_cli)
+./cemu-ref/trace_cli > trace_cemu.log 2>&1
+```
 
 **Current Blocker:**
 ROM is stuck in a loop at PC=0x5BA9 polling port 0x0D (LCD enable).
