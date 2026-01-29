@@ -124,6 +124,10 @@ pub struct Cpu {
     pub il: bool,
     /// Whether current instruction was prefixed by a suffix opcode
     suffix: bool,
+    /// MADL - Mixed memory mode ADL
+    /// When set by STMIX, enables mixed memory mode where MBASE affects execution
+    /// Cleared by RSMIX
+    pub madl: bool,
 }
 
 impl Cpu {
@@ -172,6 +176,7 @@ impl Cpu {
             l: false,
             il: false,
             suffix: false,
+            madl: false,
         }
     }
 
@@ -196,6 +201,7 @@ impl Cpu {
         self.l = false;
         self.il = false;
         self.suffix = false;
+        self.madl = false;
         // Other registers are undefined after reset
     }
 

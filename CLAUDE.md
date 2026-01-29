@@ -27,12 +27,14 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 ## CEmu Reference
 
 CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
+
 - Repository: https://github.com/CE-Programming/CEmu
 - **Local clone**: `cemu-ref/` directory (added to .gitignore, not committed)
 
 ### CEmu Core Directory Structure (core/)
 
 **Hardware Emulation:**
+
 - `asic.c/h` - Main ASIC orchestrator, initializes port_map array with 16 device handlers
 - `cpu.c/h` - eZ80 CPU implementation
 - `control.c/h` - Control ports (0xFF00xx via OUT0/IN0 instructions)
@@ -46,77 +48,80 @@ CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
 - `uart.c/h` - Serial port emulation
 
 **Memory:**
+
 - `mem.c/h` - Memory bus routing (flash/RAM/ports)
 - `bus.c/h` - Bus operations
 
 **Debug:**
+
 - `debug/` - Debugger and disassembler utilities
 
 ### Implementation Status
 
-| CEmu Component | Our Status | Notes |
-|----------------|------------|-------|
-| `asic.c` | ✅ Equivalent | Our `Ports` struct in peripherals/mod.rs serves same role |
-| `cpu.c` | ✅ Implemented | core/src/cpu/ directory |
-| `control.c` | ✅ Implemented | peripherals/control.rs |
-| `flash.c` | ✅ Implemented | peripherals/flash.rs |
-| `lcd.c` | ✅ Implemented | peripherals/lcd.rs |
-| `timers.c` | ✅ Implemented | peripherals/timers.rs |
-| `keypad.c` | ✅ Implemented | peripherals/keypad.rs |
-| `interrupt.c` | ✅ Implemented | peripherals/interrupt.rs |
-| `mem.c` | ⚠️ Partial | Memory protection checks disabled |
-| `backlight.c` | ❌ Stub | Not needed for boot |
-| `misc.c` | ❌ Missing | Watchdog timer, power events |
-| `realclock.c` | ❌ Missing | RTC - may need stub for boot |
-| `sha256.c` | ❌ Missing | SHA256 accelerator |
-| `spi.c` | ❌ Missing | SPI bus |
-| `uart.c` | ❌ Missing | Serial port |
-| `usb/` | ❌ Missing | USB controller |
+| CEmu Component | Our Status     | Notes                                                     |
+| -------------- | -------------- | --------------------------------------------------------- |
+| `asic.c`       | ✅ Equivalent  | Our `Ports` struct in peripherals/mod.rs serves same role |
+| `cpu.c`        | ✅ Implemented | core/src/cpu/ directory                                   |
+| `control.c`    | ✅ Implemented | peripherals/control.rs                                    |
+| `flash.c`      | ✅ Implemented | peripherals/flash.rs                                      |
+| `lcd.c`        | ✅ Implemented | peripherals/lcd.rs                                        |
+| `timers.c`     | ✅ Implemented | peripherals/timers.rs                                     |
+| `keypad.c`     | ✅ Implemented | peripherals/keypad.rs                                     |
+| `interrupt.c`  | ✅ Implemented | peripherals/interrupt.rs                                  |
+| `mem.c`        | ⚠️ Partial     | Memory protection checks disabled                         |
+| `backlight.c`  | ❌ Stub        | Not needed for boot                                       |
+| `misc.c`       | ❌ Missing     | Watchdog timer, power events                              |
+| `realclock.c`  | ❌ Missing     | RTC - may need stub for boot                              |
+| `sha256.c`     | ❌ Missing     | SHA256 accelerator                                        |
+| `spi.c`        | ❌ Missing     | SPI bus                                                   |
+| `uart.c`       | ❌ Missing     | Serial port                                               |
+| `usb/`         | ❌ Missing     | USB controller                                            |
 
 ### TI-84 CE Memory Map
 
-| Address Range     | Device              | CEmu File    |
-|-------------------|---------------------|--------------|
-| 0x000000-0x3FFFFF | Flash (4MB)         | flash.c      |
-| 0xD00000-0xD657FF | RAM (256KB+VRAM)    | mem.c        |
-| 0xE00000-0xE0FFFF | Control ports       | control.c    |
-| 0xE10000-0xE1FFFF | Flash controller    | flash.c      |
-| 0xE30000-0xE300FF | LCD controller      | lcd.c        |
-| 0xF00000-0xF0001F | Interrupt controller| interrupt.c  |
-| 0xF20000-0xF2003F | Timers (3x GPT)     | timers.c     |
-| 0xF50000-0xF5003F | Keypad              | keypad.c     |
-| 0xFF0000-0xFF00FF | Control ports (OUT0)| control.c    |
+| Address Range     | Device               | CEmu File   |
+| ----------------- | -------------------- | ----------- |
+| 0x000000-0x3FFFFF | Flash (4MB)          | flash.c     |
+| 0xD00000-0xD657FF | RAM (256KB+VRAM)     | mem.c       |
+| 0xE00000-0xE0FFFF | Control ports        | control.c   |
+| 0xE10000-0xE1FFFF | Flash controller     | flash.c     |
+| 0xE30000-0xE300FF | LCD controller       | lcd.c       |
+| 0xF00000-0xF0001F | Interrupt controller | interrupt.c |
+| 0xF20000-0xF2003F | Timers (3x GPT)      | timers.c    |
+| 0xF50000-0xF5003F | Keypad               | keypad.c    |
+| 0xFF0000-0xFF00FF | Control ports (OUT0) | control.c   |
 
 ### Control Ports (0xFF00xx / 0xE000xx)
 
 Accessed via OUT0/IN0 instructions or direct memory access:
 
-| Port | Function                    |
-|------|-----------------------------|
-| 0x00 | Power control, battery      |
-| 0x01 | CPU speed (6/12/24/48 MHz)  |
-| 0x02 | Battery status readout      |
-| 0x03 | Device type, serial flash   |
-| 0x05 | Control flags               |
-| 0x06 | Protected ports unlock      |
-| 0x08 | Fixed value (0x7F)          |
-| 0x0D | LCD enable/disable          |
-| 0x0F | USB status                  |
-| 0x1C | Fixed value (0x80)          |
-| 0x28 | Flash unlock status         |
+| Port | Function                   |
+| ---- | -------------------------- |
+| 0x00 | Power control, battery     |
+| 0x01 | CPU speed (6/12/24/48 MHz) |
+| 0x02 | Battery status readout     |
+| 0x03 | Device type, serial flash  |
+| 0x05 | Control flags              |
+| 0x06 | Protected ports unlock     |
+| 0x08 | Fixed value (0x7F)         |
+| 0x0D | LCD enable/disable         |
+| 0x0F | USB status                 |
+| 0x1C | Fixed value (0x80)         |
+| 0x28 | Flash unlock status        |
 
 ### Flash Controller Ports (0xE10000)
 
-| Offset | Function                    |
-|--------|-----------------------------|
-| 0x00   | Flash enable                |
-| 0x01   | Flash size config           |
-| 0x02   | Flash map selection         |
-| 0x05   | Wait states                 |
+| Offset | Function            |
+| ------ | ------------------- |
+| 0x00   | Flash enable        |
+| 0x01   | Flash size config   |
+| 0x02   | Flash map selection |
+| 0x05   | Wait states         |
 
 ### Boot Sequence Notes
 
 The ROM boot sequence:
+
 1. Disables interrupts (DI)
 2. Configures control ports via OUT0 instructions
 3. Sets up memory protection boundaries
