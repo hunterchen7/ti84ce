@@ -11,6 +11,9 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 
+[dev-dependencies]
+chrono = "0.4"
+
 [features]
 default = []
 

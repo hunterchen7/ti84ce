@@ -213,7 +213,7 @@ fn test_adl_mode_index_registers() {
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0x7E);
     bus.poke_byte(2, 0x05);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.a, 0x42, "IX should use full 24-bit address");
 
@@ -225,7 +225,7 @@ fn test_adl_mode_index_registers() {
     bus.poke_byte(3, 0xFD);
     bus.poke_byte(4, 0x7E);
     bus.poke_byte(5, 0xFB); // -5 as signed byte
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(
         cpu.a, 0x77,
@@ -786,7 +786,7 @@ fn test_z80_mode_dd_ld_nn_ix() {
     bus.poke_byte(0xD00101, 0x22);
     bus.poke_byte(0xD00102, 0x00);
     bus.poke_byte(0xD00103, 0x50); // nn = 0x5000
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     // Should write to 0xD05000 (MBASE + 0x5000)
     assert_eq!(
@@ -817,7 +817,7 @@ fn test_z80_mode_dd_ld_ix_nn() {
     bus.poke_byte(0xD00101, 0x2A);
     bus.poke_byte(0xD00102, 0x00);
     bus.poke_byte(0xD00103, 0x50); // nn = 0x5000
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.ix & 0xFFFF, 0xDEAD, "Should read from MBASE + nn");
 }
@@ -836,7 +836,7 @@ fn test_z80_mode_fd_ld_nn_iy() {
     bus.poke_byte(0xD00101, 0x22);
     bus.poke_byte(0xD00102, 0x00);
     bus.poke_byte(0xD00103, 0x60); // nn = 0x6000
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     // Should write to 0xD06000 (MBASE + 0x6000)
     assert_eq!(
@@ -867,7 +867,7 @@ fn test_z80_mode_fd_ld_iy_nn() {
     bus.poke_byte(0xD00101, 0x2A);
     bus.poke_byte(0xD00102, 0x00);
     bus.poke_byte(0xD00103, 0x60); // nn = 0x6000
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.iy & 0xFFFF, 0xFACE, "Should read from MBASE + nn");
 }
@@ -947,7 +947,7 @@ fn test_z80_mode_jp_ix_16bit() {
     // DD E9 - JP (IX)
     bus.poke_byte(0xD00100, 0xDD);
     bus.poke_byte(0xD00101, 0xE9);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.pc, 0x5678, "JP (IX) should set PC to IX value (16-bit)");
 }
@@ -984,7 +984,7 @@ fn test_z80_mode_ex_sp_ix_uses_mbase() {
     // DD E3 - EX (SP),IX
     bus.poke_byte(0xD00100, 0xDD);
     bus.poke_byte(0xD00101, 0xE3);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.ix & 0xFFFF, 0x5678, "IX should have value from stack");
     assert_eq!(bus.peek_byte(0xD04000), 0x34, "Stack low byte should be old IX low");

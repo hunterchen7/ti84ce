@@ -454,13 +454,16 @@ impl Cpu {
         // Overflow
         let overflow = ((self.a ^ val) & 0x80 != 0) && ((self.a ^ result as u8) & 0x80 != 0);
 
+        // Save existing F3/F5 flags (CEmu preserves them for CP)
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
         if store {
+            // For SUB/SBC, F3/F5 come from the result
             self.set_sz_flags(result as u8);
         } else {
-            // For CP, set F5/F3 from operand, not result
+            // For CP, preserve F3/F5 from before (matches CEmu behavior)
             self.set_sz_flags(result as u8);
-            self.f = (self.f & !(flags::F5 | flags::F3)) | (val & (flags::F5 | flags::F3));
+            self.f = (self.f & !(flags::F5 | flags::F3)) | old_f3f5;
         }
         self.set_flag_c(result > 0xFF);
         self.set_flag_h(half);
@@ -471,40 +474,73 @@ impl Cpu {
     }
 
     /// AND operation
+    /// CEmu preserves F3/F5 from existing F register
     pub(super) fn alu_and(&mut self, val: u8) {
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.a &= val;
         self.f = 0;
-        self.set_sz_flags(self.a);
+        if self.a == 0 {
+            self.f |= flags::Z;
+        }
+        if self.a & 0x80 != 0 {
+            self.f |= flags::S;
+        }
+        self.f |= old_f3f5; // Preserve F3/F5 from before
         self.set_flag_h(true);
         self.set_flag_pv(Self::parity(self.a));
     }
 
     /// OR operation
+    /// CEmu preserves F3/F5 from existing F register
     pub(super) fn alu_or(&mut self, val: u8) {
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.a |= val;
         self.f = 0;
-        self.set_sz_flags(self.a);
+        if self.a == 0 {
+            self.f |= flags::Z;
+        }
+        if self.a & 0x80 != 0 {
+            self.f |= flags::S;
+        }
+        self.f |= old_f3f5; // Preserve F3/F5 from before
         self.set_flag_pv(Self::parity(self.a));
     }
 
     /// XOR operation
+    /// CEmu preserves F3/F5 from existing F register
     pub(super) fn alu_xor(&mut self, val: u8) {
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.a ^= val;
         self.f = 0;
-        self.set_sz_flags(self.a);
+        if self.a == 0 {
+            self.f |= flags::Z;
+        }
+        if self.a & 0x80 != 0 {
+            self.f |= flags::S;
+        }
+        self.f |= old_f3f5; // Preserve F3/F5 from before
         self.set_flag_pv(Self::parity(self.a));
     }
 
     /// Increment 8-bit value with flags
+    /// CEmu preserves F3/F5 from existing F register
     pub(super) fn alu_inc(&mut self, val: u8) -> u8 {
         let result = val.wrapping_add(1);
         let half = (val & 0x0F) == 0x0F;
         let overflow = val == 0x7F;
 
-        // Preserve carry, set other flags
+        // Preserve carry and F3/F5, set other flags
         let old_c = self.flag_c();
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
-        self.set_sz_flags(result);
+        // Set S, Z but not F3/F5
+        if result == 0 {
+            self.f |= flags::Z;
+        }
+        if result & 0x80 != 0 {
+            self.f |= flags::S;
+        }
+        self.f |= old_f3f5; // Preserve F3/F5
         self.set_flag_h(half);
         self.set_flag_pv(overflow);
         self.set_flag_c(old_c);
@@ -513,15 +549,24 @@ impl Cpu {
     }
 
     /// Decrement 8-bit value with flags
+    /// CEmu preserves F3/F5 from existing F register
     pub(super) fn alu_dec(&mut self, val: u8) -> u8 {
         let result = val.wrapping_sub(1);
         let half = (val & 0x0F) == 0x00;
         let overflow = val == 0x80;
 
-        // Preserve carry, set other flags
+        // Preserve carry and F3/F5, set other flags
         let old_c = self.flag_c();
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
-        self.set_sz_flags(result);
+        // Set S, Z but not F3/F5
+        if result == 0 {
+            self.f |= flags::Z;
+        }
+        if result & 0x80 != 0 {
+            self.f |= flags::S;
+        }
+        self.f |= old_f3f5; // Preserve F3/F5
         self.set_flag_h(half);
         self.set_flag_pv(overflow);
         self.set_flag_n(true);

@@ -128,6 +128,10 @@ pub struct Cpu {
     /// When set by STMIX, enables mixed memory mode where MBASE affects execution
     /// Cleared by RSMIX
     pub madl: bool,
+    /// Pending DD/FD prefix: 0=none, 2=DD (IX), 3=FD (IY)
+    /// When set, the next step() will execute an indexed instruction
+    /// This matches CEmu's behavior where prefixes count as separate steps
+    prefix: u8,
 }
 
 impl Cpu {
@@ -177,23 +181,46 @@ impl Cpu {
             il: false,
             suffix: false,
             madl: false,
+            prefix: 0,
         }
     }
 
     /// Reset the CPU to initial state
+    /// CEmu zeroes all registers on reset (memset(&cpu, 0, sizeof(cpu)))
     pub fn reset(&mut self) {
-        self.a = 0xFF;
-        self.f = 0xFF;
+        // Main registers - CEmu zeroes everything
+        self.a = 0x00;
+        self.f = 0x00;
+        self.bc = 0;
+        self.de = 0;
+        self.hl = 0;
+
+        // Shadow registers
+        self.a_prime = 0;
+        self.f_prime = 0;
+        self.bc_prime = 0;
+        self.de_prime = 0;
+        self.hl_prime = 0;
+
+        // Index registers
+        self.ix = 0;
+        self.iy = 0;
+
+        // Special registers
         self.pc = 0;
-        self.sp = 0x000000;
+        self.sp = 0;
         self.i = 0;
         self.r = 0;
         self.mbase = 0x00;
+
+        // CPU state flags
         self.iff1 = false;
         self.iff2 = false;
         self.im = InterruptMode::Mode0;
         self.adl = false;
         self.halted = false;
+
+        // Internal state
         self.irq_pending = false;
         self.nmi_pending = false;
         self.on_key_wake = false;
@@ -202,7 +229,7 @@ impl Cpu {
         self.il = false;
         self.suffix = false;
         self.madl = false;
-        // Other registers are undefined after reset
+        self.prefix = 0;
     }
 
     // ========== Instruction Execution ==========
@@ -275,6 +302,14 @@ impl Cpu {
             self.il = self.adl;
         }
         self.suffix = false;
+
+        // Check for pending DD/FD prefix from previous step
+        // CEmu counts DD/FD prefixes as separate instruction steps
+        if self.prefix != 0 {
+            let use_ix = self.prefix == 2; // 2=DD (IX), 3=FD (IY)
+            self.prefix = 0;
+            return self.execute_index(bus, use_ix);
+        }
 
         let opcode = self.fetch_byte(bus);
 

@@ -205,49 +205,45 @@ impl Cpu {
             7 => {
                 match y {
                     0 => {
-                        // RLCA
+                        // RLCA - CEmu preserves F3/F5
                         let c = (self.a >> 7) & 1;
                         self.a = (self.a << 1) | c;
                         self.set_flag_c(c != 0);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     1 => {
-                        // RRCA
+                        // RRCA - CEmu preserves F3/F5
                         let c = self.a & 1;
                         self.a = (self.a >> 1) | (c << 7);
                         self.set_flag_c(c != 0);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     2 => {
-                        // RLA
+                        // RLA - CEmu preserves F3/F5
                         let old_c = if self.flag_c() { 1 } else { 0 };
                         let new_c = (self.a >> 7) & 1;
                         self.a = (self.a << 1) | old_c;
                         self.set_flag_c(new_c != 0);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     3 => {
-                        // RRA
+                        // RRA - CEmu preserves F3/F5
                         let old_c = if self.flag_c() { 0x80 } else { 0 };
                         let new_c = self.a & 1;
                         self.a = (self.a >> 1) | old_c;
                         self.set_flag_c(new_c != 0);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     4 => {
@@ -285,31 +281,28 @@ impl Cpu {
                         4
                     }
                     5 => {
-                        // CPL
+                        // CPL - CEmu preserves F3/F5
                         self.a = !self.a;
                         self.set_flag_h(true);
                         self.set_flag_n(true);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     6 => {
-                        // SCF
+                        // SCF - CEmu preserves F3/F5
                         self.set_flag_c(true);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     7 => {
-                        // CCF
+                        // CCF - CEmu preserves F3/F5
                         let old_c = self.flag_c();
                         self.set_flag_h(old_c);
                         self.set_flag_c(!old_c);
                         self.set_flag_n(false);
-                        self.f = (self.f & !(flags::F5 | flags::F3))
-                            | (self.a & (flags::F5 | flags::F3));
+                        // F3/F5 preserved from before (CEmu behavior)
                         4
                     }
                     _ => 4,
@@ -356,10 +349,14 @@ impl Cpu {
             }
             1 => {
                 if q == 0 {
-                    // POP rp2 - BC/DE/HL are 24-bit in ADL mode, AF is always 16-bit
+                    // POP rp2 - all registers are 24-bit in ADL mode (CEmu behavior)
                     if p == 3 {
-                        // AF is always 16-bit
-                        let val = self.pop_word(bus);
+                        // AF - CEmu pops 3 bytes in ADL mode (upper byte discarded)
+                        let val = if self.adl {
+                            self.pop_addr(bus)
+                        } else {
+                            self.pop_word(bus) as u32
+                        };
                         self.a = (val >> 8) as u8;
                         self.f = val as u8;
                     } else if self.adl {
@@ -505,11 +502,15 @@ impl Cpu {
             }
             5 => {
                 if q == 0 {
-                    // PUSH rp2 - BC/DE/HL are 24-bit in ADL mode, AF is always 16-bit
+                    // PUSH rp2 - all registers are 24-bit in ADL mode (CEmu behavior)
                     if p == 3 {
-                        // AF is always 16-bit
-                        let val = ((self.a as u16) << 8) | (self.f as u16);
-                        self.push_word(bus, val);
+                        // AF - CEmu pushes 3 bytes in ADL mode (upper byte is 0)
+                        let val = ((self.a as u32) << 8) | (self.f as u32);
+                        if self.adl {
+                            self.push_addr(bus, val);
+                        } else {
+                            self.push_word(bus, val as u16);
+                        }
                     } else if self.adl {
                         // BC/DE/HL are 24-bit in ADL mode (matches CEmu cpu_push_word)
                         let val = match p {
@@ -541,7 +542,10 @@ impl Cpu {
                         }
                         1 => {
                             // DD prefix (IX instructions)
-                            self.execute_index(bus, true)
+                            // CEmu counts prefixes as separate instruction steps
+                            // Set prefix flag and return - execute_index() will be called on next step()
+                            self.prefix = 2;
+                            4
                         }
                         2 => {
                             // ED prefix (extended instructions)
@@ -549,7 +553,9 @@ impl Cpu {
                         }
                         3 => {
                             // FD prefix (IY instructions)
-                            self.execute_index(bus, false)
+                            // CEmu counts prefixes as separate instruction steps
+                            self.prefix = 3;
+                            4
                         }
                         _ => 4,
                     }
@@ -740,10 +746,16 @@ impl Cpu {
                 if y != 6 {
                     self.set_reg8(y, val, bus);
                 }
-                // Set flags for IN0
-                self.set_sz_flags(val);
-                self.set_flag_h(false);
-                self.set_flag_n(false);
+                // Set flags for IN0 - preserve F3/F5 from existing F (CEmu behavior)
+                let old_f3f5 = self.f & (flags::F5 | flags::F3);
+                self.f &= !(flags::S | flags::Z | flags::H | flags::N | flags::F5 | flags::F3);
+                if val & 0x80 != 0 {
+                    self.f |= flags::S;
+                }
+                if val == 0 {
+                    self.f |= flags::Z;
+                }
+                self.f |= old_f3f5; // Preserve F3/F5
                 self.set_flag_pv(Self::parity(val));
                 12
             }
@@ -844,9 +856,16 @@ impl Cpu {
                     self.set_reg8(y, val, bus);
                 }
                 // Set flags (even for y=6 which is IN F,(C))
-                self.set_sz_flags(val);
-                self.set_flag_h(false);
-                self.set_flag_n(false);
+                // Preserve F3/F5 from existing F (CEmu behavior)
+                let old_f3f5 = self.f & (flags::F5 | flags::F3);
+                self.f &= !(flags::S | flags::Z | flags::H | flags::N | flags::F5 | flags::F3);
+                if val & 0x80 != 0 {
+                    self.f |= flags::S;
+                }
+                if val == 0 {
+                    self.f |= flags::Z;
+                }
+                self.f |= old_f3f5; // Preserve F3/F5
                 self.set_flag_pv(Self::parity(val));
                 12
             }
@@ -1131,6 +1150,7 @@ impl Cpu {
     pub fn execute_bli(&mut self, bus: &mut Bus, y: u8, z: u8) -> u32 {
         match (y, z) {
             // LDI - Load and increment
+            // CEmu preserves F3/F5 flags (doesn't compute from val+A)
             (4, 0) => {
                 let val = bus.read_byte(self.mask_addr(self.hl));
                 bus.write_byte(self.mask_addr(self.de), val);
@@ -1142,11 +1162,11 @@ impl Cpu {
                 self.set_flag_h(false);
                 self.set_flag_n(false);
                 self.set_flag_pv(self.bc != 0);
-                let n = val.wrapping_add(self.a);
-                self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                // F3/F5 preserved (CEmu behavior)
                 16
             }
             // LDD - Load and decrement
+            // CEmu preserves F3/F5 flags
             (5, 0) => {
                 let val = bus.read_byte(self.mask_addr(self.hl));
                 bus.write_byte(self.mask_addr(self.de), val);
@@ -1158,12 +1178,12 @@ impl Cpu {
                 self.set_flag_h(false);
                 self.set_flag_n(false);
                 self.set_flag_pv(self.bc != 0);
-                let n = val.wrapping_add(self.a);
-                self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                // F3/F5 preserved (CEmu behavior)
                 16
             }
             // LDIR - Load, increment, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
+            // CEmu preserves F3/F5 flags
             (6, 0) => {
                 let mut cycles = 0u32;
                 loop {
@@ -1176,8 +1196,7 @@ impl Cpu {
                     self.set_flag_h(false);
                     self.set_flag_n(false);
                     self.set_flag_pv(self.bc != 0);
-                    let n = val.wrapping_add(self.a);
-                    self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                    // F3/F5 preserved (CEmu behavior)
 
                     if self.bc != 0 {
                         cycles += 21;
@@ -1191,6 +1210,7 @@ impl Cpu {
             }
             // LDDR - Load, decrement, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
+            // CEmu preserves F3/F5 flags
             (7, 0) => {
                 let mut cycles = 0u32;
                 loop {
@@ -1203,8 +1223,7 @@ impl Cpu {
                     self.set_flag_h(false);
                     self.set_flag_n(false);
                     self.set_flag_pv(self.bc != 0);
-                    let n = val.wrapping_add(self.a);
-                    self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                    // F3/F5 preserved (CEmu behavior)
 
                     if self.bc != 0 {
                         cycles += 21;
@@ -1878,8 +1897,12 @@ impl Cpu {
                         }
                         14
                     } else if p == 3 {
-                        // AF is always 16-bit
-                        let val = self.pop_word(bus);
+                        // AF - CEmu pops 3 bytes in ADL mode (upper byte discarded)
+                        let val = if self.adl {
+                            self.pop_addr(bus)
+                        } else {
+                            self.pop_word(bus) as u32
+                        };
                         self.a = (val >> 8) as u8;
                         self.f = val as u8;
                         10
@@ -2003,9 +2026,13 @@ impl Cpu {
                         }
                         15
                     } else if p == 3 {
-                        // AF is always 16-bit
-                        let val = ((self.a as u16) << 8) | (self.f as u16);
-                        self.push_word(bus, val);
+                        // AF - CEmu pushes 3 bytes in ADL mode (upper byte is 0)
+                        let val = ((self.a as u32) << 8) | (self.f as u32);
+                        if self.adl {
+                            self.push_addr(bus, val);
+                        } else {
+                            self.push_word(bus, val as u16);
+                        }
                         11
                     } else if self.adl {
                         // BC/DE are 24-bit in ADL mode

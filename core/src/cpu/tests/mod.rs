@@ -25,6 +25,19 @@ fn setup_z80_mode(cpu: &mut Cpu) {
     cpu.sp = 0xFFFF; // Top of 64KB space
 }
 
+/// Helper to execute a full instruction including any DD/FD prefix
+/// Since DD/FD prefixes now count as separate steps (matching CEmu), this
+/// helper runs step() until the prefix is consumed.
+#[allow(dead_code)]
+fn step_full(cpu: &mut Cpu, bus: &mut Bus) -> u32 {
+    let mut cycles = cpu.step(bus);
+    // If a prefix was just set, we need another step to execute the actual instruction
+    if cpu.prefix != 0 {
+        cycles += cpu.step(bus);
+    }
+    cycles
+}
+
 /// Helper to assert flags match expected value with detailed output
 #[allow(dead_code)]
 fn assert_flags(cpu: &Cpu, expected: u8, context: &str) {

@@ -457,7 +457,7 @@ fn test_jr_negative() {
     bus.poke_byte(0x100, 0x18);
     bus.poke_byte(0x101, 0xFD);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     // PC was 0x102 after fetch, then -3 = 0xFF
     assert_eq!(cpu.pc, 0xFF);
 }
@@ -1080,7 +1080,7 @@ fn test_ld_ix_imm() {
     bus.poke_byte(3, 0x34);
     bus.poke_byte(4, 0x12);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.ix, 0x123456);
 }
 
@@ -1097,7 +1097,7 @@ fn test_ld_iy_imm() {
     bus.poke_byte(3, 0xCD);
     bus.poke_byte(4, 0xAB);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.iy, 0xABCDEF);
 }
 
@@ -1115,7 +1115,7 @@ fn test_ld_indexed_mem() {
     bus.poke_byte(1, 0x77);
     bus.poke_byte(2, 0x05);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(bus.peek_byte(0xD00105), 0x42);
 }
 
@@ -1133,7 +1133,7 @@ fn test_ld_from_indexed_mem() {
     bus.poke_byte(1, 0x7E);
     bus.poke_byte(2, 0x05);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.a, 0x55);
 }
 
@@ -1151,7 +1151,7 @@ fn test_indexed_negative_offset() {
     bus.poke_byte(1, 0x7E);
     bus.poke_byte(2, 0xF0); // -16 as signed byte
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.a, 0x77);
 }
 
@@ -1167,7 +1167,7 @@ fn test_add_ix_bc() {
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0x09);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.ix, 0x001234);
 }
 
@@ -1186,7 +1186,7 @@ fn test_add_ix_bc_flags_f3_f5_adl() {
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0x09);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.ix, 0x280100);
     assert_eq!(
@@ -1210,7 +1210,7 @@ fn test_add_iy_iy_flags_f3_f5_z80() {
     bus.poke_byte(0, 0xFD);
     bus.poke_byte(1, 0x29);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.iy, 0x2000);
     assert_eq!(
@@ -1232,7 +1232,7 @@ fn test_inc_ix() {
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0x23);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.ix, 0x010000);
 }
 
@@ -1248,7 +1248,7 @@ fn test_push_pop_ix() {
     // PUSH IX (DD E5)
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0xE5);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 2);
 
     // Change IX
@@ -1257,7 +1257,7 @@ fn test_push_pop_ix() {
     // POP IX (DD E1) - at position 2 (where PC is now)
     bus.poke_byte(2, 0xDD);
     bus.poke_byte(3, 0xE1);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.ix, 0x123456);
 }
@@ -1273,7 +1273,7 @@ fn test_jp_ix() {
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0xE9);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x001234);
 }
 
@@ -1287,7 +1287,7 @@ fn test_ld_ixh() {
     bus.poke_byte(1, 0x26);
     bus.poke_byte(2, 0x42);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.ixh(), 0x42);
 }
 
@@ -1305,7 +1305,7 @@ fn test_indexed_cb_bit() {
     bus.poke_byte(2, 0x05);
     bus.poke_byte(3, 0x7E);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert!(!cpu.flag_z()); // Bit 7 is set
 }
 
@@ -1324,7 +1324,7 @@ fn test_indexed_cb_set() {
     bus.poke_byte(2, 0x05);
     bus.poke_byte(3, 0xFE);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(bus.peek_byte(0xD00105), 0x80);
 }
 
@@ -1343,7 +1343,7 @@ fn test_indexed_cb_res() {
     bus.poke_byte(2, 0x05);
     bus.poke_byte(3, 0x86);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(bus.peek_byte(0xD00105), 0xFE);
 }
 
@@ -1361,7 +1361,7 @@ fn test_inc_indexed_mem() {
     bus.poke_byte(1, 0x34);
     bus.poke_byte(2, 0x05);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(bus.peek_byte(0xD00105), 0x42);
 }
 
@@ -1380,7 +1380,7 @@ fn test_add_a_indexed_mem() {
     bus.poke_byte(1, 0x86);
     bus.poke_byte(2, 0x05);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.a, 0x15);
 }
 
@@ -1516,7 +1516,7 @@ fn test_inc_indexed_mem_r_register() {
     bus.poke_byte(1, 0x34);
     bus.poke_byte(2, 0x05);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(
         bus.peek_byte(0xD00105),
@@ -1548,7 +1548,7 @@ fn test_dec_indexed_mem_r_register() {
     bus.poke_byte(1, 0x35);
     bus.poke_byte(2, 0x03);
 
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(
         bus.peek_byte(0xD00103),
@@ -1647,8 +1647,8 @@ fn test_push_pop_hl_24bit_adl() {
 }
 
 #[test]
-fn test_push_pop_af_16bit_adl() {
-    // AF should remain 16-bit even in ADL mode (A and F are always 8-bit each)
+fn test_push_pop_af_adl() {
+    // In ADL mode, CEmu pushes/pops 3 bytes for AF (upper byte is 0)
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
 
@@ -1661,8 +1661,8 @@ fn test_push_pop_af_16bit_adl() {
     bus.poke_byte(0, 0xF5);
     cpu.step(&mut bus);
 
-    // SP should decrease by 2 for AF (always 16-bit)
-    assert_eq!(cpu.sp, 0xD001FE, "SP should decrease by 2 for AF (16-bit)");
+    // SP should decrease by 3 for AF in ADL mode (CEmu behavior)
+    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3 for AF in ADL mode");
 
     cpu.a = 0;
     cpu.f = 0;
@@ -1733,7 +1733,7 @@ fn test_indexed_push_pop_bc_24bit_adl() {
     // DD PUSH BC (DD C5) - DD prefix but BC still uses 24-bit
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0xC5);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3 for DD PUSH BC");
 
@@ -1742,7 +1742,7 @@ fn test_indexed_push_pop_bc_24bit_adl() {
     // DD POP BC (DD C1)
     bus.poke_byte(2, 0xDD);
     bus.poke_byte(3, 0xC1);
-    cpu.step(&mut bus);
+    step_full(&mut cpu, &mut bus);
 
     assert_eq!(
         cpu.bc, 0xAABBCC,
