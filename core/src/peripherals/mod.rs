@@ -16,6 +16,7 @@ pub mod keypad;
 pub mod lcd;
 pub mod rtc;
 pub mod sha256;
+pub mod spi;
 pub mod timer;
 pub mod watchdog;
 
@@ -26,6 +27,7 @@ pub use keypad::{KeypadController, KEYPAD_COLS, KEYPAD_ROWS};
 pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
 pub use rtc::RtcController;
 pub use sha256::Sha256Controller;
+pub use spi::SpiController;
 pub use timer::Timer;
 pub use watchdog::WatchdogController;
 
