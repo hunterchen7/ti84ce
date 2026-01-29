@@ -73,6 +73,9 @@ pub struct ControlPorts {
     flash_unlock: u8,
     /// General control
     general: u8,
+    /// Privileged boundary (3 bytes at 0x1D-0x1F)
+    /// Code with PC > privileged is considered unprivileged
+    privileged: u32,
     /// Protected port start (3 bytes)
     protected_start: u32,
     /// Protected port end (3 bytes)
@@ -83,22 +86,26 @@ pub struct ControlPorts {
 
 impl ControlPorts {
     /// Create a new control port controller with default values
+    /// Values match CEmu's control_reset() initialization
     pub fn new() -> Self {
         Self {
             power: 0x00,
-            cpu_speed: speed::MHZ_48, // TI-84 CE runs at 48 MHz
-            battery_status: 0x00,     // Battery charged/OK
+            cpu_speed: speed::MHZ_6,  // CEmu starts at 6 MHz, ROM sets speed later
+            battery_status: 0x00,     // CEmu: memset clears to 0 (readBatteryStatus = 0)
             device_type: 0x00,        // Standard device
             control_flags: 0x00,
             unlock_status: 0x00,
             battery_config: 0x00,
             panel_control: 0x00,
             lcd_enable: 0x00,
-            usb_control: 0x00,
-            flash_unlock: 0x08,       // Bit 3 set = flash ready/unlocked
+            usb_control: 0x02,        // CEmu explicitly sets ports[0x0F] = 0x02
+            flash_unlock: 0x00,       // Initially 0 (matches CEmu)
             general: 0x00,
-            protected_start: 0,
-            protected_end: 0,
+            // CEmu: control.privileged = 0xFFFFFF (all code is privileged by default)
+            privileged: 0xFFFFFF,
+            // CEmu sets both protected boundaries to 0xD1887C (start=end means nothing protected)
+            protected_start: 0xD1887C,
+            protected_end: 0xD1887C,
             stack_limit: 0,
         }
     }
@@ -112,7 +119,10 @@ impl ControlPorts {
     /// addr is offset from 0xE00000 (0x00-0xFF)
     pub fn read(&self, addr: u32) -> u8 {
         match addr {
-            regs::POWER => self.power,
+            regs::POWER => {
+                // CEmu returns the stored value directly (no forced bit)
+                self.power
+            }
             regs::CPU_SPEED => self.cpu_speed,
             regs::BATTERY_STATUS => self.battery_status,
             regs::DEVICE_TYPE => self.device_type,
@@ -125,12 +135,15 @@ impl ControlPorts {
             regs::USB_CONTROL => self.usb_control,
             regs::FIXED_80 => 0x80, // Always returns 0x80
             regs::FLASH_UNLOCK => {
-                // Bits 2 and 3 indicate flash unlocked/ready status
-                // Bit 2 = unlocked, Bit 3 = hardware ready
-                // On power-up, flash is unlocked and ready (0x0C)
-                self.flash_unlock | 0x0C
+                // CEmu: returns stored value directly
+                // Bits: 0=unlock attempt, 2=unlocked, 3=flash ready
+                self.flash_unlock
             }
             regs::GENERAL => self.general,
+            // Privileged boundary (3 bytes at 0x1D-0x1F)
+            0x1D => self.privileged as u8,
+            0x1E => (self.privileged >> 8) as u8,
+            0x1F => (self.privileged >> 16) as u8,
             // Protected start address (3 bytes at 0x20-0x22)
             0x20 => self.protected_start as u8,
             0x21 => (self.protected_start >> 8) as u8,
@@ -151,7 +164,11 @@ impl ControlPorts {
     /// addr is offset from 0xE00000 (0x00-0xFF)
     pub fn write(&mut self, addr: u32, value: u8) {
         match addr {
-            regs::POWER => self.power = value,
+            regs::POWER => {
+                // Bit 4 is read-only (power stable indicator)
+                // Only bits 0, 1, 7 are writable (0x83 mask)
+                self.power = value & 0x83;
+            }
             regs::CPU_SPEED => self.cpu_speed = value & 0x03,
             regs::BATTERY_STATUS => {} // Read-only
             regs::DEVICE_TYPE => {}    // Read-only
@@ -167,8 +184,15 @@ impl ControlPorts {
             regs::BATTERY_CONFIG => self.battery_config = value,
             regs::FIXED_7F => {} // Read-only
             regs::PANEL_CONTROL => self.panel_control = value,
-            regs::LCD_ENABLE => self.lcd_enable = value,
-            regs::USB_CONTROL => self.usb_control = value,
+            regs::LCD_ENABLE => {
+                // CEmu: control.ports[index] = (byte & 0xF) << 4 | (byte & 0xF)
+                // Duplicates the low nibble into both nibbles
+                self.lcd_enable = (value & 0x0F) << 4 | (value & 0x0F);
+            }
+            regs::USB_CONTROL => {
+                // CEmu: control.ports[index] = byte & 3
+                self.usb_control = value & 0x03;
+            }
             regs::FIXED_80 => {} // Read-only
             regs::FLASH_UNLOCK => {
                 // CEmu behavior: (current | 5) & value
@@ -177,6 +201,10 @@ impl ControlPorts {
                 self.flash_unlock = (self.flash_unlock | 5) & value;
             }
             regs::GENERAL => self.general = value,
+            // Privileged boundary (3 bytes at 0x1D-0x1F)
+            0x1D => self.privileged = (self.privileged & 0xFFFF00) | (value as u32),
+            0x1E => self.privileged = (self.privileged & 0xFF00FF) | ((value as u32) << 8),
+            0x1F => self.privileged = (self.privileged & 0x00FFFF) | ((value as u32) << 16),
             // Protected start address (3 bytes at 0x20-0x22)
             0x20 => self.protected_start = (self.protected_start & 0xFFFF00) | (value as u32),
             0x21 => {
@@ -216,6 +244,55 @@ impl ControlPorts {
     pub fn flash_unlocked(&self) -> bool {
         (self.flash_unlock & 0x0C) == 0x0C
     }
+
+    /// Set the flash ready bit (bit 3 of flash_unlock)
+    /// Called when the flash unlock sequence is detected during instruction fetch
+    /// CEmu: control.flashUnlocked |= 1 << 3 - ONLY sets bit 3, not bit 2
+    /// Bit 2 comes from the OUT0 (0x28), A instruction in the sequence
+    pub fn set_flash_ready(&mut self) {
+        // Only set bit 3 (flash ready), not bit 2
+        // Bit 2 is set by the OUT0 (0x28), A in the unlock sequence itself
+        self.flash_unlock |= 0x08;  // only bit 3
+    }
+
+    /// Clear the flash ready bit (bit 3 of flash_unlock)
+    /// Called when unprivileged code fetches after flash unlock sequence
+    pub fn clear_flash_ready(&mut self) {
+        self.flash_unlock &= !(1 << 3);
+    }
+
+    /// Check if flash ready bit is set (bit 3)
+    pub fn flash_ready(&self) -> bool {
+        (self.flash_unlock & (1 << 3)) != 0
+    }
+
+    /// Read raw flash_unlock value (for debugging)
+    pub fn read_flash_unlock(&self) -> u8 {
+        self.flash_unlock
+    }
+
+    /// Get the privileged boundary address
+    /// Code with PC > this value is considered unprivileged
+    pub fn privileged_boundary(&self) -> u32 {
+        self.privileged
+    }
+
+    /// Get the protected start address
+    pub fn protected_start(&self) -> u32 {
+        self.protected_start
+    }
+
+    /// Get the protected end address
+    pub fn protected_end(&self) -> u32 {
+        self.protected_end
+    }
+
+    /// Check if a given PC is running unprivileged code
+    /// CEmu: unprivileged_code() in control.c
+    /// Unprivileged means: PC > privileged AND (PC < protectedStart OR PC > protectedEnd)
+    pub fn is_unprivileged(&self, pc: u32) -> bool {
+        pc > self.privileged && (pc < self.protected_start || pc > self.protected_end)
+    }
 }
 
 impl Default for ControlPorts {
@@ -231,22 +308,38 @@ mod tests {
     #[test]
     fn test_new() {
         let ctrl = ControlPorts::new();
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_48);
+        // CEmu starts at 6 MHz, ROM sets speed later
+        assert_eq!(ctrl.cpu_speed(), speed::MHZ_6);
         assert!(!ctrl.lcd_enabled());
         assert!(!ctrl.protected_ports_unlocked());
+        // Battery status defaults to 0 (CEmu memset clears to 0)
+        assert_eq!(ctrl.battery_status, 0x00);
+        // Privileged boundary defaults to 0xFFFFFF (all code is privileged)
+        assert_eq!(ctrl.privileged, 0xFFFFFF);
+        // Protected memory defaults to 0xD1887C (start=end)
+        assert_eq!(ctrl.protected_start, 0xD1887C);
+        assert_eq!(ctrl.protected_end, 0xD1887C);
     }
 
     #[test]
     fn test_reset() {
         let mut ctrl = ControlPorts::new();
-        ctrl.write(regs::CPU_SPEED, speed::MHZ_6);
-        ctrl.write(regs::POWER, 0x10);
+        ctrl.write(regs::CPU_SPEED, speed::MHZ_48);
+        ctrl.write(regs::POWER, 0x83); // Write allowed bits
         ctrl.write(0x20, 0x12);
+        ctrl.write(0x1D, 0x00); // Change privileged boundary
 
         ctrl.reset();
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_48);
-        assert_eq!(ctrl.read(regs::POWER), 0);
-        assert_eq!(ctrl.protected_start, 0);
+        // CEmu starts at 6 MHz
+        assert_eq!(ctrl.cpu_speed(), speed::MHZ_6);
+        // Power port resets to 0
+        assert_eq!(ctrl.read(regs::POWER), 0x00);
+        // CEmu sets privileged to 0xFFFFFF
+        assert_eq!(ctrl.privileged, 0xFFFFFF);
+        // CEmu sets protected_start to 0xD1887C
+        assert_eq!(ctrl.protected_start, 0xD1887C);
+        // Battery status is 0
+        assert_eq!(ctrl.battery_status, 0x00);
     }
 
     #[test]
@@ -295,9 +388,77 @@ mod tests {
 
         ctrl.write(regs::LCD_ENABLE, 0x01);
         assert!(ctrl.lcd_enabled());
+        // CEmu duplicates nibble: (0x01 & 0xF) << 4 | (0x01 & 0xF) = 0x11
+        assert_eq!(ctrl.read(regs::LCD_ENABLE), 0x11);
+
+        ctrl.write(regs::LCD_ENABLE, 0x08);
+        // (0x08 & 0xF) << 4 | (0x08 & 0xF) = 0x88
+        assert_eq!(ctrl.read(regs::LCD_ENABLE), 0x88);
 
         ctrl.write(regs::LCD_ENABLE, 0x00);
         assert!(!ctrl.lcd_enabled());
+        assert_eq!(ctrl.read(regs::LCD_ENABLE), 0x00);
+    }
+
+    #[test]
+    fn test_privileged_register() {
+        let mut ctrl = ControlPorts::new();
+        // Default is 0xFFFFFF (all code privileged)
+        assert_eq!(ctrl.privileged_boundary(), 0xFFFFFF);
+        assert_eq!(ctrl.read(0x1D), 0xFF);
+        assert_eq!(ctrl.read(0x1E), 0xFF);
+        assert_eq!(ctrl.read(0x1F), 0xFF);
+
+        // Write to privileged register
+        ctrl.write(0x1D, 0x00);
+        ctrl.write(0x1E, 0x40);
+        ctrl.write(0x1F, 0x00);
+        assert_eq!(ctrl.privileged_boundary(), 0x004000);
+        assert_eq!(ctrl.read(0x1D), 0x00);
+        assert_eq!(ctrl.read(0x1E), 0x40);
+        assert_eq!(ctrl.read(0x1F), 0x00);
+    }
+
+    #[test]
+    fn test_is_unprivileged() {
+        let mut ctrl = ControlPorts::new();
+        // With default privileged=0xFFFFFF, no code is unprivileged
+        assert!(!ctrl.is_unprivileged(0x000000));
+        assert!(!ctrl.is_unprivileged(0xD00000));
+        assert!(!ctrl.is_unprivileged(0xFFFFFF));
+
+        // Set privileged boundary to 0x400000 (end of flash)
+        ctrl.write(0x1D, 0x00);
+        ctrl.write(0x1E, 0x00);
+        ctrl.write(0x1F, 0x40);
+        assert_eq!(ctrl.privileged_boundary(), 0x400000);
+
+        // Code in flash (< 0x400000) is privileged
+        assert!(!ctrl.is_unprivileged(0x001000));
+        assert!(!ctrl.is_unprivileged(0x3FFFFF));
+
+        // Code > privileged is unprivileged (unless in protected range)
+        assert!(ctrl.is_unprivileged(0x400001));
+        assert!(ctrl.is_unprivileged(0xD00000));
+
+        // Code in protected range (0xD1887C-0xD1887C) is privileged
+        // Since start=end, this is a single address
+        assert!(!ctrl.is_unprivileged(0xD1887C));
+    }
+
+    #[test]
+    fn test_usb_control_masked() {
+        let mut ctrl = ControlPorts::new();
+        // Initial value is 0x02
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x02);
+
+        // Writing 0xFF should be masked to 0x03
+        ctrl.write(regs::USB_CONTROL, 0xFF);
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x03);
+
+        // Writing 0x01
+        ctrl.write(regs::USB_CONTROL, 0x01);
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x01);
     }
 
     #[test]
@@ -331,43 +492,48 @@ mod tests {
     }
 
     #[test]
-    fn test_flash_unlock_bits23_always_set_on_read() {
-        let mut ctrl = ControlPorts::new();
-        // Initial state: bits 2 and 3 always set on read (flash unlocked and ready)
-        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
-
-        // Write 0x0C (bits 2 and 3) - stored value becomes 0x0C
-        ctrl.write(regs::FLASH_UNLOCK, 0x0C);
-        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
+    fn test_flash_unlock_initial_zero() {
+        let ctrl = ControlPorts::new();
+        // Initial state: flash_unlock is 0 (matches CEmu)
+        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x00);
     }
 
     #[test]
-    fn test_flash_unlock_hw_bits_override_stored() {
+    fn test_flash_unlock_write_behavior() {
         let mut ctrl = ControlPorts::new();
-        // Initial state: bits 2 and 3 always set on read
-        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
+        // CEmu write behavior: (current | 5) & value
+        // This forces bits 0 and 2 on, then ANDs with written value
 
-        // Write 0x00 - stored value cleared but read still shows hw bits
+        // Write 0x0C: (0 | 5) & 0x0C = 5 & 0x0C = 4
+        ctrl.write(regs::FLASH_UNLOCK, 0x0C);
+        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x04);
+
+        // Write 0x0F: (4 | 5) & 0x0F = 5 & 0x0F = 5
+        ctrl.write(regs::FLASH_UNLOCK, 0x0F);
+        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x05);
+
+        // Write 0x00: (5 | 5) & 0x00 = 5 & 0 = 0
         ctrl.write(regs::FLASH_UNLOCK, 0x00);
-        // Stored: (0x08 | 5) & 0x00 = 0x00
-        // Read: 0x00 | 0x0C = 0x0C (hw bits always present)
-        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
+        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x00);
     }
 
     #[test]
     fn test_port06_affects_flash_unlock() {
         let mut ctrl = ControlPorts::new();
-        // First unlock protected ports (set bit 2)
+
+        // Set up flash_unlock with bit 3
+        ctrl.flash_unlock = 0x0C; // bits 2 and 3
+
+        // Unlock protected ports (set bit 2 of port 0x06)
         ctrl.write(regs::UNLOCK_STATUS, 0x04);
         assert!(ctrl.protected_ports_unlocked());
-        // Read shows bits 2 and 3 (hardware ready)
         assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
 
-        // Lock protected ports (clear bit 2) - this clears stored bit 3
+        // Lock protected ports (clear bit 2) - this clears bit 3 of flash_unlock
         ctrl.write(regs::UNLOCK_STATUS, 0x00);
         assert!(!ctrl.protected_ports_unlocked());
-        // But read still shows hw bits 2 and 3
-        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x0C);
+        // Bit 3 should now be cleared
+        assert_eq!(ctrl.read(regs::FLASH_UNLOCK), 0x04);
     }
 
     #[test]

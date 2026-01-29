@@ -30,3 +30,7 @@ Thumbs.db
 *.swo
 *~
 .vscode/
+
+# Reference emulator (not part of project)
+/cemu-ref/
+*.log

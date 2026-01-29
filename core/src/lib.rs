@@ -30,7 +30,7 @@ mod emu;
 use std::ptr;
 use std::slice;
 
-pub use emu::Emu;
+pub use emu::{Emu, LcdSnapshot, TimerSnapshot};
 
 /// Create a new emulator instance.
 /// Returns null on allocation failure.

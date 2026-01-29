@@ -2,14 +2,16 @@
 //!
 //! Memory-mapped at 0xF00000 (port offset 0x100000 from 0xE00000)
 //!
-//! The controller has 22 interrupt sources. Key sources:
+//! The controller has 22 interrupt sources. Key sources (from CEmu):
 //! - Bit 0: ON key
 //! - Bit 1: Timer 1
 //! - Bit 2: Timer 2
 //! - Bit 3: Timer 3
-//! - Bit 4: (reserved)
-//! - Bit 5: Keypad (any key in scan mode)
-//! - Bit 10: LCD (VBLANK)
+//! - Bit 4: OS Timer
+//! - Bit 10: Keypad (any key in scan mode)
+//! - Bit 11: LCD (VBLANK)
+//! - Bit 15: Power
+//! - Bit 19: Wake (power-on wake signal)
 
 /// Interrupt source bit masks
 pub mod sources {
@@ -17,8 +19,11 @@ pub mod sources {
     pub const TIMER1: u32 = 1 << 1;
     pub const TIMER2: u32 = 1 << 2;
     pub const TIMER3: u32 = 1 << 3;
-    pub const KEYPAD: u32 = 1 << 5;
-    pub const LCD: u32 = 1 << 10;
+    pub const OSTIMER: u32 = 1 << 4;
+    pub const KEYPAD: u32 = 1 << 10;
+    pub const LCD: u32 = 1 << 11;
+    pub const PWR: u32 = 1 << 15;
+    pub const WAKE: u32 = 1 << 19;
 }
 
 /// Register offsets within the interrupt controller
@@ -44,19 +49,22 @@ pub struct InterruptController {
 
 impl InterruptController {
     /// Create a new interrupt controller
+    /// CEmu sets the PWR interrupt (bit 15) immediately on reset
     pub fn new() -> Self {
         Self {
-            status: 0,
+            // PWR interrupt is set on power-up/reset (CEmu: intrpt_set(INT_PWR, true))
+            status: sources::PWR,
             enabled: 0,
-            raw: 0,
+            raw: sources::PWR,
         }
     }
 
     /// Reset the interrupt controller
+    /// CEmu sets PWR interrupt after clearing all state
     pub fn reset(&mut self) {
-        self.status = 0;
+        self.status = sources::PWR;
         self.enabled = 0;
-        self.raw = 0;
+        self.raw = sources::PWR;
     }
 
     /// Check if any enabled interrupt is pending
@@ -131,8 +139,11 @@ mod tests {
     #[test]
     fn test_new() {
         let ic = InterruptController::new();
-        assert_eq!(ic.status, 0);
+        // CEmu sets PWR interrupt (bit 15) on power-up/reset
+        assert_eq!(ic.status, sources::PWR);
+        assert_eq!(ic.raw, sources::PWR);
         assert_eq!(ic.enabled, 0);
+        // PWR is set but not enabled, so no IRQ pending
         assert!(!ic.irq_pending());
     }
 
@@ -144,9 +155,11 @@ mod tests {
         assert!(ic.irq_pending());
 
         ic.reset();
-        assert_eq!(ic.status, 0);
+        // CEmu sets PWR interrupt on reset
+        assert_eq!(ic.status, sources::PWR);
+        assert_eq!(ic.raw, sources::PWR);
         assert_eq!(ic.enabled, 0);
-        assert_eq!(ic.raw, 0);
+        // PWR is set but not enabled, so no IRQ pending
         assert!(!ic.irq_pending());
     }
 
@@ -228,13 +241,15 @@ mod tests {
     fn test_multi_byte_status() {
         let mut ic = InterruptController::new();
 
-        // Raise LCD interrupt (bit 10 - in byte 1)
+        // Raise LCD interrupt (bit 11 - in byte 1)
         ic.raise(sources::LCD);
 
-        // Read byte 0 should be 0
+        // Read byte 0 should be 0 (no interrupts in low byte, PWR is bit 15)
         assert_eq!(ic.read(regs::STATUS), 0);
-        // Read byte 1 should have bit 2 set (bit 10 >> 8 = bit 2)
-        assert_eq!(ic.read(regs::STATUS + 1), (sources::LCD >> 8) as u8);
+        // Read byte 1 should have bit 3 set (LCD, bit 11 >> 8 = bit 3)
+        // Plus bit 7 set (PWR, bit 15 >> 8 = bit 7)
+        let expected = ((sources::LCD >> 8) | (sources::PWR >> 8)) as u8;
+        assert_eq!(ic.read(regs::STATUS + 1), expected);
     }
 
     #[test]

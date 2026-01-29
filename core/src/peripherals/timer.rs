@@ -27,11 +27,23 @@ mod ctrl {
     pub const COUNT_UP: u8 = 1 << 1;
     /// Interrupt on zero/overflow
     pub const INT_ON_ZERO: u8 = 1 << 2;
+    /// Interrupt on match1
+    pub const INT_ON_MATCH1: u8 = 1 << 3;
     /// Use reset value on overflow
     pub const USE_RESET: u8 = 1 << 4;
     /// Clock divider bits 5-7 (0=1, 1=2, 2=4, 3=8, ...)
     pub const CLOCK_DIV_SHIFT: u8 = 5;
     pub const CLOCK_DIV_MASK: u8 = 0x07;
+}
+
+/// Interrupt flags returned by tick()
+pub mod interrupt {
+    /// Interrupt triggered by match1 value
+    pub const MATCH1: u8 = 1 << 0;
+    /// Interrupt triggered by match2 value
+    pub const MATCH2: u8 = 1 << 1;
+    /// Interrupt triggered by zero/overflow
+    pub const ZERO: u8 = 1 << 2;
 }
 
 /// A single general-purpose timer
@@ -79,6 +91,31 @@ impl Timer {
         self.control & ctrl::ENABLE != 0
     }
 
+    /// Current counter value
+    pub fn counter(&self) -> u32 {
+        self.counter
+    }
+
+    /// Reset/reload value
+    pub fn reset_value(&self) -> u32 {
+        self.reset_value
+    }
+
+    /// Match value 1
+    pub fn match1(&self) -> u32 {
+        self.match1
+    }
+
+    /// Match value 2
+    pub fn match2(&self) -> u32 {
+        self.match2
+    }
+
+    /// Control register
+    pub fn control(&self) -> u8 {
+        self.control
+    }
+
     /// Check if counting up
     fn count_up(&self) -> bool {
         self.control & ctrl::COUNT_UP != 0
@@ -87,6 +124,11 @@ impl Timer {
     /// Check if interrupt on zero/overflow is enabled
     fn int_on_zero(&self) -> bool {
         self.control & ctrl::INT_ON_ZERO != 0
+    }
+
+    /// Check if interrupt on match1 is enabled
+    fn int_on_match1(&self) -> bool {
+        self.control & ctrl::INT_ON_MATCH1 != 0
     }
 
     /// Check if reset value should be used on overflow
@@ -101,10 +143,11 @@ impl Timer {
     }
 
     /// Tick the timer with given CPU cycles
-    /// Returns true if an interrupt should be generated
-    pub fn tick(&mut self, cycles: u32) -> bool {
+    /// Returns interrupt flags (see `interrupt` module for bit definitions)
+    /// Bit 0: match1, Bit 1: match2, Bit 2: zero/overflow
+    pub fn tick(&mut self, cycles: u32) -> u8 {
         if !self.is_enabled() {
-            return false;
+            return 0;
         }
 
         // Accumulate cycles and apply divider
@@ -114,15 +157,28 @@ impl Timer {
         self.accum_cycles %= divider;
 
         if ticks == 0 {
-            return false;
+            return 0;
         }
 
-        let mut interrupt = false;
+        let mut interrupts: u8 = 0;
+        let old_counter = self.counter;
 
         if self.count_up() {
             // Count up
             let (new_val, overflow) = self.counter.overflowing_add(ticks);
             self.counter = new_val;
+
+            // Check for match conditions when counting up
+            // A match occurs if the counter value crosses or equals the match value
+            if self.int_on_match1() {
+                if Self::crosses_value_up(old_counter, new_val, self.match1, overflow) {
+                    interrupts |= interrupt::MATCH1;
+                }
+            }
+            // Match2 interrupt - always check (no separate enable bit in CEmu)
+            if Self::crosses_value_up(old_counter, new_val, self.match2, overflow) {
+                interrupts |= interrupt::MATCH2;
+            }
 
             if overflow {
                 // The wrapped value (new_val) represents ticks past the overflow point
@@ -131,15 +187,36 @@ impl Timer {
                     self.counter = self.reset_value.wrapping_add(new_val);
                 }
                 if self.int_on_zero() {
-                    interrupt = true;
+                    interrupts |= interrupt::ZERO;
                 }
             }
         } else {
             // Count down
             if self.counter >= ticks {
                 self.counter -= ticks;
+
+                // Check for match conditions when counting down (no underflow case)
+                if self.int_on_match1() {
+                    if Self::crosses_value_down(old_counter, self.counter, self.match1) {
+                        interrupts |= interrupt::MATCH1;
+                    }
+                }
+                // Match2 interrupt - always check
+                if Self::crosses_value_down(old_counter, self.counter, self.match2) {
+                    interrupts |= interrupt::MATCH2;
+                }
             } else {
                 // Underflow: counter would go below 0
+                // Check matches before underflow
+                if self.int_on_match1() {
+                    if Self::crosses_value_down(old_counter, 0, self.match1) {
+                        interrupts |= interrupt::MATCH1;
+                    }
+                }
+                if Self::crosses_value_down(old_counter, 0, self.match2) {
+                    interrupts |= interrupt::MATCH2;
+                }
+
                 // Calculate how many ticks remain after reaching 0:
                 // - It takes `counter` ticks to go from `counter` to 0
                 // - Remaining ticks = ticks - counter
@@ -152,12 +229,32 @@ impl Timer {
                     self.counter = 0xFFFFFFFF_u32.wrapping_sub(remaining - 1);
                 }
                 if self.int_on_zero() {
-                    interrupt = true;
+                    interrupts |= interrupt::ZERO;
                 }
             }
         }
 
-        interrupt
+        interrupts
+    }
+
+    /// Check if a value was crossed when counting up (from old to new)
+    /// Returns true if match_val is in range (old, new] or if overflow occurred and
+    /// match_val is in the wrapped portion [0, new]
+    fn crosses_value_up(old: u32, new: u32, match_val: u32, overflow: bool) -> bool {
+        if overflow {
+            // Counter wrapped around: check if match is in (old, MAX] or [0, new]
+            match_val > old || match_val <= new
+        } else {
+            // Normal case: check if match is in range (old, new]
+            match_val > old && match_val <= new
+        }
+    }
+
+    /// Check if a value was crossed when counting down (from old to new)
+    /// Returns true if match_val is in range [new, old)
+    fn crosses_value_down(old: u32, new: u32, match_val: u32) -> bool {
+        // Check if match is in range [new, old)
+        match_val >= new && match_val < old
     }
 
     /// Read a register byte
@@ -253,7 +350,7 @@ mod tests {
         // Timer is disabled by default
 
         let irq = timer.tick(50);
-        assert!(!irq);
+        assert_eq!(irq, 0);
         assert_eq!(timer.counter, 100); // Should not change
     }
 
@@ -264,7 +361,7 @@ mod tests {
         timer.counter = 0;
 
         let irq = timer.tick(100);
-        assert!(!irq);
+        assert_eq!(irq, 0);
         assert_eq!(timer.counter, 100);
     }
 
@@ -275,7 +372,7 @@ mod tests {
         timer.counter = 100;
 
         let irq = timer.tick(50);
-        assert!(!irq);
+        assert_eq!(irq, 0);
         assert_eq!(timer.counter, 50);
     }
 
@@ -287,7 +384,7 @@ mod tests {
 
         // Tick more than counter value should underflow
         let irq = timer.tick(10);
-        assert!(irq);
+        assert!(irq & interrupt::ZERO != 0);
     }
 
     #[test]
@@ -339,7 +436,7 @@ mod tests {
         timer.counter = 0xFFFFFFFF;
 
         let irq = timer.tick(2);
-        assert!(irq);
+        assert_ne!(irq & interrupt::ZERO, 0);
     }
 
     #[test]
@@ -347,9 +444,10 @@ mod tests {
         let mut timer = Timer::new();
         timer.control = ctrl::ENABLE | ctrl::COUNT_UP; // INT_ON_ZERO not set
         timer.counter = 0xFFFFFFFF;
+        timer.match2 = 0xFFFFFFFE; // Avoid match2 crossing on overflow
 
         let irq = timer.tick(2);
-        assert!(!irq); // No interrupt because INT_ON_ZERO is not set
+        assert_eq!(irq, 0); // No interrupt because INT_ON_ZERO is not set
     }
 
     #[test]
@@ -360,7 +458,7 @@ mod tests {
 
         // Divider is 4, so 8 cycles = 2 ticks
         let irq = timer.tick(8);
-        assert!(!irq);
+        assert_eq!(irq, 0);
         assert_eq!(timer.counter, 2);
     }
 

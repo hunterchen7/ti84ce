@@ -3,12 +3,11 @@
 //! Coordinates the CPU, bus, and peripherals to run the TI-84 Plus CE.
 
 use crate::bus::Bus;
-use crate::cpu::Cpu;
+use crate::cpu::{Cpu, InterruptMode};
 
 /// TI-84 Plus CE screen dimensions
 pub const SCREEN_WIDTH: usize = 320;
 pub const SCREEN_HEIGHT: usize = 240;
-
 
 /// Number of entries in the PC/opcode history ring buffer
 const HISTORY_SIZE: usize = 64;
@@ -117,6 +116,27 @@ pub struct Emu {
     total_cycles: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimerSnapshot {
+    pub counter: u32,
+    pub reset_value: u32,
+    pub match1: u32,
+    pub match2: u32,
+    pub control: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LcdSnapshot {
+    pub timing: [u32; 4],
+    pub control: u32,
+    pub int_mask: u32,
+    pub int_status: u32,
+    pub upbase: u32,
+    pub lpbase: u32,
+    pub palbase: u32,
+    pub frame_cycles: u32,
+}
+
 impl Emu {
     /// Create a new emulator instance
     pub fn new() -> Self {
@@ -198,7 +218,7 @@ impl Emu {
 
     /// Peek at opcode bytes at address without affecting state
     /// Returns (bytes, length) to avoid heap allocation in hot loop
-    fn peek_opcode(&self, addr: u32) -> ([u8; 4], usize) {
+    fn peek_opcode(&mut self, addr: u32) -> ([u8; 4], usize) {
         let mut bytes = [0u8; 4];
         let first = self.bus.peek_byte(addr);
         bytes[0] = first;
@@ -242,28 +262,44 @@ impl Emu {
     }
 
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
-    /// Also raises the ON_KEY interrupt for normal interrupt handling
+    /// Also raises the ON_KEY and WAKE interrupts for normal interrupt handling
     pub fn press_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
         // Set the wake signal - this wakes CPU from HALT regardless of IFF1
         self.cpu.on_key_wake = true;
 
-        // Also raise the ON_KEY interrupt for normal handling
-        self.bus.ports.interrupt.raise(sources::ON_KEY);
+        // Set ON key in keypad matrix (row 2, col 0)
+        self.bus.set_key(2, 0, true);
 
-        // Set irq_pending if enabled (will be handled on next step if IFF1 is set)
-        if self.bus.ports.irq_pending() {
-            self.cpu.irq_pending = true;
-        }
+        // Raise both ON_KEY and WAKE interrupts
+        // WAKE is the power-on wake signal (bit 19)
+        self.bus.ports.interrupt.raise(sources::ON_KEY);
+        self.bus.ports.interrupt.raise(sources::WAKE);
+
+        // Ensure CPU sees a pending interrupt even if interrupts are disabled.
+        // ON key wake is special: ROM expects an interrupt path to run after wake.
+        self.cpu.irq_pending = true;
     }
 
     /// Release the ON key
     pub fn release_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
-        // Clear the raw ON_KEY state (source inactive)
+        // Clear ON key in keypad matrix
+        self.bus.set_key(2, 0, false);
+
+        // Clear the raw ON_KEY and WAKE state (source inactive)
         self.bus.ports.interrupt.clear_raw(sources::ON_KEY);
+        self.bus.ports.interrupt.clear_raw(sources::WAKE);
+    }
+
+    /// Simulate initial power-on sequence
+    /// Call this after loading ROM but before run_cycles to simulate
+    /// the calculator being turned on via the ON key
+    pub fn power_on(&mut self) {
+        // Simulate the ON key being pressed (this is what turns on the calculator)
+        self.press_on_key();
     }
 
     /// Render the current VRAM contents to the framebuffer
@@ -323,14 +359,152 @@ impl Emu {
         self.cpu.pc
     }
 
+    /// Check if CPU is halted
+    pub fn is_halted(&self) -> bool {
+        self.cpu.halted
+    }
+
     /// Get total cycles executed
     pub fn total_cycles(&self) -> u64 {
         self.total_cycles
     }
 
     /// Peek at a memory byte without affecting emulation state
-    pub fn peek_byte(&self, addr: u32) -> u8 {
+    pub fn peek_byte(&mut self, addr: u32) -> u8 {
         self.bus.peek_byte(addr)
+    }
+
+    /// Get the CPU's A register value
+    pub fn reg_a(&self) -> u8 {
+        self.cpu.a
+    }
+
+    /// Get the CPU's F register value (flags)
+    pub fn reg_f(&self) -> u8 {
+        self.cpu.f
+    }
+
+    /// Get the CPU's stack pointer
+    pub fn sp(&self) -> u32 {
+        self.cpu.sp
+    }
+
+    /// Get the CPU's I register (interrupt vector base)
+    pub fn reg_i(&self) -> u16 {
+        self.cpu.i
+    }
+
+    /// Get IFF1 (interrupt enable flag)
+    pub fn iff1(&self) -> bool {
+        self.cpu.iff1
+    }
+
+    /// Get IFF2 (interrupt enable shadow)
+    pub fn iff2(&self) -> bool {
+        self.cpu.iff2
+    }
+
+    /// Get interrupt mode
+    pub fn interrupt_mode(&self) -> InterruptMode {
+        self.cpu.im
+    }
+
+    /// Get ADL mode flag
+    pub fn adl(&self) -> bool {
+        self.cpu.adl
+    }
+
+    /// Get IRQ pending flag
+    pub fn irq_pending(&self) -> bool {
+        self.cpu.irq_pending
+    }
+
+    /// Get ON-key wake flag
+    pub fn on_key_wake(&self) -> bool {
+        self.cpu.on_key_wake
+    }
+
+    /// Read full interrupt status mask
+    pub fn interrupt_status(&self) -> u32 {
+        let lo = self.bus.ports.interrupt.read(0x00) as u32;
+        let b1 = (self.bus.ports.interrupt.read(0x01) as u32) << 8;
+        let b2 = (self.bus.ports.interrupt.read(0x02) as u32) << 16;
+        let b3 = (self.bus.ports.interrupt.read(0x03) as u32) << 24;
+        lo | b1 | b2 | b3
+    }
+
+    /// Read full interrupt enabled mask
+    pub fn interrupt_enabled(&self) -> u32 {
+        let lo = self.bus.ports.interrupt.read(0x04) as u32;
+        let b1 = (self.bus.ports.interrupt.read(0x05) as u32) << 8;
+        let b2 = (self.bus.ports.interrupt.read(0x06) as u32) << 16;
+        let b3 = (self.bus.ports.interrupt.read(0x07) as u32) << 24;
+        lo | b1 | b2 | b3
+    }
+
+    /// Read full interrupt raw mask
+    pub fn interrupt_raw(&self) -> u32 {
+        let lo = self.bus.ports.interrupt.read(0x08) as u32;
+        let b1 = (self.bus.ports.interrupt.read(0x09) as u32) << 8;
+        let b2 = (self.bus.ports.interrupt.read(0x0A) as u32) << 16;
+        let b3 = (self.bus.ports.interrupt.read(0x0B) as u32) << 24;
+        lo | b1 | b2 | b3
+    }
+
+    /// Read a control port byte (offset from 0xE00000)
+    pub fn control_read(&self, offset: u32) -> u8 {
+        self.bus.ports.control.read(offset)
+    }
+
+    /// Mask an address based on ADL/MBASE (debug helper)
+    pub fn mask_addr(&self, addr: u32) -> u32 {
+        self.cpu.mask_addr(addr)
+    }
+
+    /// Snapshot a timer's internal state (1, 2, or 3)
+    pub fn timer_snapshot(&self, which: usize) -> Option<TimerSnapshot> {
+        let timer = match which {
+            1 => &self.bus.ports.timer1,
+            2 => &self.bus.ports.timer2,
+            3 => &self.bus.ports.timer3,
+            _ => return None,
+        };
+
+        Some(TimerSnapshot {
+            counter: timer.counter(),
+            reset_value: timer.reset_value(),
+            match1: timer.match1(),
+            match2: timer.match2(),
+            control: timer.control(),
+        })
+    }
+
+    /// Snapshot LCD controller state
+    pub fn lcd_snapshot(&self) -> LcdSnapshot {
+        let lcd = &self.bus.ports.lcd;
+        LcdSnapshot {
+            timing: lcd.timing(),
+            control: lcd.control(),
+            int_mask: lcd.int_mask(),
+            int_status: lcd.int_status(),
+            upbase: lcd.upbase(),
+            lpbase: lcd.lpbase(),
+            palbase: lcd.palbase(),
+            frame_cycles: lcd.frame_cycles(),
+        }
+    }
+
+    /// Debug: Get flash unlock status for diagnostics
+    pub fn debug_flash_status(&self) -> String {
+        let ctrl = &self.bus.ports.control;
+        format!(
+            "Flash unlock: port0x06={:02X} (protected_unlocked={}), port0x28={:02X} (flash_ready={}), privileged=0x{:06X}",
+            ctrl.read(0x06),
+            ctrl.protected_ports_unlocked(),
+            ctrl.read(0x28),
+            ctrl.flash_ready(),
+            ctrl.privileged_boundary()
+        )
     }
 
     /// Dump execution history for debugging
@@ -434,6 +608,56 @@ impl Emu {
             0xFF => "RST 38H",
             _ => "...",
         }
+    }
+
+    /// Enable RAM write tracing for debugging
+    pub fn enable_write_tracing(&mut self) {
+        self.bus.write_tracer.enable();
+    }
+
+    /// Disable RAM write tracing
+    pub fn disable_write_tracing(&mut self) {
+        self.bus.write_tracer.disable();
+    }
+
+    /// Reset write trace data (keeps enabled state)
+    pub fn reset_write_trace(&mut self) {
+        self.bus.write_tracer.reset();
+    }
+
+    /// Get write trace summary
+    pub fn write_trace_summary(&self) -> String {
+        self.bus.write_tracer.summary()
+    }
+
+    /// Get total number of RAM writes traced
+    pub fn write_trace_total(&self) -> u64 {
+        self.bus.write_tracer.total_writes()
+    }
+
+    /// Get number of unique RAM addresses written
+    pub fn write_trace_unique_addresses(&self) -> usize {
+        self.bus.write_tracer.unique_addresses()
+    }
+
+    /// Check if a specific address was written during tracing
+    pub fn was_address_written(&self, addr: u32) -> bool {
+        self.bus.write_tracer.was_written(addr)
+    }
+
+    /// Get write count for a specific address
+    pub fn address_write_count(&self, addr: u32) -> u32 {
+        self.bus.write_tracer.write_count(addr)
+    }
+
+    /// Set a filter to only trace writes within an address range
+    pub fn set_write_trace_filter(&mut self, start: u32, end: u32) {
+        self.bus.write_tracer.set_filter_range(start, end);
+    }
+
+    /// Clear write trace filter (trace all RAM writes)
+    pub fn clear_write_trace_filter(&mut self) {
+        self.bus.write_tracer.clear_filter_range();
     }
 
     /// Get CPU register dump for debugging
@@ -586,6 +810,29 @@ mod tests {
     }
 
     #[test]
+    fn test_on_key_wake_sets_iff_for_pending_irq() {
+        let mut emu = Emu::new();
+        // ROM: DI (F3), HALT (76), NOP (00)
+        let rom = vec![0xF3, 0x76, 0x00];
+        emu.load_rom(&rom).unwrap();
+
+        // Run until HALT with interrupts disabled
+        emu.run_cycles(100);
+        assert!(emu.cpu.halted);
+        assert!(!emu.cpu.iff1);
+
+        // Press ON key to wake
+        emu.press_on_key();
+
+        // Manually step once to process the wake path
+        let cycles = emu.cpu.step(&mut emu.bus);
+        assert_eq!(cycles, 4);
+        assert!(!emu.cpu.halted);
+        assert!(emu.cpu.iff1);
+        assert!(emu.cpu.irq_pending);
+    }
+
+    #[test]
     fn test_on_key_raises_interrupt() {
         use crate::peripherals::interrupt::sources;
 
@@ -633,7 +880,6 @@ mod tests {
         // Set regular IRQ pending - should NOT wake because IFF1 is false
         emu.cpu.irq_pending = true;
 
-        let cycles_before = emu.total_cycles;
         emu.run_cycles(20);
 
         // CPU should still be halted (regular IRQ can't wake with DI)

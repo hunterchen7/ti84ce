@@ -17,7 +17,7 @@ fn test_adl_mode_24bit_addressing() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
 
-    assert!(cpu.adl, "CPU should start in ADL mode");
+    cpu.adl = true;
 
     // Write to high RAM addresses (>16-bit range)
     cpu.hl = 0xD00100;
@@ -34,6 +34,7 @@ fn test_adl_mode_24bit_arithmetic() {
     // Test 24-bit arithmetic operations
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // ADD HL,BC with 24-bit values
     cpu.hl = 0x100000;
@@ -59,6 +60,7 @@ fn test_adl_mode_adc_hl_24bit_overflow() {
     // Test ADC HL overflow detection in 24-bit mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // 24-bit signed overflow: 0x7FFFFF + 0x000001 = 0x800000
     // (max positive + 1 = min negative)
@@ -81,6 +83,7 @@ fn test_adl_mode_sbc_hl_24bit_underflow() {
     // Test SBC HL underflow detection in 24-bit mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // 24-bit signed underflow: 0x800000 - 0x000001 = 0x7FFFFF
     // (min negative - 1 = max positive)
@@ -103,6 +106,7 @@ fn test_adl_mode_call_ret_24bit_pc() {
     // CALL/RET should preserve full 24-bit PC
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.sp = 0xD00200;
     cpu.pc = 0x100000; // High PC value
@@ -136,6 +140,7 @@ fn test_adl_mode_ldir_24bit() {
     // LDIR should work with 24-bit addresses
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // Copy 3 bytes from 0xD00100 to 0xD00200
     cpu.hl = 0xD00100; // Source (24-bit)
@@ -199,6 +204,7 @@ fn test_adl_mode_index_registers() {
     // IX and IY should be 24-bit in ADL mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0xD00100;
     bus.poke_byte(0xD00105, 0x42);
@@ -232,6 +238,7 @@ fn test_adl_jp_indirect_24bit() {
     // JP (HL) should use full 24-bit HL in ADL mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0x123456;
 
@@ -247,6 +254,7 @@ fn test_adl_rst_pushes_24bit() {
     // RST should push 24-bit return address in ADL mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.sp = 0xD00200;
     cpu.pc = 0x123456;

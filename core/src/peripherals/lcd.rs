@@ -105,9 +105,44 @@ impl LcdController {
         self.control & ctrl::ENABLE != 0
     }
 
+    /// Get control register
+    pub fn control(&self) -> u32 {
+        self.control
+    }
+
+    /// Get interrupt mask
+    pub fn int_mask(&self) -> u32 {
+        self.int_mask
+    }
+
+    /// Get interrupt status
+    pub fn int_status(&self) -> u32 {
+        self.int_status
+    }
+
+    /// Get timing registers
+    pub fn timing(&self) -> [u32; 4] {
+        self.timing
+    }
+
     /// Get VRAM base address
     pub fn upbase(&self) -> u32 {
         self.upbase
+    }
+
+    /// Get lower panel base address
+    pub fn lpbase(&self) -> u32 {
+        self.lpbase
+    }
+
+    /// Get palette base address
+    pub fn palbase(&self) -> u32 {
+        self.palbase
+    }
+
+    /// Get current frame cycle accumulator
+    pub fn frame_cycles(&self) -> u32 {
+        self.frame_cycles
     }
 
     /// Tick the LCD controller

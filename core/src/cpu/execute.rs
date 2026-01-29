@@ -341,8 +341,10 @@ impl Cpu {
         match z {
             0 => {
                 // RET cc
+                // Uses L mode for stack operations, then ADL becomes L
                 if self.check_cc(y) {
                     self.pc = self.pop_addr(bus);
+                    self.adl = self.l;
                     if self.adl {
                         12
                     } else {
@@ -378,10 +380,9 @@ impl Cpu {
                     match p {
                         0 => {
                             // RET
-                            // Note: Cycle count doesn't differ by mode - the timing difference
-                            // comes from memory wait states when popping 3 bytes (ADL) vs
-                            // 2 bytes (Z80), which is handled by the Bus.
+                            // Uses L mode for stack operations, then ADL becomes L
                             self.pc = self.pop_addr(bus);
+                            self.adl = self.l;
                             10
                         }
                         1 => {
@@ -405,9 +406,11 @@ impl Cpu {
             }
             2 => {
                 // JP cc,nn
+                // Fetch uses IL mode, then ADL becomes IL if jump is taken
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
                     self.pc = nn;
+                    self.adl = self.il;
                 }
                 10
             }
@@ -415,7 +418,9 @@ impl Cpu {
                 match y {
                     0 => {
                         // JP nn
+                        // Fetch uses IL mode (set by suffix), then ADL becomes IL
                         self.pc = self.fetch_addr(bus);
+                        self.adl = self.il;
                         10
                     }
                     1 => {
@@ -461,9 +466,14 @@ impl Cpu {
                         4
                     }
                     7 => {
-                        // EI
-                        self.iff1 = true;
-                        self.iff2 = true;
+                        // EI - enable interrupts after the NEXT instruction completes
+                        // Set delay counter to 2:
+                        // - Step N (this step): EI executes, ei_delay = 2
+                        // - Step N+1: ei_delay decrements to 1, IFF1 still false
+                        //             instruction following EI executes fully
+                        // - Step N+2: ei_delay decrements to 0, IFF1 = true
+                        //             next interrupt check can fire
+                        self.ei_delay = 2;
                         4
                     }
                     _ => 4,
@@ -471,10 +481,12 @@ impl Cpu {
             }
             4 => {
                 // CALL cc,nn
+                // Fetch uses IL mode, push uses L mode, then ADL becomes IL if call is taken
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
                     self.push_addr(bus, self.pc);
                     self.pc = nn;
+                    self.adl = self.il;
                     if self.adl {
                         20
                     } else {
@@ -513,9 +525,11 @@ impl Cpu {
                     match p {
                         0 => {
                             // CALL nn
+                            // Fetch uses IL mode, push uses L mode, then ADL becomes IL
                             let nn = self.fetch_addr(bus);
                             self.push_addr(bus, self.pc);
                             self.pc = nn;
+                            self.adl = self.il;
                             if self.adl {
                                 20
                             } else {
@@ -691,9 +705,17 @@ impl Cpu {
             0 => self.execute_ed_x0(bus, y, z),
             1 => self.execute_ed_x1(bus, y, z, p, q),
             2 => {
-                // Block instructions (y >= 4, z <= 3)
-                if y >= 4 && z <= 3 {
-                    self.execute_bli(bus, y, z)
+                // Block instructions
+                // Standard Z80: y >= 4, z <= 3 (LDI/CPI/INI/OUTI and variants)
+                // eZ80 extended: y < 4, z = 2 or 3 (INIM/OTIM and variants)
+                if z <= 3 {
+                    if y >= 4 {
+                        // Standard Z80 block instructions
+                        self.execute_bli(bus, y, z)
+                    } else {
+                        // eZ80 extended block I/O instructions
+                        self.execute_bli_ez80(bus, y, z, p, q)
+                    }
                 } else {
                     8 // NOP for invalid
                 }
@@ -723,14 +745,26 @@ impl Cpu {
                 12
             }
             1 => {
-                // OUT0 (n),r - write to port address 0xFF00nn (eZ80 mapped I/O)
-                // The port byte n maps to address 0xFF0000 + n, which corresponds to
-                // the control ports region at 0xE000nn (aliased at 0xFF00nn).
-                let port = self.fetch_byte(bus) as u32;
-                let addr = 0xFF0000 | port;
-                let val = self.get_reg8(y, bus);
-                bus.write_byte(addr, val);
-                12
+                if y == 6 {
+                    // LD IY,(HL) - load IY from (HL)
+                    let addr = self.mask_addr(self.hl);
+                    let val = if self.l {
+                        bus.read_addr24(addr)
+                    } else {
+                        bus.read_word(addr) as u32
+                    };
+                    self.iy = self.wrap_pc(val);
+                    8
+                } else {
+                    // OUT0 (n),r - write to port address 0xFF00nn (eZ80 mapped I/O)
+                    // The port byte n maps to address 0xFF0000 + n, which corresponds to
+                    // the control ports region at 0xE000nn (aliased at 0xFF00nn).
+                    let port = self.fetch_byte(bus) as u32;
+                    let addr = 0xFF0000 | port;
+                    let val = self.get_reg8(y, bus);
+                    bus.write_byte(addr, val);
+                    12
+                }
             }
             4 => {
                 // TST A,r - test register (eZ80-specific)
@@ -744,12 +778,53 @@ impl Cpu {
                 8
             }
             6 if y == 7 => {
-                // SLP - enter sleep mode (on eZ80, similar to HALT but lower power)
-                // For now, treat as HALT
-                self.halted = true;
+                // LD (HL),IY - store IY at (HL)
+                let addr = self.mask_addr(self.hl);
+                if self.l {
+                    bus.write_addr24(addr, self.iy);
+                } else {
+                    bus.write_word(addr, self.iy as u16);
+                }
                 8
             }
-            _ => 8, // Other x=0 opcodes are NONI
+            7 => {
+                // LD rp3[p],(HL) or LD (HL),rp3[p]
+                // p = y >> 1, q = y & 1
+                let p = y >> 1;
+                let q = y & 1;
+                let addr = self.mask_addr(self.hl);
+                if q == 0 {
+                    // LD rp3[p],(HL) - load register pair from (HL)
+                    let val = if self.l {
+                        bus.read_addr24(addr)
+                    } else {
+                        bus.read_word(addr) as u32
+                    };
+                    match p {
+                        0 => self.bc = self.wrap_pc(val),
+                        1 => self.de = self.wrap_pc(val),
+                        2 => self.hl = self.wrap_pc(val),
+                        3 => self.iy = self.wrap_pc(val), // IY in rp3 context
+                        _ => {}
+                    }
+                } else {
+                    // LD (HL),rp3[p] - store register pair at (HL)
+                    let val = match p {
+                        0 => self.bc,
+                        1 => self.de,
+                        2 => self.hl,
+                        3 => self.iy, // IY in rp3 context
+                        _ => 0,
+                    };
+                    if self.l {
+                        bus.write_addr24(addr, val);
+                    } else {
+                        bus.write_word(addr, val as u16);
+                    }
+                }
+                8
+            }
+            _ => 8, // Other x=0 opcodes are NONI/undefined
         }
     }
 
@@ -757,12 +832,15 @@ impl Cpu {
     pub fn execute_ed_x1(&mut self, bus: &mut Bus, y: u8, z: u8, p: u8, q: u8) -> u32 {
         match z {
             0 => {
-                // IN r,(C) - returns garbage on TI-84 CE
-                let val = 0xFF; // I/O blocked, return garbage
+                // IN r,(C) - read from memory-mapped I/O at 0xFF00 | C
+                // On TI-84 CE, I/O is memory-mapped to 0xFF00xx where xx = C register
+                let port = self.c() as u32;
+                let addr = 0xFF0000 | port;
+                let val = bus.read_byte(addr);
                 if y != 6 {
                     self.set_reg8(y, val, bus);
                 }
-                // Set flags for IN (except for y=6 which is just IN F,(C))
+                // Set flags (even for y=6 which is IN F,(C))
                 self.set_sz_flags(val);
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -770,8 +848,12 @@ impl Cpu {
                 12
             }
             1 => {
-                // OUT (C),r - blocked on TI-84 CE
-                // Just consume cycles, no actual output
+                // OUT (C),r - write to memory-mapped I/O at 0xFF00 | C
+                // On TI-84 CE, I/O is memory-mapped to 0xFF00xx where xx = C register
+                let port = self.c() as u32;
+                let addr = 0xFF0000 | port;
+                let val = self.get_reg8(y, bus);
+                bus.write_byte(addr, val);
                 12
             }
             2 => {
@@ -883,30 +965,39 @@ impl Cpu {
                 8
             }
             5 => {
-                if q == 0 {
-                    // RETN
-                    self.iff1 = self.iff2;
-                    self.pc = self.pop_addr(bus);
-                    14
-                } else {
-                    // RETI
-                    self.pc = self.pop_addr(bus);
-                    14
+                // RETN/RETI - only specific y values are valid in eZ80
+                // ED 45 (y=0): RETN
+                // ED 4D (y=1): RETI
+                // Other y values (ED 55, 5D, 65, 6D, 75, 7D) are NOPs in eZ80/CEmu
+                match y {
+                    0 => {
+                        // RETN - Uses L mode for stack operations, then ADL becomes L
+                        self.iff1 = self.iff2;
+                        self.pc = self.pop_addr(bus);
+                        self.adl = self.l;
+                        14
+                    }
+                    1 => {
+                        // RETI - Uses L mode for stack operations, then ADL becomes L
+                        self.pc = self.pop_addr(bus);
+                        self.adl = self.l;
+                        14
+                    }
+                    _ => {
+                        // Undocumented Z80 aliases are NOP in eZ80
+                        8
+                    }
                 }
             }
             6 => {
-                // IM 0/1/2
+                // IM 0/1/2 (eZ80: only y=0/2/3 are IM; others are different ops)
                 // ED 46 (y=0) -> IM 0
                 // ED 56 (y=2) -> IM 1
                 // ED 5E (y=3) -> IM 2
-                // ED 66 (y=4) -> IM 0
-                // ED 6E (y=5) -> IM 0/1 (undocumented, treat as IM 0)
-                // ED 76 (y=6) -> IM 1
-                // ED 7E (y=7) -> IM 2
                 match y {
-                    0 | 1 | 4 | 5 => self.im = InterruptMode::Mode0,
-                    2 | 6 => self.im = InterruptMode::Mode1,
-                    3 | 7 => self.im = InterruptMode::Mode2,
+                    0 => self.im = InterruptMode::Mode0,
+                    2 => self.im = InterruptMode::Mode1,
+                    3 => self.im = InterruptMode::Mode2,
                     _ => {}
                 }
                 8
@@ -1012,46 +1103,58 @@ impl Cpu {
                 16
             }
             // LDIR - Load, increment, repeat
+            // Executes all iterations in a single instruction to match CEmu behavior
             (6, 0) => {
-                let val = bus.read_byte(self.mask_addr(self.hl));
-                bus.write_byte(self.mask_addr(self.de), val);
-                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
-                self.de = self.wrap_pc(self.de.wrapping_add(1));
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                let mut cycles = 0u32;
+                loop {
+                    let val = bus.read_byte(self.mask_addr(self.hl));
+                    bus.write_byte(self.mask_addr(self.de), val);
+                    self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+                    self.de = self.wrap_pc(self.de.wrapping_add(1));
+                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
-                self.set_flag_h(false);
-                self.set_flag_n(false);
-                self.set_flag_pv(self.bc != 0);
-                let n = val.wrapping_add(self.a);
-                self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                    self.set_flag_h(false);
+                    self.set_flag_n(false);
+                    self.set_flag_pv(self.bc != 0);
+                    let n = val.wrapping_add(self.a);
+                    self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
-                if self.bc != 0 {
-                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
-                    21
-                } else {
-                    16
+                    if self.bc != 0 {
+                        cycles += 21;
+                        // Continue looping internally
+                    } else {
+                        cycles += 16;
+                        break;
+                    }
                 }
+                cycles
             }
             // LDDR - Load, decrement, repeat
+            // Executes all iterations in a single instruction to match CEmu behavior
             (7, 0) => {
-                let val = bus.read_byte(self.mask_addr(self.hl));
-                bus.write_byte(self.mask_addr(self.de), val);
-                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
-                self.de = self.wrap_pc(self.de.wrapping_sub(1));
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                let mut cycles = 0u32;
+                loop {
+                    let val = bus.read_byte(self.mask_addr(self.hl));
+                    bus.write_byte(self.mask_addr(self.de), val);
+                    self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
+                    self.de = self.wrap_pc(self.de.wrapping_sub(1));
+                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
-                self.set_flag_h(false);
-                self.set_flag_n(false);
-                self.set_flag_pv(self.bc != 0);
-                let n = val.wrapping_add(self.a);
-                self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                    self.set_flag_h(false);
+                    self.set_flag_n(false);
+                    self.set_flag_pv(self.bc != 0);
+                    let n = val.wrapping_add(self.a);
+                    self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
-                if self.bc != 0 {
-                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
-                    21
-                } else {
-                    16
+                    if self.bc != 0 {
+                        cycles += 21;
+                        // Continue looping internally
+                    } else {
+                        cycles += 16;
+                        break;
+                    }
                 }
+                cycles
             }
             // CPI - Compare and increment
             (4, 1) => {
@@ -1087,54 +1190,151 @@ impl Cpu {
                 16
             }
             // CPIR - Compare, increment, repeat
+            // Executes all iterations in a single instruction to match CEmu behavior
+            // Stops when BC=0 or when A matches the memory byte (result=0)
             (6, 1) => {
-                let val = bus.read_byte(self.mask_addr(self.hl));
-                let result = self.a.wrapping_sub(val);
-                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
-                // BC is a counter, not an address
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                let mut cycles = 0u32;
+                loop {
+                    let val = bus.read_byte(self.mask_addr(self.hl));
+                    let result = self.a.wrapping_sub(val);
+                    self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+                    // BC is a counter, not an address
+                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
-                self.set_sz_flags(result);
-                self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
-                self.set_flag_n(true);
-                self.set_flag_pv(self.bc != 0);
-                let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
-                self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                    self.set_sz_flags(result);
+                    self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
+                    self.set_flag_n(true);
+                    self.set_flag_pv(self.bc != 0);
+                    let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
+                    self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
-                if self.bc != 0 && result != 0 {
-                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
-                    21
-                } else {
-                    16
+                    if self.bc != 0 && result != 0 {
+                        cycles += 21;
+                        // Continue looping internally
+                    } else {
+                        cycles += 16;
+                        break;
+                    }
                 }
+                cycles
             }
             // CPDR - Compare, decrement, repeat
+            // Executes all iterations in a single instruction to match CEmu behavior
+            // Stops when BC=0 or when A matches the memory byte (result=0)
             (7, 1) => {
-                let val = bus.read_byte(self.mask_addr(self.hl));
-                let result = self.a.wrapping_sub(val);
-                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
-                // BC is a counter, not an address
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                let mut cycles = 0u32;
+                loop {
+                    let val = bus.read_byte(self.mask_addr(self.hl));
+                    let result = self.a.wrapping_sub(val);
+                    self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
+                    // BC is a counter, not an address
+                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
 
-                self.set_sz_flags(result);
-                self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
-                self.set_flag_n(true);
-                self.set_flag_pv(self.bc != 0);
-                let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
-                self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
+                    self.set_sz_flags(result);
+                    self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
+                    self.set_flag_n(true);
+                    self.set_flag_pv(self.bc != 0);
+                    let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
+                    self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
-                if self.bc != 0 && result != 0 {
-                    self.pc = self.wrap_pc(self.pc.wrapping_sub(2));
-                    21
-                } else {
-                    16
+                    if self.bc != 0 && result != 0 {
+                        cycles += 21;
+                        // Continue looping internally
+                    } else {
+                        cycles += 16;
+                        break;
+                    }
                 }
+                cycles
             }
             // INI, IND, INIR, INDR - I/O blocked on TI-84 CE
             (4, 2) | (5, 2) | (6, 2) | (7, 2) => 16,
             // OUTI, OUTD, OTIR, OTDR - I/O blocked on TI-84 CE
             (4, 3) | (5, 3) | (6, 3) | (7, 3) => 16,
             _ => 8,
+        }
+    }
+
+    /// Execute eZ80 extended block I/O instructions (ED prefix, x=2, y<4)
+    /// These include OTIM, OTDM, OTIMR, OTDMR, INIM, INDM, INIMR, INDMR
+    /// I/O is blocked on TI-84 CE, but registers still update
+    ///
+    /// Note: Repeat variants (INIMR, INDMR, OTIMR, OTDMR) execute all iterations
+    /// in a single instruction, matching CEmu behavior. This is different from the
+    /// standard Z80 block instructions which use PC rewind.
+    pub fn execute_bli_ez80(&mut self, bus: &mut Bus, y: u8, z: u8, p: u8, q: u8) -> u32 {
+        // delta = q ? -1 : 1
+        let delta: i32 = if q != 0 { -1 } else { 1 };
+        let is_repeat = p == 1;
+
+        match (z, p, q) {
+            // z=2: Input instructions (INIM, INDM, INIMR, INDMR)
+            // These read from port C, write to (HL), modify BC, and HL
+            (2, 0, _) | (2, 1, _) => {
+                let mut cycles = 0u32;
+                loop {
+                    // INIM/INDM (p=0) or INIMR/INDMR (p=1)
+                    // Read from port - blocked on TI-84 CE, returns 0xFF
+                    let val = 0xFF;
+                    bus.write_byte(self.mask_addr(self.hl), val);
+                    self.hl = self.wrap_pc((self.hl as i32 + delta) as u32);
+                    // Update C by delta
+                    let c = (self.c() as i32 + delta) as u8;
+                    self.set_c(c);
+                    // Decrement B
+                    let old_b = self.b();
+                    let new_b = old_b.wrapping_sub(1);
+                    self.set_b(new_b);
+
+                    // Set flags
+                    self.set_sz_flags(new_b);
+                    self.set_flag_h((old_b & 0x0F) == 0);
+                    self.set_flag_n(val & 0x80 != 0);
+
+                    if is_repeat && new_b != 0 {
+                        cycles += 21;
+                        // Continue looping internally
+                    } else {
+                        cycles += 16;
+                        break;
+                    }
+                }
+                cycles
+            }
+            // z=3: Output instructions (OTIM, OTDM, OTIMR, OTDMR)
+            // These read from (HL), write to port C, modify BC, and HL
+            (3, 0, _) | (3, 1, _) => {
+                let mut cycles = 0u32;
+                loop {
+                    // OTIM/OTDM (p=0) or OTIMR/OTDMR (p=1)
+                    // Read from memory
+                    let val = bus.read_byte(self.mask_addr(self.hl));
+                    // Output to port - blocked on TI-84 CE, ignored
+                    self.hl = self.wrap_pc((self.hl as i32 + delta) as u32);
+                    // Update C by delta
+                    let c = (self.c() as i32 + delta) as u8;
+                    self.set_c(c);
+                    // Decrement B
+                    let old_b = self.b();
+                    let new_b = old_b.wrapping_sub(1);
+                    self.set_b(new_b);
+
+                    // Set flags
+                    self.set_sz_flags(new_b);
+                    self.set_flag_h((old_b & 0x0F) == 0);
+                    self.set_flag_n(val & 0x80 != 0);
+
+                    if is_repeat && new_b != 0 {
+                        cycles += 21;
+                        // Continue looping internally
+                    } else {
+                        cycles += 16;
+                        break;
+                    }
+                }
+                cycles
+            }
+            _ => 8, // Unknown eZ80 BLI opcode
         }
     }
 

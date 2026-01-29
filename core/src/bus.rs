@@ -15,6 +15,7 @@
 //! Reference: CEmu (https://github.com/CE-Programming/CEmu)
 
 use crate::memory::{addr, Flash, FlashError, Ports, Ram};
+use std::collections::BTreeMap;
 
 /// Bus access type for debugging/tracing
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +71,236 @@ impl BusRng {
     }
 }
 
+/// Flash unlock sequence detected during instruction fetch
+/// This specific sequence in the ROM unlocks flash write access.
+/// From CEmu mem.c: triggers when BIT 2, A is fetched after the unlock sequence
+/// The sequence must be fetched by PRIVILEGED code (PC <= privileged boundary)
+/// NOTE: Some ROMs use a single DI, others use double DI before IM 2/IM 1.
+const FLASH_UNLOCK_SEQUENCE: [u8; 16] = [
+    0xF3, 0x18, 0x00, // DI; JR 0
+    0xF3,             // DI (single, not double like CEmu's sequence)
+    0xED, 0x7E,       // IM 2
+    0xED, 0x56,       // IM 1
+    0xED, 0x39, 0x28, // OUT0 (0x28), A
+    0xED, 0x38, 0x28, // IN0 A, (0x28)
+    0xCB, 0x57,       // BIT 2, A - detection triggers on this last byte
+];
+
+/// Alternate unlock sequence with double DI (CEmu reference)
+const FLASH_UNLOCK_SEQUENCE_DOUBLE_DI: [u8; 17] = [
+    0xF3, 0x18, 0x00, // DI; JR 0
+    0xF3, 0xF3,       // DI, DI (double)
+    0xED, 0x7E,       // IM 2
+    0xED, 0x56,       // IM 1
+    0xED, 0x39, 0x28, // OUT0 (0x28), A
+    0xED, 0x38, 0x28, // IN0 A, (0x28)
+    0xCB, 0x57,       // BIT 2, A - detection triggers on this last byte
+];
+
+/// Size of the fetch buffer for sequence detection
+const FETCH_BUFFER_SIZE: usize = 32;
+
+/// Maximum number of unique write addresses to track before stopping
+const MAX_TRACKED_WRITES: usize = 10000;
+
+/// A single recorded write operation for detailed tracing
+#[derive(Debug, Clone, Copy)]
+pub struct WriteRecord {
+    /// Address written to (absolute, in RAM range 0xD00000-0xD657FF)
+    pub addr: u32,
+    /// Value written
+    pub value: u8,
+    /// Bus cycle when write occurred
+    pub cycle: u64,
+}
+
+/// Write tracer for debugging RAM writes during boot
+///
+/// This is designed for investigating boot behavior to determine
+/// if/when RAM is being initialized.
+pub struct WriteTracer {
+    /// Whether tracing is enabled
+    enabled: bool,
+    /// Total count of RAM writes
+    total_writes: u64,
+    /// Per-address write counts (address -> count)
+    address_counts: BTreeMap<u32, u32>,
+    /// First N writes recorded in detail
+    detailed_log: Vec<WriteRecord>,
+    /// Max detailed records to keep
+    max_detailed: usize,
+    /// Address range filter (start, end) - only track writes in this range
+    /// If None, track all RAM writes
+    filter_range: Option<(u32, u32)>,
+}
+
+impl WriteTracer {
+    /// Create a new disabled write tracer
+    pub fn new() -> Self {
+        Self {
+            enabled: false,
+            total_writes: 0,
+            address_counts: BTreeMap::new(),
+            detailed_log: Vec::new(),
+            max_detailed: 1000,
+            filter_range: None,
+        }
+    }
+
+    /// Enable tracing
+    pub fn enable(&mut self) {
+        self.enabled = true;
+    }
+
+    /// Disable tracing
+    pub fn disable(&mut self) {
+        self.enabled = false;
+    }
+
+    /// Check if tracing is enabled
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Set a filter range - only track writes within [start, end)
+    /// Addresses are absolute (0xD00000 range)
+    pub fn set_filter_range(&mut self, start: u32, end: u32) {
+        self.filter_range = Some((start, end));
+    }
+
+    /// Clear the filter range (track all RAM writes)
+    pub fn clear_filter_range(&mut self) {
+        self.filter_range = None;
+    }
+
+    /// Set the maximum number of detailed records to keep
+    pub fn set_max_detailed(&mut self, max: usize) {
+        self.max_detailed = max;
+    }
+
+    /// Record a write operation
+    pub fn record(&mut self, addr: u32, value: u8, cycle: u64) {
+        if !self.enabled {
+            return;
+        }
+
+        // Apply filter if set
+        if let Some((start, end)) = self.filter_range {
+            if addr < start || addr >= end {
+                return;
+            }
+        }
+
+        self.total_writes += 1;
+
+        // Track per-address counts (with limit to prevent memory explosion)
+        if self.address_counts.len() < MAX_TRACKED_WRITES {
+            *self.address_counts.entry(addr).or_insert(0) += 1;
+        }
+
+        // Keep detailed log of first N writes
+        if self.detailed_log.len() < self.max_detailed {
+            self.detailed_log.push(WriteRecord { addr, value, cycle });
+        }
+    }
+
+    /// Reset all tracking data
+    pub fn reset(&mut self) {
+        self.total_writes = 0;
+        self.address_counts.clear();
+        self.detailed_log.clear();
+    }
+
+    /// Get total number of writes recorded
+    pub fn total_writes(&self) -> u64 {
+        self.total_writes
+    }
+
+    /// Get number of unique addresses written to
+    pub fn unique_addresses(&self) -> usize {
+        self.address_counts.len()
+    }
+
+    /// Get the detailed write log
+    pub fn detailed_log(&self) -> &[WriteRecord] {
+        &self.detailed_log
+    }
+
+    /// Get addresses sorted by write count (descending)
+    pub fn top_addresses(&self, limit: usize) -> Vec<(u32, u32)> {
+        let mut sorted: Vec<_> = self.address_counts.iter()
+            .map(|(&addr, &count)| (addr, count))
+            .collect();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.truncate(limit);
+        sorted
+    }
+
+    /// Get the lowest and highest addresses written to
+    pub fn address_range(&self) -> Option<(u32, u32)> {
+        if self.address_counts.is_empty() {
+            None
+        } else {
+            let min = *self.address_counts.keys().next().unwrap();
+            let max = *self.address_counts.keys().next_back().unwrap();
+            Some((min, max))
+        }
+    }
+
+    /// Check if a specific address was written to
+    pub fn was_written(&self, addr: u32) -> bool {
+        self.address_counts.contains_key(&addr)
+    }
+
+    /// Get write count for a specific address
+    pub fn write_count(&self, addr: u32) -> u32 {
+        self.address_counts.get(&addr).copied().unwrap_or(0)
+    }
+
+    /// Generate a summary report
+    pub fn summary(&self) -> String {
+        let mut s = String::new();
+        s.push_str(&format!("=== RAM Write Trace Summary ===\n"));
+        s.push_str(&format!("Tracing enabled: {}\n", self.enabled));
+        s.push_str(&format!("Total writes: {}\n", self.total_writes));
+        s.push_str(&format!("Unique addresses: {}\n", self.unique_addresses()));
+
+        if let Some((min, max)) = self.address_range() {
+            s.push_str(&format!("Address range: 0x{:06X} - 0x{:06X}\n", min, max));
+        } else {
+            s.push_str("Address range: (no writes)\n");
+        }
+
+        if !self.address_counts.is_empty() {
+            s.push_str("\nTop 20 written addresses:\n");
+            for (addr, count) in self.top_addresses(20) {
+                s.push_str(&format!("  0x{:06X}: {} writes\n", addr, count));
+            }
+        }
+
+        if !self.detailed_log.is_empty() {
+            s.push_str(&format!("\nFirst {} writes:\n", self.detailed_log.len().min(50)));
+            for (i, rec) in self.detailed_log.iter().take(50).enumerate() {
+                s.push_str(&format!(
+                    "  {:4}: cycle {:8} | 0x{:06X} <- 0x{:02X}\n",
+                    i, rec.cycle, rec.addr, rec.value
+                ));
+            }
+            if self.detailed_log.len() > 50 {
+                s.push_str(&format!("  ... and {} more\n", self.detailed_log.len() - 50));
+            }
+        }
+
+        s
+    }
+}
+
+impl Default for WriteTracer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// System bus connecting CPU to memory subsystems
 pub struct Bus {
     /// Flash memory
@@ -82,6 +313,12 @@ pub struct Bus {
     rng: BusRng,
     /// Cycle counter for timing
     cycles: u64,
+    /// Circular buffer of recently fetched instruction bytes
+    fetch_buffer: [u8; FETCH_BUFFER_SIZE],
+    /// Current index in fetch buffer (points to most recent byte + 1)
+    fetch_index: usize,
+    /// Write tracer for debugging RAM writes
+    pub write_tracer: WriteTracer,
 }
 
 impl Bus {
@@ -102,6 +339,9 @@ impl Bus {
             ports: Ports::new(),
             rng: BusRng::new(),
             cycles: 0,
+            fetch_buffer: [0; FETCH_BUFFER_SIZE],
+            fetch_index: 0,
+            write_tracer: WriteTracer::new(),
         }
     }
 
@@ -147,7 +387,8 @@ impl Bus {
             }
             MemoryRegion::Ports => {
                 self.cycles += Self::PORT_READ_CYCLES;
-                self.ports.read(addr - addr::PORT_START, self.ports.key_state())
+                let keys = *self.ports.key_state();
+                self.ports.read(addr - addr::PORT_START, &keys)
             }
             MemoryRegion::Unmapped => {
                 self.cycles += Self::UNMAPPED_CYCLES;
@@ -155,6 +396,94 @@ impl Bus {
             }
         }
     }
+
+    /// Fetch a byte for instruction execution
+    /// This records the byte in the fetch buffer for flash unlock sequence detection
+    ///
+    /// # Arguments
+    /// * `addr` - 24-bit address to fetch from
+    /// * `pc` - Current program counter (for privilege check)
+    ///
+    /// # Returns
+    /// The byte at the given address
+    pub fn fetch_byte(&mut self, addr: u32, pc: u32) -> u8 {
+        let addr = addr & addr::ADDR_MASK;
+        let is_flash = matches!(Self::decode_address(addr), MemoryRegion::Flash);
+
+        let value = match Self::decode_address(addr) {
+            MemoryRegion::Flash => {
+                self.cycles += Self::FLASH_READ_CYCLES;
+                self.flash.read(addr)
+            }
+            MemoryRegion::Ram | MemoryRegion::Vram => {
+                self.cycles += Self::RAM_READ_CYCLES;
+                self.ram.read(addr - addr::RAM_START)
+            }
+            MemoryRegion::Ports => {
+                self.cycles += Self::PORT_READ_CYCLES;
+                let keys = *self.ports.key_state();
+                self.ports.read(addr - addr::PORT_START, &keys)
+            }
+            MemoryRegion::Unmapped => {
+                self.cycles += Self::UNMAPPED_CYCLES;
+                self.rng.next()
+            }
+        };
+
+        // CEmu: When fetching from flash, check for unlock sequence BEFORE updating buffer
+        // Only privileged code can trigger the unlock (is_unprivileged returns false)
+        // The detection must happen BEFORE we add the current byte to the buffer,
+        // because the buffer should contain the previous N-1 bytes of the sequence
+        if is_flash && self.detect_flash_unlock_sequence(value, pc) {
+            self.ports.control.set_flash_ready();
+        }
+
+        // Record in fetch buffer AFTER checking (like CEmu's check then mem.buffer[++mem.fetch] = value)
+        self.fetch_buffer[self.fetch_index] = value;
+        self.fetch_index = (self.fetch_index + 1) % FETCH_BUFFER_SIZE;
+
+        // CEmu: If flash is unlocked AND unprivileged code is fetching, clear the unlock
+        // This happens after the buffer update
+        if self.ports.control.flash_ready() && self.ports.control.is_unprivileged(pc) {
+            self.ports.control.clear_flash_ready();
+        }
+
+        value
+    }
+
+    /// Check if the fetch buffer contains the flash unlock sequence
+    /// CEmu: Only triggers for privileged code (unprivileged_code() returns false)
+    fn detect_flash_unlock_sequence(&self, current: u8, pc: u32) -> bool {
+        // The sequence ends with 0x57 (last byte of BIT 2, A)
+        if current != FLASH_UNLOCK_SEQUENCE[FLASH_UNLOCK_SEQUENCE.len() - 1] {
+            return false;
+        }
+
+        // Protected ports must be unlocked (port 0x06 bit 2)
+        if !self.ports.control.protected_ports_unlocked() {
+            return false;
+        }
+
+        // CEmu: Only privileged code can unlock flash
+        if self.ports.control.is_unprivileged(pc) {
+            return false;
+        }
+
+        // Accept either single-DI or double-DI sequences.
+        self.matches_flash_unlock_sequence(&FLASH_UNLOCK_SEQUENCE)
+            || self.matches_flash_unlock_sequence(&FLASH_UNLOCK_SEQUENCE_DOUBLE_DI)
+    }
+
+    fn matches_flash_unlock_sequence(&self, sequence: &[u8]) -> bool {
+        for i in 1..sequence.len() {
+            let buf_idx = (self.fetch_index + FETCH_BUFFER_SIZE - i) % FETCH_BUFFER_SIZE;
+            if self.fetch_buffer[buf_idx] != sequence[sequence.len() - 1 - i] {
+                return false;
+            }
+        }
+        true
+    }
+
 
     /// Write a byte to the bus
     ///
@@ -172,6 +501,10 @@ impl Bus {
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.cycles += Self::RAM_WRITE_CYCLES;
+                // Record write for tracing (before actually writing)
+                if self.write_tracer.is_enabled() {
+                    self.write_tracer.record(addr, value, self.cycles);
+                }
                 self.ram.write(addr - addr::RAM_START, value);
             }
             MemoryRegion::Ports => {
@@ -231,7 +564,7 @@ impl Bus {
     }
 
     /// Peek at a byte without affecting cycles (for debugging)
-    pub fn peek_byte(&self, addr: u32) -> u8 {
+    pub fn peek_byte(&mut self, addr: u32) -> u8 {
         let addr = addr & addr::ADDR_MASK;
 
         match Self::decode_address(addr) {
@@ -239,7 +572,10 @@ impl Bus {
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.ram.read(addr - addr::RAM_START)
             }
-            MemoryRegion::Ports => self.ports.read(addr - addr::PORT_START, self.ports.key_state()),
+            MemoryRegion::Ports => {
+                let keys = *self.ports.key_state();
+                self.ports.read(addr - addr::PORT_START, &keys)
+            }
             MemoryRegion::Unmapped => 0x00,
         }
     }
@@ -293,7 +629,11 @@ impl Bus {
         self.ports.reset();
         self.cycles = 0;
         self.rng = BusRng::new();
+        self.fetch_buffer = [0; FETCH_BUFFER_SIZE];
+        self.fetch_index = 0;
+        self.write_tracer.reset();
         // Note: Flash is NOT reset - ROM data is preserved
+        // Note: Write tracer enabled state is preserved across reset
     }
 
     /// Set key state for peripheral reads
@@ -358,6 +698,30 @@ mod tests {
         assert_eq!(Bus::decode_address(0xE00000), MemoryRegion::Ports);
         assert_eq!(Bus::decode_address(0xF50000), MemoryRegion::Ports);
         assert_eq!(Bus::decode_address(0xFFFFFF), MemoryRegion::Ports);
+    }
+
+    fn run_flash_unlock_sequence(bus: &mut Bus, sequence: &[u8]) {
+        // Unlock protected ports (port 0x06 bit 2)
+        bus.ports.control.write(0x06, 0x04);
+
+        for (i, &byte) in sequence.iter().enumerate() {
+            bus.flash.write_direct(i as u32, byte);
+            let _ = bus.fetch_byte(i as u32, i as u32);
+        }
+    }
+
+    #[test]
+    fn test_flash_unlock_sequence_single_di() {
+        let mut bus = Bus::new();
+        run_flash_unlock_sequence(&mut bus, &FLASH_UNLOCK_SEQUENCE);
+        assert!(bus.ports.control.flash_ready());
+    }
+
+    #[test]
+    fn test_flash_unlock_sequence_double_di() {
+        let mut bus = Bus::new();
+        run_flash_unlock_sequence(&mut bus, &FLASH_UNLOCK_SEQUENCE_DOUBLE_DI);
+        assert!(bus.ports.control.flash_ready());
     }
 
     #[test]
