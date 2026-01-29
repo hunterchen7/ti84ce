@@ -26,7 +26,8 @@ pub mod sources {
     pub const WAKE: u32 = 1 << 19;
 }
 
-/// Register offsets within the interrupt controller
+/// Register offsets within the interrupt controller (used in tests)
+#[cfg(test)]
 mod regs {
     /// Interrupt status/latch (read: status, write: acknowledge)
     pub const STATUS: u32 = 0x00;
