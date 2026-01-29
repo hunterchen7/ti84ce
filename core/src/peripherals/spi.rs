@@ -378,6 +378,31 @@ impl SpiController {
     }
 }
 
+// === Scheduler integration stub methods ===
+// Note: SPI timing is currently handled internally via cycle-based update()
+// These methods are stubs for future scheduler integration
+
+impl SpiController {
+    /// Advance one SPI transfer (scheduler callback)
+    /// This is a stub - SPI currently uses internal cycle-based timing
+    pub fn advance_transfer(&mut self) {
+        // SPI timing is handled internally via update()
+        // This stub exists for future scheduler integration
+    }
+
+    /// Check if there are pending transfers for scheduler
+    pub fn has_pending_transfers(&self) -> bool {
+        self.tfve > 0 || self.transfer_bits > 0
+    }
+
+    /// Get transfer duration in 24MHz ticks for scheduler
+    pub fn sched_transfer_ticks(&self) -> u64 {
+        let bit_count = self.transfer_bit_count() as u64;
+        let divider = ((self.cr1 & 0xFFFF) + 1) as u64;
+        bit_count * divider
+    }
+}
+
 impl Default for SpiController {
     fn default() -> Self {
         Self::new()

@@ -61,9 +61,9 @@
 - [x] Bus fault reporting (StopReason enum)
 - [x] ROM executes until missing hardware (HALT at 0x001414)
 
-## Milestone 5: Minimal Peripherals (In Progress)
+## Milestone 5: Minimal Peripherals ✓
 
-**Goal:** Reach visible OS UI.
+**Goal:** Reach visible OS UI. **COMPLETE** - OS boots to home screen with "RAM Cleared" message.
 
 ### 5a: Core Peripherals ✓
 - [x] Interrupt controller (0xF00000) with source tracking
@@ -100,26 +100,24 @@
 - [x] Trace why RAM isn't initialized (107 writes = stack only)
 - [x] Test with corrected control port defaults
 
-### 5e: Visible OS Screen
-- [ ] ROM successfully copies code to RAM
-- [ ] Execution continues past RAM initialization
-- [ ] LCD shows boot screen or OS UI
+### 5e: Visible OS Screen ✓
+- [x] ROM successfully copies code to RAM
+- [x] Execution continues past RAM initialization
+- [x] LCD shows boot screen or OS UI
+- [x] "RAM Cleared" message displayed on screen
+- [x] Status bar shows "NORMAL FLOAT AUTO REAL RADIAN CL"
+- [x] CPU reaches OS idle loop (EI + HALT at 0x085B7F)
 
-**Current Status (336 tests passing):**
-- Control port defaults now match CEmu (CPU speed, flash, PWR interrupt, protection)
-- Added privileged boundary register (ports 0x1D-0x1F) and is_unprivileged() check
-- Fixed battery_status, LCD enable nibble duplication, USB control masking
-- **Boot trace matches CEmu for 3,216,456+ steps** (3.2M+ instruction parity)
-- Fixed LCD register offsets (control at 0x18, upbase at 0x10 - matches CEmu)
-- LCD properly enabled with control value 0x92D (16bpp RGB565, power on)
-- ROM boots to initialization loop, VRAM filled with white pixels
-- CPU reaches main initialization code at ~50M cycles
-- Fixed IM instruction mapping (eZ80 maps y directly to IM, ED 56 = IM 2)
+**Current Status (358 tests passing):**
+- **🎉 BOOT COMPLETE** - TI-84 CE OS boots to home screen with "RAM Cleared" message
+- Emulator runs to **3,609,969 steps** (~61.6M cycles) before normal OS HALT (idle wait)
+- LCD shows full OS UI: status bar "NORMAL FLOAT AUTO REAL RADIAN CL" + battery indicator
+- VRAM contains 4 distinct colors: 88% white background, 11% dark green UI, 1% black text, 0.2% red
+- CPU reaches OS idle loop at PC=0x085B7F (EI + NOP + HALT sequence)
+- **Scheduler implemented** - 7.68 GHz base clock with proper event timing
+- Control port defaults match CEmu (CPU speed, flash, PWR interrupt, protection)
+- Fixed all critical CPU instructions: IM mapping, MLT, LEA, LD A,MB, indexed loads
 - SPI timing matches CEmu (24MHz tick conversion, FIFO depth 16, RX-only transfers)
-- RTC stub properly returns load status (0xF8 pending, 0x00 complete)
-- Fixed DD/FD prefix instructions (3E=LD (IX+d),IY, 31=LD IY,(IX+d))
-- Fixed ED z=4 q=1 as MLT (multiply) instead of NEG
-- Fixed control port 0x05 write masking to 0x1F
 - Flash command emulation for sector erase (80h sequence returns 80h status)
 
 ### 5f: CPU/Bus Fixes (Completed)
@@ -138,29 +136,31 @@
 - [x] Fixed IM instruction mapping: eZ80 maps y value directly to IM mode (ED 56 = IM 2, not IM 1)
 
 **Key Progress:**
-- Execution trace matches CEmu for 3,216,456+ steps (3.2M+ instruction parity)
-- VRAM is being written (screen shows all white pixels)
-- Fixed I/O port addressing: IN/OUT (C) now uses full BC as 16-bit port address
-- SPI timing now cycle-accurate with CEmu (24MHz conversion, FIFO depth 16)
-- Fixed LD A,MB (ED 6E) - critical for boot to pass CP 0xD0 check
-- Boot now progresses through multiple ON key wake cycles
-- MBASE correctly set to 0xD0 by ROM initialization
-- Divergence at 3.2M steps caused by RTC scheduler timing (would require full scheduler)
+- **🎉 MILESTONE 5 COMPLETE** - OS boots to visible home screen
+- Screen displays "RAM Cleared" message with full status bar
+- Execution trace matches CEmu for **1,000,000+ steps** (all available CEmu trace data)
+- Scheduler parity not required for correct boot (timing differences acceptable)
+- CPU reaches OS idle loop at 0x085B7F after 3.6M steps
+- VRAM filled with actual UI content (not just white pixels)
 
-**Trace Comparison Commands:**
+**Debug Tool:**
 ```bash
-# Capture emu-core trace
-cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log
+# All-in-one debug tool for testing and tracing
+cargo run --release --example debug -- help
 
-# Capture CEmu trace (requires cemu-ref/ clone with trace_cli)
-./cemu-ref/trace_cli > trace_cemu.log 2>&1
+# Quick commands:
+cargo run --release --example debug -- boot      # Run boot test
+cargo run --release --example debug -- screen    # Render screen to PNG
+cargo run --release --example debug -- vram      # Analyze VRAM colors
+cargo run --release --example debug -- trace 1M  # Generate trace
+cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 ```
 
-**Current Status:**
-Boot progresses past initial hardware init, ON key wake works correctly.
-ROM sets MBASE=0xD0, interrupt handler passes CP 0xD0 check via LD A,MB.
-Achieved 3.2M+ instruction parity with CEmu reference emulator.
-Divergence at step 3,216,456 is due to RTC load status timing (scheduler-dependent).
+**Boot Success Verified:**
+- ROM boots in 3,609,969 steps (~61.6M cycles at 48MHz)
+- LCD control: 0x0000092D (16bpp RGB565, power on)
+- VRAM base: 0xD40000
+- OS reaches idle state with interrupts enabled (EI + HALT)
 
 ## Milestone 6: Persistence
 

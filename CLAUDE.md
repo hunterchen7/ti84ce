@@ -17,6 +17,17 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 
 ## Workflow
 
+- **Use the debug tool for testing** - From `core/` directory, use cargo aliases:
+  ```bash
+  cd core
+  cargo boot      # Test boot progress
+  cargo screen    # Render screen to PNG
+  cargo vram      # Analyze VRAM colors
+  cargo trace     # Generate trace (100k steps)
+  cargo dbg       # Show help
+  cargo t         # Run tests
+  ```
+  For more options: `cargo run --release --example debug -- <command>`
 - **Minimize Grep tool usage** - Prefer Read tool with specific line ranges when possible, as Grep requires manual approval. Use Read to examine specific file sections rather than searching.
 - **Update milestones when completing features** - After implementing a feature from [docs/milestones.md](docs/milestones.md), mark it as complete (`[x]`) and update the test count and status section.
 - **Document interesting findings** - When discovering esoteric behavior or surprising implementation details, add them to [docs/findings.md](docs/findings.md). This includes:
@@ -84,9 +95,10 @@ CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
 | `mem.c`        | ⚠️ Partial     | Memory protection checks disabled                         |
 | `backlight.c`  | ❌ Stub        | Not needed for boot                                       |
 | `misc.c`       | ✅ Stub        | peripherals/watchdog.rs                                   |
-| `realclock.c`  | ✅ Stub        | peripherals/rtc.rs                                        |
+| `realclock.c`  | ✅ Implemented | peripherals/rtc.rs + scheduler integration                |
+| `schedule.c`   | ✅ Implemented | scheduler.rs (7.68 GHz base clock)                        |
 | `sha256.c`     | ❌ Missing     | SHA256 accelerator                                        |
-| `spi.c`        | ⚠️ Stub        | Status register stub for boot                             |
+| `spi.c`        | ✅ Implemented | peripherals/spi.rs (FIFO, timing, RX-only transfers)      |
 | `uart.c`       | ❌ Missing     | Serial port                                               |
 | `usb/`         | ❌ Missing     | USB controller                                            |
 
@@ -133,14 +145,21 @@ Accessed via OUT0/IN0 instructions or direct memory access:
 
 ### Boot Sequence Notes
 
+**Boot is complete!** The emulator successfully boots to the TI-84 CE home screen.
+
 The ROM boot sequence:
 
 1. Disables interrupts (DI)
 2. Configures control ports via OUT0 instructions
 3. Sets up memory protection boundaries
 4. Configures flash controller
-5. Initializes VRAM (screen shows white)
-6. Polls LCD status (current blocker at PC=0x5BA9)
+5. Initializes VRAM, copies code to RAM
+6. Multiple ON key wake cycles for power management
+7. LCD initialized with control value 0x92D (16bpp RGB565)
+8. **OS reaches idle loop** at PC=0x085B7F (EI + NOP + HALT)
+9. Screen displays "RAM Cleared" with full status bar
+
+Boot completes in ~3.6M steps (~61.6M cycles at 48MHz).
 
 ### eZ80-Specific Behavior
 
@@ -150,3 +169,29 @@ Key differences from standard Z80 that affect emulation:
 - **L/IL mode flags**: Separate flags for data (L) vs instruction (IL) addressing; suffix opcodes (0x40, 0x49, 0x52, 0x5B) temporarily override these per-instruction
 - **Block instructions**: LDIR, LDDR, CPIR, CPDR, OTIMR, etc. execute all iterations in a single `step()` call (matches CEmu behavior)
 - **ED prefix decoding**: ED z=5 RETN/RETI only valid for y=0,1; other y values are NOP
+
+## Key Lessons Learned
+
+### Scheduler Parity Not Required
+
+Exact scheduler timing parity with CEmu is **not required** for correct emulation. The scheduler is an implementation detail - what matters is:
+- Peripheral reads/writes return correct values
+- Interrupts fire when expected
+- Polling loops eventually complete
+
+The ROM handles timing variations gracefully through polling loops. Different iteration counts don't affect correctness.
+
+### Trace Comparison Strategy
+
+1. **PC parity ≠ full parity** - Matching PC doesn't mean registers match
+2. **Check AF (flags)** - Flag differences often reveal CPU bugs
+3. **Run longer traces** - Many bugs only appear after 100K+ steps
+4. **Use sparse traces** - Log every Nth step for long runs to save space
+
+### Critical Instructions for Boot
+
+These eZ80 instructions were essential for boot success:
+- `LD A,MB` (ED 6E) - Load MBASE into A, used for RAM address validation
+- `MLT` (ED 4C/5C/6C/7C) - Multiply high/low bytes of register pair
+- `LEA` (ED 22/23) - Load effective address into register pair
+- Indexed loads (DD/FD 31/3E) - Special eZ80 indexed memory operations

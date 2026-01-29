@@ -64,29 +64,68 @@ cargo test -- --nocapture
 
 ## Debugging
 
-### Boot Trace
+The emulator includes a consolidated debug tool for testing, tracing, and diagnostics.
 
-To capture an execution trace during ROM boot (useful for comparing with CEmu):
+### Quick Commands (Cargo Aliases)
 
-```bash
-cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log
-```
-
-This runs the emulator with a ROM file (`TI-84 CE.rom` in project root) and outputs:
-
-- CPU state at each instruction (PC, registers, flags)
-- Memory reads/writes
-- Port I/O operations
-
-### Boot Test
-
-To run the boot test with progress reporting:
+Run these from the `core/` directory:
 
 ```bash
-cargo run --example boot_test --manifest-path core/Cargo.toml
+cd core
+cargo boot      # Run boot test with progress reporting
+cargo screen    # Render screen to PNG after boot
+cargo vram      # Analyze VRAM colors
+cargo trace     # Generate trace log (100k steps)
+cargo dbg       # Show debug tool help
+cargo t         # Run all tests
+cargo rb        # Release build
 ```
 
-This shows boot progress, LCD state, and screen analysis.
+### Full Debug Tool
+
+For more options, use the debug tool directly (from `core/`):
+
+```bash
+cargo run --release --example debug -- <command>
+```
+
+| Command | Description |
+|---------|-------------|
+| `boot` | Run boot test with progress reporting |
+| `trace [steps]` | Generate trace log for parity comparison (default: 100k) |
+| `screen [output]` | Render screen to PNG after boot (default: screen.png) |
+| `vram` | Analyze VRAM content (color histogram) |
+| `compare <file>` | Compare our trace with CEmu trace file |
+| `help` | Show help message |
+
+**Examples:**
+
+```bash
+# Generate 1M step trace for parity comparison
+cargo run --release --example debug -- trace 1000000
+
+# Save screenshot with custom name
+cargo run --release --example debug -- screen boot.png
+
+# Compare with CEmu trace
+cargo run --release --example debug -- compare ../traces/cemu.log
+```
+
+### Boot Status
+
+The emulator successfully boots the TI-84 CE OS:
+
+- **3,609,969 steps** (~61.6M cycles) to reach OS idle
+- Screen shows "RAM Cleared" message with full status bar
+- CPU reaches idle loop at PC=0x085B7F (EI + HALT)
+
+### Trace Comparison
+
+For detailed parity testing with CEmu:
+
+1. Generate our trace: `cargo run --release --example debug -- trace 1000000`
+2. Generate CEmu trace (requires cemu-ref/ clone with trace_cli)
+3. Compare: `cargo run --release --example debug -- compare traces/cemu.log`
 
 ## Usage
 

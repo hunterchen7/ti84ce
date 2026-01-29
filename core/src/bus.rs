@@ -408,7 +408,7 @@ impl Bus {
             MemoryRegion::Ports => {
                 self.cycles += Self::MMIO_READ_CYCLES;
                 let keys = *self.ports.key_state();
-                self.ports.read(addr - addr::PORT_START, &keys)
+                self.ports.read(addr - addr::PORT_START, &keys, self.cycles)
             }
             MemoryRegion::Unmapped => {
                 self.cycles += Self::UNMAPPED_CYCLES;
@@ -442,7 +442,7 @@ impl Bus {
             MemoryRegion::Ports => {
                 self.cycles += Self::MMIO_READ_CYCLES;
                 let keys = *self.ports.key_state();
-                self.ports.read(addr - addr::PORT_START, &keys)
+                self.ports.read(addr - addr::PORT_START, &keys, self.cycles)
             }
             MemoryRegion::Unmapped => {
                 self.cycles += Self::UNMAPPED_CYCLES;
@@ -531,7 +531,7 @@ impl Bus {
             }
             MemoryRegion::Ports => {
                 self.cycles += Self::MMIO_WRITE_CYCLES;
-                self.ports.write(addr - addr::PORT_START, value);
+                self.ports.write(addr - addr::PORT_START, value, self.cycles);
             }
             MemoryRegion::Unmapped => {
                 // Writes to unmapped regions are ignored
@@ -596,7 +596,8 @@ impl Bus {
             }
             MemoryRegion::Ports => {
                 let keys = *self.ports.key_state();
-                self.ports.read(addr - addr::PORT_START, &keys)
+                // Use 0 for cycles in debug peek (no timing effects)
+                self.ports.read(addr - addr::PORT_START, &keys, 0)
             }
             MemoryRegion::Unmapped => 0x00,
         }
@@ -612,7 +613,8 @@ impl Bus {
             }
             MemoryRegion::Ports => {
                 let keys = *self.ports.key_state();
-                self.ports.read(addr - addr::PORT_START, &keys)
+                // Use 0 for cycles in debug peek (no timing effects)
+                self.ports.read(addr - addr::PORT_START, &keys, 0)
             }
             MemoryRegion::Unmapped => 0x00,
         }
@@ -630,7 +632,8 @@ impl Bus {
                 self.ram.write(addr - addr::RAM_START, value);
             }
             MemoryRegion::Ports => {
-                self.ports.write(addr - addr::PORT_START, value);
+                // Use 0 for cycles in debug poke (no timing effects)
+                self.ports.write(addr - addr::PORT_START, value, 0);
             }
             MemoryRegion::Unmapped => {}
         }
@@ -699,6 +702,11 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.flash.read(offset)
             }
+            0x2 => {
+                // SHA256 accelerator - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.sha256.read(offset)
+            }
             0x4 => {
                 // LCD controller - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
@@ -738,7 +746,7 @@ impl Bus {
             0x8 => {
                 // RTC - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
-                self.ports.rtc.read(offset)
+                self.ports.rtc.read(offset, self.cycles, self.ports.control.cpu_speed())
             }
             0xA => {
                 // Keypad - mask with 0x7F
@@ -755,8 +763,7 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.read(offset)
             }
-            // Unimplemented: SHA256(2), USB(3), Protected(9),
-            // Backlight(B), Cxxx(C), UART(E)
+            // Unimplemented: USB(3), Protected(9), Backlight(B), Cxxx(C), UART(E)
             _ => 0x00,
         }
     }
@@ -776,6 +783,11 @@ impl Bus {
                 // Flash controller - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.flash.write(offset, value);
+            }
+            0x2 => {
+                // SHA256 accelerator - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.sha256.write(offset, value);
             }
             0x4 => {
                 // LCD controller - mask with 0xFF
@@ -816,7 +828,7 @@ impl Bus {
             0x8 => {
                 // RTC - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
-                self.ports.rtc.write(offset, value);
+                self.ports.rtc.write(offset, value, self.cycles, self.ports.control.cpu_speed());
             }
             0xA => {
                 // Keypad - mask with 0x7F
@@ -833,8 +845,7 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
             }
-            // Unimplemented: SHA256(2), USB(3), Protected(9),
-            // Backlight(B), Cxxx(C), UART(E)
+            // Unimplemented: USB(3), Protected(9), Backlight(B), Cxxx(C), UART(E)
             _ => {}
         }
     }

@@ -4,6 +4,7 @@
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, InterruptMode};
+use crate::scheduler::{EventId, Scheduler};
 
 /// TI-84 Plus CE screen dimensions
 pub const SCREEN_WIDTH: usize = 320;
@@ -99,6 +100,8 @@ pub struct Emu {
     cpu: Cpu,
     /// System bus (memory, I/O)
     bus: Bus,
+    /// Event scheduler for timed events
+    scheduler: Scheduler,
 
     /// Framebuffer in ARGB8888 format
     framebuffer: Vec<u32>,
@@ -143,6 +146,7 @@ impl Emu {
         Self {
             cpu: Cpu::new(),
             bus: Bus::new(),
+            scheduler: Scheduler::new(),
             framebuffer: vec![0xFF000000; SCREEN_WIDTH * SCREEN_HEIGHT],
             rom_loaded: false,
             history: ExecutionHistory::new(),
@@ -167,6 +171,7 @@ impl Emu {
     pub fn reset(&mut self) {
         self.cpu.reset();
         self.bus.reset();
+        self.scheduler.reset();
         self.history.clear();
         self.last_stop = StopReason::CyclesComplete;
         self.total_cycles = 0;
@@ -187,6 +192,10 @@ impl Emu {
         let start_cycles = self.total_cycles;
 
         while cycles_remaining > 0 {
+            // Sync scheduler with CPU speed setting
+            let cpu_speed = self.bus.ports.control.cpu_speed();
+            self.scheduler.set_cpu_speed(cpu_speed);
+
             // Record PC and peek at opcode before execution
             let pc = self.cpu.pc;
             let (opcode, opcode_len) = self.peek_opcode(pc);
@@ -197,13 +206,26 @@ impl Emu {
             // Record in history
             self.history.record(pc, &opcode[..opcode_len]);
 
+            // Update total cycles and advance scheduler
+            cycles_remaining -= cycles_used as i32;
+            self.total_cycles += cycles_used as u64;
+            self.scheduler.advance(self.total_cycles);
+
+            // Process pending scheduler events
+            self.process_scheduler_events();
+
             // Tick peripherals and check for interrupts
             if self.bus.ports.tick(cycles_used) {
                 self.cpu.irq_pending = true;
             }
 
-            cycles_remaining -= cycles_used as i32;
-            self.total_cycles += cycles_used as u64;
+            // Check if RTC needs a load event scheduled
+            if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
+                // Start the load ticks and schedule the first event
+                self.bus.ports.rtc.start_load_ticks();
+                // Schedule first tick at 32kHz (1 tick)
+                self.scheduler.set(EventId::Rtc, 1);
+            }
 
             // Check for halt
             if self.cpu.halted {
@@ -214,6 +236,37 @@ impl Emu {
 
         self.last_stop = StopReason::CyclesComplete;
         (self.total_cycles - start_cycles) as u32
+    }
+
+    /// Process any pending scheduler events
+    fn process_scheduler_events(&mut self) {
+        // Process all pending events
+        while let Some(event) = self.scheduler.next_pending_event() {
+            match event {
+                EventId::Rtc => {
+                    // RTC load complete - advance the load state
+                    self.bus.ports.rtc.advance_load();
+                    // Check if more RTC ticks needed
+                    if self.bus.ports.rtc.needs_more_ticks() {
+                        // Schedule next RTC tick (1 tick at 32kHz)
+                        self.scheduler.repeat(EventId::Rtc, 1);
+                    } else {
+                        // Load complete, clear the event
+                        self.scheduler.clear(EventId::Rtc);
+                    }
+                }
+                EventId::Spi => {
+                    // SPI transfer complete
+                    // Note: SPI timing is currently handled internally via cycle-based update()
+                    // This is a stub for future scheduler integration
+                    self.scheduler.clear(EventId::Spi);
+                }
+                _ => {
+                    // Other events not yet implemented
+                    self.scheduler.clear(event);
+                }
+            }
+        }
     }
 
     /// Peek at opcode bytes at address without affecting state

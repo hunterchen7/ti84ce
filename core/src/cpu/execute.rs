@@ -1726,9 +1726,7 @@ impl Cpu {
                         self.set_flag_h(half);
                         self.set_flag_n(false);
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
-                        // F3/F5 from high byte of result
-                        let high = if self.adl { (result >> 16) as u8 } else { (result >> 8) as u8 };
-                        self.f = (self.f & !(flags::F3 | flags::F5)) | (high & (flags::F3 | flags::F5));
+                        // S, Z, PV, F3, F5 preserved from previous F (CEmu behavior)
 
                         let wrapped = self.wrap_pc(result);
                         if use_ix {
@@ -1747,9 +1745,7 @@ impl Cpu {
                         self.set_flag_h(half);
                         self.set_flag_n(false);
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
-                        // F3/F5 from high byte of result
-                        let high = if self.adl { (result >> 16) as u8 } else { (result >> 8) as u8 };
-                        self.f = (self.f & !(flags::F3 | flags::F5)) | (high & (flags::F3 | flags::F5));
+                        // S, Z, PV, F3, F5 preserved from previous F (CEmu behavior)
 
                         let wrapped = self.wrap_pc(result);
                         if use_ix {

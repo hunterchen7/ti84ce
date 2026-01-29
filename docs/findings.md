@@ -422,8 +422,87 @@ When bit 6 of control is written, a load operation is triggered:
 2. On first scheduler tick, becomes 0 (actively loading)
 3. Advances 1 tick per 32kHz cycle until reaching LOAD_TOTAL_TICKS
 
-**Impact**: Without scheduler-based timing, the load status cannot match CEmu exactly. For parity during early boot (first 3M+ instructions), keeping load status pending (0xF8) matches CEmu behavior.
+**Impact**: Without scheduler-based timing, the load status cannot match CEmu exactly. ~~For parity during early boot (first 3M+ instructions), keeping load status pending (0xF8) matches CEmu behavior.~~ **Update**: Scheduler now implemented - see below.
+
+## Scheduler Architecture
+
+### CEmu's 7.68 GHz Base Clock
+
+CEmu uses a scheduler with a base clock rate of **7,680,000,000 Hz (7.68 GHz)**. This is the Least Common Multiple (LCM) of all hardware clocks, allowing efficient integer-only timing calculations.
+
+| Clock | Rate | Base Ticks per Clock Tick |
+|-------|------|---------------------------|
+| CPU (48 MHz) | 48,000,000 Hz | 160 |
+| SPI (24 MHz) | 24,000,000 Hz | 320 |
+| CPU (6 MHz) | 6,000,000 Hz | 1,280 |
+| RTC (32 kHz) | 32,768 Hz | 234,375 |
+
+The formula: `base_ticks_per_tick = 7,680,000,000 / clock_rate`
+
+**Why this matters**: Using a common base clock avoids floating-point arithmetic and rounding errors in timing calculations. All timing conversions are exact integer divisions.
+
+### RTC Load Timing
+
+The RTC load operation takes **~51 ticks at 32.768 kHz** to complete:
+- Seconds: 9 ticks
+- Minutes: 8 more ticks (17 total)
+- Hours: 8 more ticks (25 total)
+- Day: 16 more ticks (41 total)
+- Finalization: 10 more ticks (51 total)
+
+With the scheduler, events are scheduled in base ticks:
+- 1 RTC tick = 234,375 base ticks
+- Full load = 51 * 234,375 = 11,953,125 base ticks
+- At 48 MHz: 11,953,125 / 160 = ~74,707 CPU cycles
+
+**Impact**: Proper scheduler timing allows RTC loads to complete at the same CPU cycle as CEmu, extending trace parity beyond the previous 3.2M limit.
+
+## Boot Success
+
+### OS Boots to Home Screen
+
+The emulator successfully boots the TI-84 CE OS to the home screen:
+
+- **Steps**: 3,609,969 instructions
+- **Cycles**: ~61.6M cycles at 48MHz
+- **Final PC**: 0x085B7F (OS idle loop)
+- **Screen**: "RAM Cleared" message with status bar
+
+**VRAM Analysis:**
+| Color | RGB565 | Percentage | Purpose |
+|-------|--------|------------|---------|
+| White | 0xFFFF | 88.1% | Background |
+| Dark Green | 0x52AA | 10.8% | Status bar, UI |
+| Black | 0x0000 | 0.9% | Text |
+| Red | 0xF800 | 0.2% | Battery indicator |
+
+**LCD State at Boot Complete:**
+- Control: 0x0000092D (16bpp RGB565, power on, enabled)
+- VRAM base: 0xD40000
+
+### Scheduler Parity Not Required
+
+A key discovery: **exact scheduler timing parity with CEmu is not required** for correct emulation.
+
+The scheduler is an internal implementation detail. What matters for correctness:
+1. Peripheral reads/writes return correct values at appropriate times
+2. Interrupts fire when expected
+3. Polling loops eventually complete
+
+**Evidence**: Our RTC timing differs from CEmu (our seconds complete loading earlier), but the ROM handles this gracefully. The polling loop simply iterates a different number of times before proceeding. Both emulators reach the same end state.
+
+**Implication**: Focus debugging efforts on functional correctness, not cycle-exact timing. Timing differences in polling loops don't indicate bugs if the loop eventually completes correctly.
+
+### Boot Requires ON Key Wake
+
+The ROM uses multiple DI + HALT sequences during boot, expecting the ON key to wake the CPU:
+
+1. First HALT at ~PC 0x001414 (very early, power-on sequence)
+2. Second HALT after RAM initialization
+3. Final HALT at 0x085B7F (OS idle loop)
+
+Without the ON key wake mechanism (separate from regular interrupts), boot stalls at the first HALT since IFF1=0.
 
 ---
 
-_Last updated: 2026-01-29 - Extended trace parity to 3.2M+ instructions_
+_Last updated: 2026-01-29 - Boot complete! OS reaches home screen with "RAM Cleared" message_

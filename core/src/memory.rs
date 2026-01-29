@@ -524,17 +524,17 @@ mod tests {
         fn test_read_write() {
             let mut ports = Ports::new();
             let keys = empty_keys();
-            ports.write(0x1000, 0xAB);
-            assert_eq!(ports.read(0x1000, &keys), 0xAB);
+            ports.write(0x1000, 0xAB, 0);
+            assert_eq!(ports.read(0x1000, &keys, 0), 0xAB);
         }
 
         #[test]
         fn test_reset() {
             let mut ports = Ports::new();
             let keys = empty_keys();
-            ports.write(0x100, 0xFF);
+            ports.write(0x100, 0xFF, 0);
             ports.reset();
-            assert_eq!(ports.read(0x100, &keys), 0x00);
+            assert_eq!(ports.read(0x100, &keys, 0), 0x00);
         }
     }
 }

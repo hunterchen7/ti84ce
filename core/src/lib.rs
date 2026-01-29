@@ -25,6 +25,7 @@ pub mod memory;
 pub mod bus;
 pub mod cpu;
 pub mod peripherals;
+pub mod scheduler;
 mod emu;
 
 use std::ptr;
