@@ -428,14 +428,17 @@ impl Cpu {
                         self.execute_cb(bus)
                     }
                     2 => {
-                        // OUT (n),A - blocked on TI-84 CE
-                        let _n = self.fetch_byte(bus);
+                        // OUT (n),A - write to I/O port (A << 8) | n
+                        let n = self.fetch_byte(bus);
+                        let port = ((self.a as u16) << 8) | (n as u16);
+                        bus.port_write(port, self.a);
                         11
                     }
                     3 => {
-                        // IN A,(n) - blocked on TI-84 CE
-                        let _n = self.fetch_byte(bus);
-                        self.a = 0xFF; // Garbage
+                        // IN A,(n) - read from I/O port (A << 8) | n
+                        let n = self.fetch_byte(bus);
+                        let port = ((self.a as u16) << 8) | (n as u16);
+                        self.a = bus.port_read(port);
                         11
                     }
                     4 => {
@@ -832,11 +835,11 @@ impl Cpu {
     pub fn execute_ed_x1(&mut self, bus: &mut Bus, y: u8, z: u8, p: u8, q: u8) -> u32 {
         match z {
             0 => {
-                // IN r,(C) - read from memory-mapped I/O at 0xFF00 | C
-                // On TI-84 CE, I/O is memory-mapped to 0xFF00xx where xx = C register
-                let port = self.c() as u32;
-                let addr = 0xFF0000 | port;
-                let val = bus.read_byte(addr);
+                // IN r,(C) - read from I/O port BC
+                // eZ80 uses full BC register as 16-bit port address
+                // The port address is routed based on bits 15:12 (see Bus::port_read)
+                let port = self.bc as u16;
+                let val = bus.port_read(port);
                 if y != 6 {
                     self.set_reg8(y, val, bus);
                 }
@@ -848,12 +851,15 @@ impl Cpu {
                 12
             }
             1 => {
-                // OUT (C),r - write to memory-mapped I/O at 0xFF00 | C
-                // On TI-84 CE, I/O is memory-mapped to 0xFF00xx where xx = C register
-                let port = self.c() as u32;
-                let addr = 0xFF0000 | port;
+                // OUT (C),r - write to I/O port BC
+                // eZ80 uses full BC register as 16-bit port address
+                if y == 6 {
+                    // OUT (C),0 is OPCODETRAP on eZ80 - treat as NOP for now
+                    return 4;
+                }
+                let port = self.bc as u16;
                 let val = self.get_reg8(y, bus);
-                bus.write_byte(addr, val);
+                bus.port_write(port, val);
                 12
             }
             2 => {
@@ -965,10 +971,12 @@ impl Cpu {
                 8
             }
             5 => {
-                // RETN/RETI - only specific y values are valid in eZ80
-                // ED 45 (y=0): RETN
-                // ED 4D (y=1): RETI
-                // Other y values (ED 55, 5D, 65, 6D, 75, 7D) are NOPs in eZ80/CEmu
+                // z=5 has RETN/RETI and eZ80-specific instructions
+                // y=0: RETN (ED 45)
+                // y=1: RETI (ED 4D)
+                // y=4: PEA IX+d (ED 65) - push effective address
+                // y=5: LD MB,A (ED 6D) - load A into MBASE (ADL mode only)
+                // y=7: STMIX (ED 7D) - set mixed memory mode
                 match y {
                     0 => {
                         // RETN - Uses L mode for stack operations, then ADL becomes L
@@ -983,21 +991,69 @@ impl Cpu {
                         self.adl = self.l;
                         14
                     }
+                    4 => {
+                        // PEA IX+d - push IX + signed offset
+                        let d = self.fetch_byte(bus) as i8;
+                        let ea = (self.ix as i32 + d as i32) as u32;
+                        self.push_word(bus, ea as u16);
+                        16
+                    }
+                    5 => {
+                        // LD MB,A - load A into MBASE (only in ADL mode)
+                        if self.adl {
+                            self.mbase = self.a;
+                        }
+                        8
+                    }
+                    7 => {
+                        // STMIX - set mixed memory mode (MADL = 1)
+                        self.madl = true;
+                        8
+                    }
                     _ => {
-                        // Undocumented Z80 aliases are NOP in eZ80
+                        // Other y values are NOP in eZ80
                         8
                     }
                 }
             }
             6 => {
-                // IM 0/1/2 (eZ80: only y=0/2/3 are IM; others are different ops)
-                // ED 46 (y=0) -> IM 0
-                // ED 56 (y=2) -> IM 1
-                // ED 5E (y=3) -> IM 2
+                // z=6 has various eZ80-specific instructions based on y
+                // y=0: IM 0 (ED 46)
+                // y=1: OPCODETRAP (ED 4E) - trap on eZ80
+                // y=2: IM 1 (ED 56)
+                // y=3: IM 2 (ED 5E)
+                // y=4: PEA IY+d (ED 66) - push effective address
+                // y=5: LD A,MB (ED 6E) - load MBASE into A
+                // y=6: SLP (ED 76) - sleep/halt
+                // y=7: RSMIX (ED 7E) - reset mixed memory mode
                 match y {
                     0 => self.im = InterruptMode::Mode0,
+                    1 => {
+                        // OPCODETRAP - treated as NOP on TI-84 CE
+                    }
                     2 => self.im = InterruptMode::Mode1,
                     3 => self.im = InterruptMode::Mode2,
+                    4 => {
+                        // PEA IY+d - push IY + signed offset
+                        let d = self.fetch_byte(bus) as i8;
+                        let ea = (self.iy as i32 + d as i32) as u32;
+                        self.push_word(bus, ea as u16);
+                        return 16;
+                    }
+                    5 => {
+                        // LD A,MB - load MBASE into A
+                        self.a = self.mbase;
+                    }
+                    6 => {
+                        // SLP - sleep (same as HALT on TI-84 CE)
+                        self.halted = true;
+                        return 4;
+                    }
+                    7 => {
+                        // RSMIX - reset mixed memory mode (MADL = 0)
+                        // On TI-84 CE, this is mostly a NOP as mixed mode isn't heavily used
+                        self.madl = false;
+                    }
                     _ => {}
                 }
                 8
@@ -1262,7 +1318,7 @@ impl Cpu {
     /// Note: Repeat variants (INIMR, INDMR, OTIMR, OTDMR) execute all iterations
     /// in a single instruction, matching CEmu behavior. This is different from the
     /// standard Z80 block instructions which use PC rewind.
-    pub fn execute_bli_ez80(&mut self, bus: &mut Bus, y: u8, z: u8, p: u8, q: u8) -> u32 {
+    pub fn execute_bli_ez80(&mut self, bus: &mut Bus, _y: u8, z: u8, p: u8, q: u8) -> u32 {
         // delta = q ? -1 : 1
         let delta: i32 = if q != 0 { -1 } else { 1 };
         let is_repeat = p == 1;

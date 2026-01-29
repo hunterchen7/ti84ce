@@ -96,6 +96,21 @@ fn main() {
         }
         last_pc = pc;
 
+        // Detect the LCD polling loop at 0x5BA9-0x5BAD
+        if pc >= 0x5BA9 && pc <= 0x5BAD && total_executed > 1_000_000 {
+            let port_0d = emu.control_read(0x0D);
+            let and_mask = emu.peek_byte(0x5BAC);
+            println!(
+                "\n[{:.2}M cycles] LCD polling loop detected at PC={:06X}",
+                total_executed as f64 / 1_000_000.0,
+                pc
+            );
+            println!("  Port 0x0D = 0x{:02X}", port_0d);
+            println!("  AND mask = 0x{:02X}", and_mask);
+            println!("  Result = 0x{:02X} (loops while non-zero)", port_0d & and_mask);
+            break;
+        }
+
         // Print progress every 10M cycles
         if total_executed % 10_000_000 < chunk_size as u64 {
             println!(
@@ -117,6 +132,25 @@ fn main() {
             );
             println!("IFF1={} IFF2={}", emu.iff1(), emu.iff2());
             println!("IRQ pending: {}", emu.irq_pending());
+
+            // If halted with DI at the expected low-power halt address, simulate ON key
+            if !emu.iff1() && (pc == 0x001414 || pc == 0x001415) {
+                println!("\n=== Simulating ON key press to wake CPU ===");
+                emu.press_on_key();
+                // Run a few more cycles to see wake behavior
+                let wake_cycles = emu.run_cycles(100);
+                total_executed += wake_cycles as u64;
+                println!(
+                    "After ON key: PC={:06X} halted={} IFF1={}",
+                    emu.pc(),
+                    emu.is_halted(),
+                    emu.iff1()
+                );
+                // Release ON key
+                emu.release_on_key();
+                // Continue running
+                continue;
+            }
             break;
         }
     }

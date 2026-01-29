@@ -43,6 +43,7 @@ cargo test
 ```
 
 This runs the test suite covering:
+
 - Memory subsystem (Flash, RAM, VRAM, ports)
 - Bus address decoding and wait states
 - eZ80 CPU instructions and flag behavior
@@ -61,9 +62,35 @@ To see test output:
 cargo test -- --nocapture
 ```
 
+## Debugging
+
+### Boot Trace
+
+To capture an execution trace during ROM boot (useful for comparing with CEmu):
+
+```bash
+cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log
+```
+
+This runs the emulator with a ROM file (`TI-84 CE.rom` in project root) and outputs:
+
+- CPU state at each instruction (PC, registers, flags)
+- Memory reads/writes
+- Port I/O operations
+
+### Boot Test
+
+To run the boot test with progress reporting:
+
+```bash
+cargo run --example boot_test --manifest-path core/Cargo.toml
+```
+
+This shows boot progress, LCD state, and screen analysis.
+
 ## Usage
 
-1. Obtain a TI-84 Plus CE ROM file legally (dump from your own calculator)
+1. BYOR (Bring your own ROM) - Obtain a TI-84 Plus CE ROM file legally
 2. Install the app
 3. Use "Import ROM" to load your ROM file
 4. Press Run to start emulation

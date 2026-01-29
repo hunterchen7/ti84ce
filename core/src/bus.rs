@@ -623,6 +623,195 @@ impl Bus {
         self.ram.vram()
     }
 
+    /// Read from I/O port (for IN instructions)
+    ///
+    /// The eZ80 uses a 16-bit port address space separate from memory.
+    /// Port addresses are routed based on bits 15:12:
+    ///   0x0xxx -> Control ports
+    ///   0x1xxx -> Flash controller
+    ///   0x2xxx -> SHA256 (stub)
+    ///   0x3xxx -> USB (stub)
+    ///   0x4xxx -> LCD controller
+    ///   0x5xxx -> Interrupt controller
+    ///   0x6xxx -> Watchdog (stub)
+    ///   0x7xxx -> Timers
+    ///   0x8xxx -> RTC (stub)
+    ///   0x9xxx -> Protected (stub)
+    ///   0xAxxx -> Keypad
+    ///   0xBxxx -> Backlight (stub)
+    ///   0xCxxx -> Cxxx (stub)
+    ///   0xDxxx -> SPI (stub)
+    ///   0xExxx -> UART (stub)
+    ///   0xFxxx -> Control ports (alternate)
+    ///
+    /// Based on CEmu's port.c port_map array
+    pub fn port_read(&mut self, port: u16) -> u8 {
+        self.cycles += Self::PORT_READ_CYCLES;
+
+        let range = (port >> 12) & 0xF;
+        let keys = *self.ports.key_state();
+
+        match range {
+            0x0 => {
+                // Control ports - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.control.read(offset)
+            }
+            0x1 => {
+                // Flash controller - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.flash.read(offset)
+            }
+            0x4 => {
+                // LCD controller - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.lcd.read(offset)
+            }
+            0x5 => {
+                // Interrupt controller - mask with 0x1F
+                let offset = (port & 0x1F) as u32;
+                self.ports.interrupt.read(offset)
+            }
+            0x7 => {
+                // Timers - mask with 0x7F
+                let offset = (port & 0x7F) as u32;
+                if offset >= 0x30 {
+                    match offset {
+                        0x30 => self.ports.timer1.read_control(),
+                        0x34 => self.ports.timer2.read_control(),
+                        0x38 => self.ports.timer3.read_control(),
+                        _ => 0x00,
+                    }
+                } else {
+                    let timer_idx = offset / 0x10;
+                    let reg_offset = offset % 0x10;
+                    match timer_idx {
+                        0 => self.ports.timer1.read(reg_offset),
+                        1 => self.ports.timer2.read(reg_offset),
+                        2 => self.ports.timer3.read(reg_offset),
+                        _ => 0x00,
+                    }
+                }
+            }
+            0xA => {
+                // Keypad - mask with 0x7F
+                let offset = (port & 0x7F) as u32;
+                self.ports.keypad.read(offset, &keys)
+            }
+            0xD => {
+                // SPI - stub returning appropriate reset values
+                // At reset, SPI STATUS register (offset 0x0C-0x0F) has bit 1 set (TX FIFO not full)
+                // For port 0xD00D: offset 0x0D, STATUS byte 1 = (2 >> 8) = 0
+                let offset = port & 0x7F;
+                self.spi_read_stub(offset)
+            }
+            0xF => {
+                // Control ports alternate - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.control.read(offset)
+            }
+            // Unimplemented: SHA256(2), USB(3), Watchdog(6), RTC(8), Protected(9),
+            // Backlight(B), Cxxx(C), UART(E)
+            _ => 0x00,
+        }
+    }
+
+    /// Write to I/O port (for OUT instructions)
+    pub fn port_write(&mut self, port: u16, value: u8) {
+        self.cycles += Self::PORT_WRITE_CYCLES;
+
+        let range = (port >> 12) & 0xF;
+
+        match range {
+            0x0 => {
+                // Control ports - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.control.write(offset, value);
+            }
+            0x1 => {
+                // Flash controller - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.flash.write(offset, value);
+            }
+            0x4 => {
+                // LCD controller - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.lcd.write(offset, value);
+            }
+            0x5 => {
+                // Interrupt controller - mask with 0x1F
+                let offset = (port & 0x1F) as u32;
+                self.ports.interrupt.write(offset, value);
+            }
+            0x7 => {
+                // Timers - mask with 0x7F
+                let offset = (port & 0x7F) as u32;
+                if offset >= 0x30 {
+                    match offset {
+                        0x30 => self.ports.timer1.write_control(value),
+                        0x34 => self.ports.timer2.write_control(value),
+                        0x38 => self.ports.timer3.write_control(value),
+                        _ => {}
+                    }
+                } else {
+                    let timer_idx = offset / 0x10;
+                    let reg_offset = offset % 0x10;
+                    match timer_idx {
+                        0 => self.ports.timer1.write(reg_offset, value),
+                        1 => self.ports.timer2.write(reg_offset, value),
+                        2 => self.ports.timer3.write(reg_offset, value),
+                        _ => {}
+                    }
+                }
+            }
+            0xA => {
+                // Keypad - mask with 0x7F
+                let offset = (port & 0x7F) as u32;
+                self.ports.keypad.write(offset, value);
+            }
+            0xD => {
+                // SPI - stub (ignore writes)
+            }
+            0xF => {
+                // Control ports alternate - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.control.write(offset, value);
+            }
+            // Unimplemented: SHA256(2), USB(3), Watchdog(6), RTC(8), Protected(9),
+            // Backlight(B), Cxxx(C), UART(E)
+            _ => {}
+        }
+    }
+
+    /// SPI read stub - returns appropriate reset values
+    /// Based on CEmu's spi.c spi_read function
+    fn spi_read_stub(&self, offset: u16) -> u8 {
+        let shift = (offset & 3) << 3;
+        // Match on offset >> 2 to get register index
+        // Offsets: CR0=0x00, CR1=0x04, CR2=0x08, STATUS=0x0C, INTCTRL=0x10,
+        //          INTSTATUS=0x14, DATA=0x18, FEATURE=0x1C, REVISION=0x60, FEATURE2=0x64
+        let value: u32 = match offset >> 2 {
+            // CR0(0), CR1(1), CR2(2): 0 at reset
+            0 | 1 | 2 => 0,
+            // STATUS(3): At reset, TX FIFO is not full (bit 1 set)
+            // value = tfve << 12 | rfve << 4 | busy << 2 | txnf << 1 | rxf << 0
+            // At reset: 0 | 0 | 0 | 2 | 0 = 2
+            3 => 2,
+            // INTCTRL(4), INTSTATUS(5): 0 at reset
+            4 | 5 => 0,
+            // DATA(6): 0 at reset
+            6 => 0,
+            // FEATURE(7): SPI_FEATURES << 24 | (TXFIFO_DEPTH-1) << 16 | (RXFIFO_DEPTH-1) << 8 | (WIDTH-1)
+            // CEmu: SPI_FEATURES=3, TXFIFO_DEPTH=16, RXFIFO_DEPTH=16, WIDTH=32
+            // So: 3 << 24 | 15 << 16 | 15 << 8 | 31 = 0x030F0F1F
+            7 | 25 => 0x030F0F1F,
+            // REVISION(24): 0x00002100
+            24 => 0x00002100,
+            _ => 0,
+        };
+        (value >> shift) as u8
+    }
+
     /// Reset bus and all memory to initial state
     pub fn reset(&mut self) {
         self.ram.reset();

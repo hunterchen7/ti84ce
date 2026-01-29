@@ -92,7 +92,7 @@
 - [ ] Watchdog timer (port 0x6) - basic stub
 - [ ] RTC (port 0x8) - read-only stub returning safe values
 - [ ] SHA256 accelerator (port 0x2) - stub or full implementation
-- [ ] SPI controller (port 0xD) - basic stub
+- [x] SPI controller (port 0xD) - status stub returning reset values
 
 ### 5d: Boot Debugging ✓
 - [x] Compare execution trace with CEmu at divergence point
@@ -118,14 +118,23 @@
 - [x] Fixed block instruction internal looping (LDIR, LDDR, CPIR, CPDR)
 - [x] Fixed eZ80 block I/O instructions (OTIMR, OTDMR, INIMR, INDMR)
 - [x] Fixed ED z=5 RETN/RETI (only y=0,1 valid, others are NOP)
-- [x] Fixed IN r,(C) and OUT (C),r to use memory-mapped I/O at 0xFF00xx
+- [x] Fixed IN r,(C) and OUT (C),r to use full BC as 16-bit port address (not 0xFF00|C)
 - [x] Fixed ED x=0 z=7 instructions (LD rp3,(HL), LD (HL),rp3, LD IY,(HL), LD (HL),IY)
 - [x] Updated LDIR test for internal looping behavior
+- [x] Added Bus::port_read/port_write with 16-bit port routing (bits 15:12 select peripheral)
+- [x] Fixed ED 6E (LD A,MB) - was being treated as NOP, now loads MBASE into A
+- [x] Added ED 6D (LD MB,A), ED 7D (STMIX), ED 7E (RSMIX) eZ80 instructions
+- [x] Added ED 65 (PEA IX+d) and ED 66 (PEA IY+d) instructions
+- [x] Added madl field to CPU struct for mixed memory mode
 
 **Key Progress:**
 - Execution trace matches CEmu for 40,001+ steps
 - VRAM is being written (screen shows all white pixels)
-- ROM is now waiting on port 0x0D (LCD enable) status
+- Fixed I/O port addressing: IN/OUT (C) now uses full BC as 16-bit port address
+- SPI stub returns proper reset values (STATUS register)
+- Fixed LD A,MB (ED 6E) - critical for boot to pass CP 0xD0 check
+- Boot now progresses through multiple ON key wake cycles
+- MBASE correctly set to 0xD0 by ROM initialization
 
 **Trace Comparison Commands:**
 ```bash
@@ -136,10 +145,10 @@ cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log
 ./cemu-ref/trace_cli > trace_cemu.log 2>&1
 ```
 
-**Current Blocker:**
-ROM is stuck in a loop at PC=0x5BA9 polling port 0x0D (LCD enable).
-The loop reads port 0x0D, ANDs with a mask, and loops while non-zero.
-This may require proper LCD enable/status bit simulation.
+**Current Status:**
+Boot progresses past initial hardware init, ON key wake works correctly.
+ROM sets MBASE=0xD0, interrupt handler passes CP 0xD0 check via LD A,MB.
+Currently executing delay loops at 0x5C55 during wake/halt cycles.
 
 ## Milestone 6: Persistence
 
