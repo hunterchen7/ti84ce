@@ -362,19 +362,13 @@ impl Cpu {
                 13
             }
             InterruptMode::Mode2 => {
-                // Mode 2: Vectored interrupts
-                // Vector address = (I register << 8) | data_bus_byte
-                // TI-84 CE uses 0x00 as the data bus byte
+                // Mode 2: On TI-84 CE (eZ80), this is NOT the standard Z80 vectored mode!
+                // CEmu shows that IM 2 just jumps to 0x38, same as IM 1.
+                // The vectored interrupt mode (using I register) is only used in IM 3
+                // with the asic.im2 flag, which the TI-84 CE doesn't use.
                 self.push_addr(bus, self.pc);
-                let vector_addr = ((self.i as u32) << 8) | 0x00;
-                // Read 24-bit handler address from vector table
-                self.pc = if self.adl {
-                    bus.read_addr24(vector_addr)
-                } else {
-                    let addr_with_mbase = ((self.mbase as u32) << 16) | vector_addr;
-                    bus.read_word(addr_with_mbase) as u32
-                };
-                19
+                self.pc = 0x38;
+                13
             }
         }
     }
