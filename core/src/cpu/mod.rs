@@ -235,7 +235,14 @@ impl Cpu {
     // ========== Instruction Execution ==========
 
     /// Execute one instruction, returns cycles used
+    ///
+    /// Cycle counting: Returns the actual bus cycle delta, which includes
+    /// both memory access cycles (flash/RAM/port reads/writes) and internal
+    /// CPU processing cycles. This matches CEmu's cycle counting behavior.
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Track cycles at start - we return the delta at the end
+        let start_cycles = bus.cycles();
+
         // Process EI delay - interrupts enable AFTER the instruction following EI
         // This happens BEFORE we check for interrupts, so that:
         // 1. EI is executed, sets ei_delay = 2
@@ -252,13 +259,15 @@ impl Cpu {
         // Check for NMI first (highest priority)
         if self.nmi_pending {
             self.nmi_pending = false;
-            return self.handle_nmi(bus);
+            self.handle_nmi(bus);
+            return (bus.cycles() - start_cycles) as u32;
         }
 
         // Check for maskable interrupt
         if self.irq_pending && self.iff1 {
             self.irq_pending = false;
-            return self.handle_irq(bus);
+            self.handle_irq(bus);
+            return (bus.cycles() - start_cycles) as u32;
         }
 
         // Check for ON key wake - can wake CPU even with interrupts disabled
@@ -284,14 +293,16 @@ impl Cpu {
                     self.iff1 = true;
                     self.iff2 = true;
                 }
-                return 4;
+                bus.add_cycles(4); // Wake from halt cycle cost
+                return (bus.cycles() - start_cycles) as u32;
             }
         }
 
         if self.halted {
             // CPU is halted, just consume cycles
             // Interrupts can wake it (handled above on next call)
-            return 4;
+            bus.add_cycles(4); // Halted NOP cycle cost
+            return (bus.cycles() - start_cycles) as u32;
         }
 
         // eZ80 per-instruction mode handling:
@@ -337,40 +348,34 @@ impl Cpu {
             self.suffix = true;
             // Return - the next step() call will execute with the suffix modes
             // The suffix flag prevents L/IL from being reset to ADL
-            return 4;
+            // Note: The opcode fetch already added cycles
+            return (bus.cycles() - start_cycles) as u32;
         }
 
+        // Execute instruction - the return values are legacy and ignored
+        // since we now track cycles via bus.cycles()
         match x {
-            0 => self.execute_x0(bus, y, z, p, q),
+            0 => { self.execute_x0(bus, y, z, p, q); }
             1 => {
                 if y == 6 && z == 6 {
                     // HALT
                     self.halted = true;
-                    4
                 } else {
                     // LD r,r'
                     let val = self.get_reg8(z, bus);
                     self.set_reg8(y, val, bus);
-                    if y == 6 || z == 6 {
-                        7
-                    } else {
-                        4
-                    }
                 }
             }
             2 => {
                 // ALU A,r
                 let val = self.get_reg8(z, bus);
                 self.execute_alu(y, val);
-                if z == 6 {
-                    7
-                } else {
-                    4
-                }
             }
-            3 => self.execute_x3(bus, y, z, p, q),
-            _ => 4, // Should not happen
+            3 => { self.execute_x3(bus, y, z, p, q); }
+            _ => {}
         }
+
+        (bus.cycles() - start_cycles) as u32
     }
 
     /// Handle maskable interrupt (IRQ)

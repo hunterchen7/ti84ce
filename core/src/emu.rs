@@ -491,9 +491,9 @@ impl Emu {
         self.bus.ports.control.read(offset)
     }
 
-    /// Mask an address based on ADL/MBASE (debug helper)
+    /// Mask an instruction address based on ADL/MBASE (debug helper)
     pub fn mask_addr(&self, addr: u32) -> u32 {
-        self.cpu.mask_addr(addr)
+        self.cpu.mask_addr_instr(addr)
     }
 
     /// Snapshot a timer's internal state (1, 2, or 3)

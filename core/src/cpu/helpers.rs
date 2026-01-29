@@ -286,10 +286,21 @@ impl Cpu {
 
     // ========== Address Masking ==========
 
-    /// Mask address based on ADL mode (applies MBASE in Z80 mode)
+    /// Mask address based on L mode (applies MBASE in 16-bit data mode)
     /// Use for memory operand addresses
     #[inline]
     pub fn mask_addr(&self, addr: u32) -> u32 {
+        if self.l {
+            addr & 0xFFFFFF // 24-bit in ADL mode
+        } else {
+            ((self.mbase as u32) << 16) | (addr & 0xFFFF) // 16-bit with MBASE
+        }
+    }
+
+    /// Mask address based on ADL mode (applies MBASE in Z80 instruction mode)
+    /// Use for instruction fetch addresses (PC)
+    #[inline]
+    pub fn mask_addr_instr(&self, addr: u32) -> u32 {
         if self.adl {
             addr & 0xFFFFFF // 24-bit in ADL mode
         } else {
@@ -323,8 +334,8 @@ impl Cpu {
     /// Fetch byte at PC and increment PC
     #[inline]
     pub fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
-        // Apply MBASE for actual memory access in Z80 mode
-        let effective_pc = self.mask_addr(self.pc);
+        // Apply MBASE for actual memory access in Z80 instruction mode
+        let effective_pc = self.mask_addr_instr(self.pc);
         // Use fetch_byte which tracks instruction bytes for flash unlock sequence detection
         let byte = bus.fetch_byte(effective_pc, self.pc);
         // PC stays as 16-bit in Z80 mode, 24-bit in ADL mode (no MBASE added)
@@ -610,11 +621,12 @@ impl Cpu {
 
     /// Get 16/24-bit register pair by index (0=BC, 1=DE, 2=HL, 3=SP)
     pub(super) fn get_rp(&self, idx: u8) -> u32 {
+        let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
         match idx {
-            0 => self.bc,
-            1 => self.de,
-            2 => self.hl,
-            3 => self.sp,
+            0 => self.bc & mask,
+            1 => self.de & mask,
+            2 => self.hl & mask,
+            3 => self.sp & mask,
             _ => 0,
         }
     }
@@ -623,7 +635,7 @@ impl Cpu {
     /// Note: Uses wrap_pc-style masking (no MBASE) since register values
     /// should not have MBASE embedded - only memory addresses need MBASE
     pub(super) fn set_rp(&mut self, idx: u8, val: u32) {
-        let masked = self.wrap_pc(val);
+        let masked = if self.l { val & 0xFFFFFF } else { val & 0xFFFF };
         match idx {
             0 => self.bc = masked,
             1 => self.de = masked,

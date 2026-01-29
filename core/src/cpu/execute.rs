@@ -73,17 +73,18 @@ impl Cpu {
                     10
                 } else {
                     // ADD HL,rp
-                    let hl = self.hl;
-                    let rp = self.get_rp(p);
+                    let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let hl = self.hl & mask;
+                    let rp = self.get_rp(p) & mask;
                     let result = hl.wrapping_add(rp);
 
                     // Set flags
                     let half = ((hl & 0xFFF) + (rp & 0xFFF)) > 0xFFF;
                     self.set_flag_h(half);
                     self.set_flag_n(false);
-                    self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
+                    self.set_flag_c(result > mask);
 
-                    self.hl = self.wrap_pc(result);
+                    self.hl = result & mask;
                     11
                 }
             }
@@ -544,8 +545,14 @@ impl Cpu {
                             // DD prefix (IX instructions)
                             // CEmu counts prefixes as separate instruction steps
                             // Set prefix flag and return - execute_index() will be called on next step()
-                            self.prefix = 2;
-                            4
+                            // If next byte is ED, CEmu ignores DD and executes ED in the same step
+                            let next = bus.peek_byte_fetch(self.mask_addr_instr(self.pc));
+                            if next == 0xED {
+                                self.execute_ed(bus)
+                            } else {
+                                self.prefix = 2;
+                                4
+                            }
                         }
                         2 => {
                             // ED prefix (extended instructions)
@@ -554,8 +561,14 @@ impl Cpu {
                         3 => {
                             // FD prefix (IY instructions)
                             // CEmu counts prefixes as separate instruction steps
-                            self.prefix = 3;
-                            4
+                            // If next byte is ED, CEmu ignores FD and executes ED in the same step
+                            let next = bus.peek_byte_fetch(self.mask_addr_instr(self.pc));
+                            if next == 0xED {
+                                self.execute_ed(bus)
+                            } else {
+                                self.prefix = 3;
+                                4
+                            }
                         }
                         _ => 4,
                     }
@@ -602,21 +615,14 @@ impl Cpu {
                 let result = val & mask;
 
                 // Set flags: Z if bit is zero, S from bit 7 if testing bit 7
-                self.f &= flags::C; // Preserve carry
+                // Preserve carry and undocumented F3/F5 bits (CEmu behavior)
+                self.f &= flags::C | flags::F5 | flags::F3;
                 self.set_flag_z(result == 0);
                 self.set_flag_h(true);
                 self.set_flag_n(false);
                 self.set_flag_pv(result == 0); // PV is same as Z for BIT
                 if y == 7 && result != 0 {
                     self.f |= flags::S;
-                }
-                // F3/F5 are from the value being tested (for register) or from high byte of address (for (HL))
-                if z == 6 {
-                    // For (HL), F3/F5 come from high byte of HL
-                    self.f = (self.f & !(flags::F5 | flags::F3))
-                        | ((self.h() as u8) & (flags::F5 | flags::F3));
-                } else {
-                    self.f = (self.f & !(flags::F5 | flags::F3)) | (val & (flags::F5 | flags::F3));
                 }
                 if z == 6 {
                     12
@@ -735,6 +741,8 @@ impl Cpu {
 
     /// Execute ED prefix x=0 opcodes (eZ80-specific I/O instructions)
     pub fn execute_ed_x0(&mut self, bus: &mut Bus, y: u8, z: u8) -> u32 {
+        let p = y >> 1;
+        let q = y & 1;
         match z {
             0 => {
                 // IN0 r,(n) - read from port address 0xFF00nn (eZ80 mapped I/O)
@@ -780,6 +788,31 @@ impl Cpu {
                     bus.write_byte(addr, val);
                     12
                 }
+            }
+            2 | 3 => {
+                // LEA rp3[p], IX/IY (eZ80-specific)
+                if q != 0 {
+                    // OPCODETRAP in CEmu - treat as NOP
+                    return 8;
+                }
+                let d = self.fetch_byte(bus) as i8;
+                let index_reg = if z == 2 { self.ix } else { self.iy };
+                let val = (index_reg as i32 + d as i32) as u32;
+                let masked = if self.l { val & 0xFFFFFF } else { val & 0xFFFF };
+                match p {
+                    0 => self.bc = masked,
+                    1 => self.de = masked,
+                    2 => self.hl = masked,
+                    3 => {
+                        if z == 2 {
+                            self.ix = masked;
+                        } else {
+                            self.iy = masked;
+                        }
+                    }
+                    _ => {}
+                }
+                12
             }
             4 => {
                 // TST A,r - test register (eZ80-specific)
@@ -884,66 +917,59 @@ impl Cpu {
             2 => {
                 if q == 0 {
                     // SBC HL,rp
-                    let hl = self.hl;
-                    let rp = self.get_rp(p);
+                    let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let hl = self.hl & mask;
+                    let rp = self.get_rp(p) & mask;
                     let c = if self.flag_c() { 1u32 } else { 0 };
                     let result = hl.wrapping_sub(rp).wrapping_sub(c);
+                    let old_f3f5 = self.f & (flags::F5 | flags::F3);
 
                     // Flags - sign bit position depends on mode
-                    let sign_bit = if self.adl { 0x800000 } else { 0x8000 };
-                    let max = if self.adl { 0xFFFFFF } else { 0xFFFF };
+                    let sign_bit = if self.l { 0x800000 } else { 0x8000 };
+                    let max = mask;
                     let half = (hl & 0xFFF) < (rp & 0xFFF) + c;
                     // Overflow: different sign inputs, and result has same sign as subtrahend
                     let overflow = ((hl ^ rp) & sign_bit != 0) && ((hl ^ result) & sign_bit != 0);
 
-                    self.hl = self.wrap_pc(result);
+                    self.hl = result & mask;
 
                     self.f = 0;
-                    self.set_flag_s((self.hl >> (if self.adl { 23 } else { 15 })) & 1 != 0);
+                    self.set_flag_s((self.hl >> (if self.l { 23 } else { 15 })) & 1 != 0);
                     self.set_flag_z((self.hl & max) == 0);
                     self.set_flag_h(half);
                     self.set_flag_pv(overflow);
                     self.set_flag_n(true);
                     self.set_flag_c(hl < rp + c);
-                    // F3/F5 from high byte of result
-                    let high_byte = if self.adl {
-                        (self.hl >> 16) as u8
-                    } else {
-                        (self.hl >> 8) as u8
-                    };
-                    self.f =
-                        (self.f & !(flags::F5 | flags::F3)) | (high_byte & (flags::F5 | flags::F3));
+                    // Preserve F3/F5 from previous F (CEmu behavior)
+                    self.f = (self.f & !(flags::F5 | flags::F3)) | old_f3f5;
                     15
                 } else {
                     // ADC HL,rp
-                    let hl = self.hl;
-                    let rp = self.get_rp(p);
+                    let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let hl = self.hl & mask;
+                    let rp = self.get_rp(p) & mask;
                     let c = if self.flag_c() { 1u32 } else { 0 };
                     let result = hl.wrapping_add(rp).wrapping_add(c);
+                    let old_f3f5 = self.f & (flags::F5 | flags::F3);
 
                     // Flags - sign bit position depends on mode
-                    let sign_bit = if self.adl { 0x800000 } else { 0x8000 };
+                    let sign_bit = if self.l { 0x800000 } else { 0x8000 };
                     let half = ((hl & 0xFFF) + (rp & 0xFFF) + c) > 0xFFF;
                     // Overflow: same sign inputs, different sign result
                     let overflow = ((hl ^ rp) & sign_bit == 0) && ((hl ^ result) & sign_bit != 0);
-                    let max = if self.adl { 0xFFFFFF } else { 0xFFFF };
+                    let max = mask;
 
-                    self.hl = self.wrap_pc(result);
+                    self.hl = result & mask;
 
                     self.f = 0;
-                    self.set_flag_s((self.hl >> (if self.adl { 23 } else { 15 })) & 1 != 0);
+                    self.set_flag_s((self.hl >> (if self.l { 23 } else { 15 })) & 1 != 0);
                     self.set_flag_z((self.hl & max) == 0);
                     self.set_flag_h(half);
                     self.set_flag_pv(overflow);
                     self.set_flag_n(false);
                     self.set_flag_c(result > max);
-                    let high_byte = if self.adl {
-                        (self.hl >> 16) as u8
-                    } else {
-                        (self.hl >> 8) as u8
-                    };
-                    self.f =
-                        (self.f & !(flags::F5 | flags::F3)) | (high_byte & (flags::F5 | flags::F3));
+                    // Preserve F3/F5 from previous F (CEmu behavior)
+                    self.f = (self.f & !(flags::F5 | flags::F3)) | old_f3f5;
                     15
                 }
             }
@@ -977,17 +1003,65 @@ impl Cpu {
                 }
             }
             4 => {
-                // NEG
-                let old_a = self.a;
-                self.a = 0u8.wrapping_sub(old_a);
+                if q == 0 {
+                    // Various instructions based on p
+                    match p {
+                        0 => {
+                            // NEG (ED 44)
+                            let old_a = self.a;
+                            self.a = 0u8.wrapping_sub(old_a);
 
-                self.f = 0;
-                self.set_sz_flags(self.a);
-                self.set_flag_h((0 & 0x0F) < (old_a & 0x0F));
-                self.set_flag_pv(old_a == 0x80);
-                self.set_flag_n(true);
-                self.set_flag_c(old_a != 0);
-                8
+                            self.f = 0;
+                            self.set_sz_flags(self.a);
+                            self.set_flag_h((0 & 0x0F) < (old_a & 0x0F));
+                            self.set_flag_pv(old_a == 0x80);
+                            self.set_flag_n(true);
+                            self.set_flag_c(old_a != 0);
+                            8
+                        }
+                        1 => {
+                            // LEA IX,IY+d (ED 54)
+                            let d = self.fetch_byte(bus) as i8;
+                            let addr = (self.iy as i32 + d as i32) as u32;
+                            self.ix = self.wrap_pc(addr);
+                            8
+                        }
+                        2 => {
+                            // TST A,n (ED 64)
+                            let n = self.fetch_byte(bus);
+                            let result = self.a & n;
+                            self.f = 0;
+                            self.set_sz_flags(result);
+                            self.set_flag_h(true);
+                            self.set_flag_pv(Self::parity(result));
+                            8
+                        }
+                        3 => {
+                            // TSTIO n (ED 74)
+                            let n = self.fetch_byte(bus);
+                            let port_val = bus.port_read(self.c() as u16);
+                            let result = port_val & n;
+                            self.f = 0;
+                            self.set_sz_flags(result);
+                            self.set_flag_h(true);
+                            self.set_flag_pv(Self::parity(result));
+                            12
+                        }
+                        _ => 8,
+                    }
+                } else {
+                    // MLT rp[p] (ED 4C, 5C, 6C, 7C) - multiply high * low byte
+                    // p=0: MLT BC (ED 4C)
+                    // p=1: MLT DE (ED 5C)
+                    // p=2: MLT HL (ED 6C)
+                    // p=3: MLT SP (ED 7C) - not used on TI-84 CE
+                    let rp = self.get_rp(p);
+                    let high = ((rp >> 8) & 0xFF) as u16;
+                    let low = (rp & 0xFF) as u16;
+                    let result = (high * low) as u32;
+                    self.set_rp(p, result);
+                    8 // CEmu adds 4 cycles but base is 4, total 8
+                }
             }
             5 => {
                 // z=5 has RETN/RETI and eZ80-specific instructions
@@ -1616,6 +1690,23 @@ impl Cpu {
                             self.iy = nn;
                         }
                         14
+                    } else if y == 6 {
+                        // eZ80: LD IY/IX,(IX/IY+d) when prefixed with DD/FD and opcode is 0x31
+                        let d = self.fetch_byte(bus) as i8;
+                        let index_reg = if use_ix { self.ix } else { self.iy };
+                        let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
+                        let val = if self.l {
+                            bus.read_addr24(addr)
+                        } else {
+                            bus.read_word(addr) as u32
+                        };
+                        let masked = if self.l { val & 0xFFFFFF } else { val & 0xFFFF };
+                        if use_ix {
+                            self.iy = masked;
+                        } else {
+                            self.ix = masked;
+                        }
+                        19
                     } else {
                         // LD rp,nn (not affected by prefix for BC/DE/SP)
                         // Note: Cycle count doesn't differ by mode - timing difference
@@ -1635,6 +1726,9 @@ impl Cpu {
                         self.set_flag_h(half);
                         self.set_flag_n(false);
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
+                        // F3/F5 from high byte of result
+                        let high = if self.adl { (result >> 16) as u8 } else { (result >> 8) as u8 };
+                        self.f = (self.f & !(flags::F3 | flags::F5)) | (high & (flags::F3 | flags::F5));
 
                         let wrapped = self.wrap_pc(result);
                         if use_ix {
@@ -1642,14 +1736,6 @@ impl Cpu {
                         } else {
                             self.iy = wrapped;
                         }
-                        // F3/F5 from high byte of result
-                        let high_byte = if self.adl {
-                            (wrapped >> 16) as u8
-                        } else {
-                            (wrapped >> 8) as u8
-                        };
-                        self.f =
-                            (self.f & !(flags::F5 | flags::F3)) | (high_byte & (flags::F5 | flags::F3));
                         15
                     } else {
                         // ADD IX/IY,rp (for BC/DE/SP)
@@ -1661,6 +1747,9 @@ impl Cpu {
                         self.set_flag_h(half);
                         self.set_flag_n(false);
                         self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
+                        // F3/F5 from high byte of result
+                        let high = if self.adl { (result >> 16) as u8 } else { (result >> 8) as u8 };
+                        self.f = (self.f & !(flags::F3 | flags::F5)) | (high & (flags::F3 | flags::F5));
 
                         let wrapped = self.wrap_pc(result);
                         if use_ix {
@@ -1668,14 +1757,6 @@ impl Cpu {
                         } else {
                             self.iy = wrapped;
                         }
-                        // F3/F5 from high byte of result
-                        let high_byte = if self.adl {
-                            (wrapped >> 16) as u8
-                        } else {
-                            (wrapped >> 8) as u8
-                        };
-                        self.f =
-                            (self.f & !(flags::F5 | flags::F3)) | (high_byte & (flags::F5 | flags::F3));
                         15
                     }
                 }
@@ -1791,7 +1872,25 @@ impl Cpu {
             }
             6 => {
                 // LD r,n with indexed addressing
-                if y == 6 {
+                // eZ80: y < 4 is undefined (trap), y=7 is LD (IX/IY+d),IY/IX
+                if y < 4 {
+                    // eZ80: DD/FD 06/0E/16/1E nn are undefined - treat as NOP
+                    // CEmu calls cpu_trap() which typically just continues
+                    self.fetch_byte(bus); // consume the immediate
+                    8
+                } else if y == 7 {
+                    // LD (IX+d),IY or LD (IY+d),IX - stores the OTHER index register
+                    let d = self.fetch_byte(bus) as i8;
+                    let index_reg = if use_ix { self.ix } else { self.iy };
+                    let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
+                    let other_reg = if use_ix { self.iy } else { self.ix };
+                    if self.l {
+                        bus.write_addr24(addr, other_reg);
+                    } else {
+                        bus.write_word(addr, other_reg as u16);
+                    }
+                    19
+                } else if y == 6 {
                     // LD (IX+d),n - displacement before immediate
                     let d = self.fetch_byte(bus) as i8;
                     let n = self.fetch_byte(bus);
@@ -1800,14 +1899,55 @@ impl Cpu {
                     bus.write_byte(addr, n);
                     19
                 } else {
+                    // y=4,5: LD IXH/IXL,n or LD IYH/IYL,n
                     let n = self.fetch_byte(bus);
                     self.set_index_reg8_no_disp(y, n, use_ix);
                     11
                 }
             }
             7 => {
-                // These don't use HL, execute normally
-                self.execute_x0(bus, y, z, p, q)
+                // eZ80: DD/FD prefix transforms z=7 into LD rp3,(IX/IY+d) / LD (IX/IY+d),rp3
+                let d = self.fetch_byte(bus) as i8;
+                let index_reg = if use_ix { self.ix } else { self.iy };
+                let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
+                let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
+
+                if q == 0 {
+                    // LD rp3[p],(IX/IY+d)
+                    let val = if self.l {
+                        bus.read_addr24(addr)
+                    } else {
+                        bus.read_word(addr) as u32
+                    } & mask;
+                    match p {
+                        0 => self.bc = val,
+                        1 => self.de = val,
+                        2 => self.hl = val,
+                        3 => {
+                            if use_ix {
+                                self.ix = val;
+                            } else {
+                                self.iy = val;
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    // LD (IX/IY+d),rp3[p]
+                    let rp3_val = match p {
+                        0 => self.bc,
+                        1 => self.de,
+                        2 => self.hl,
+                        3 => index_reg,
+                        _ => 0,
+                    } & mask;
+                    if self.l {
+                        bus.write_addr24(addr, rp3_val);
+                    } else {
+                        bus.write_word(addr, rp3_val as u16);
+                    }
+                }
+                19
             }
             _ => 8,
         }
@@ -2120,7 +2260,8 @@ impl Cpu {
                 let mask = 1 << y;
                 let result = val & mask;
 
-                self.f &= flags::C;
+                // Preserve carry and undocumented F3/F5 bits (CEmu behavior)
+                self.f &= flags::C | flags::F5 | flags::F3;
                 self.set_flag_z(result == 0);
                 self.set_flag_h(true);
                 self.set_flag_n(false);
@@ -2128,9 +2269,6 @@ impl Cpu {
                 if y == 7 && result != 0 {
                     self.f |= flags::S;
                 }
-                // F3/F5 from high byte of address
-                self.f = (self.f & !(flags::F5 | flags::F3))
-                    | (((addr >> 8) as u8) & (flags::F5 | flags::F3));
                 20
             }
             2 => {

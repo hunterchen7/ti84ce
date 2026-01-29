@@ -292,7 +292,7 @@ fn test_z80_mode_jp_uses_mbase() {
     // Should jump to MBASE:0x0200 = 0xD00200
     assert_eq!(cpu.pc, 0x0200, "PC should be 16-bit value");
     // But actual address accessed should include MBASE
-    let effective = cpu.mask_addr(cpu.pc);
+    let effective = cpu.mask_addr_instr(cpu.pc);
     assert_eq!(
         effective, 0xD00200,
         "Effective address should include MBASE"

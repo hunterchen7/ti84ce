@@ -132,7 +132,10 @@ impl ControlPorts {
             regs::FIXED_7F => 0x7F, // Always returns 0x7F
             regs::PANEL_CONTROL => self.panel_control,
             regs::LCD_ENABLE => self.lcd_enable,
-            regs::USB_CONTROL => self.usb_control,
+            regs::USB_CONTROL => {
+                // CEmu ORs usb_status() into port 0x0F, which returns 0xC0 at reset.
+                self.usb_control | 0xC0
+            },
             regs::FIXED_80 => 0x80, // Always returns 0x80
             regs::FLASH_UNLOCK => {
                 // CEmu: returns stored value directly
@@ -172,7 +175,10 @@ impl ControlPorts {
             regs::CPU_SPEED => self.cpu_speed = value & 0x03,
             regs::BATTERY_STATUS => {} // Read-only
             regs::DEVICE_TYPE => {}    // Read-only
-            regs::CONTROL_FLAGS => self.control_flags = value,
+            regs::CONTROL_FLAGS => {
+                // CEmu masks control flags to 0x1F on write
+                self.control_flags = value & 0x1F;
+            }
             regs::UNLOCK_STATUS => {
                 // Only low 3 bits are writable
                 self.unlock_status = value & 0x07;
@@ -449,16 +455,16 @@ mod tests {
     #[test]
     fn test_usb_control_masked() {
         let mut ctrl = ControlPorts::new();
-        // Initial value is 0x02
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x02);
+        // Initial value is 0x02, but read ORs in 0xC0 (usb_status)
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC2);
 
-        // Writing 0xFF should be masked to 0x03
+        // Writing 0xFF should be masked to 0x03, read shows 0xC3 (with USB status)
         ctrl.write(regs::USB_CONTROL, 0xFF);
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x03);
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC3);
 
-        // Writing 0x01
+        // Writing 0x01, read shows 0xC1 (with USB status)
         ctrl.write(regs::USB_CONTROL, 0x01);
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x01);
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC1);
     }
 
     #[test]

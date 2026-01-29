@@ -15,6 +15,7 @@
 //! Reference: CEmu (https://github.com/CE-Programming/CEmu)
 
 use crate::memory::{addr, Flash, FlashError, Ports, Ram};
+use crate::peripherals::SpiController;
 use std::collections::BTreeMap;
 
 /// Bus access type for debugging/tracing
@@ -309,6 +310,8 @@ pub struct Bus {
     pub ram: Ram,
     /// Memory-mapped I/O peripherals
     pub ports: Ports,
+    /// SPI controller (port range 0xD)
+    spi: SpiController,
     /// RNG for unmapped region reads
     rng: BusRng,
     /// Cycle counter for timing
@@ -327,9 +330,25 @@ impl Bus {
     pub const FLASH_READ_CYCLES: u64 = 10;  // ~4 wait states + fetch
     pub const RAM_READ_CYCLES: u64 = 4;     // 3 wait states + 1
     pub const RAM_WRITE_CYCLES: u64 = 2;    // 1 wait state + 1
-    pub const PORT_READ_CYCLES: u64 = 4;
-    pub const PORT_WRITE_CYCLES: u64 = 3;
     pub const UNMAPPED_CYCLES: u64 = 2;
+
+    /// Per-port-range read cycles (indexed by port range 0x0-0xF)
+    /// From CEmu port.c: {2,2,2,4,3,3,3,3,3,3,3,3,3,3,3,3}
+    /// Port ranges: 0=Control, 1=Flash, 2=SHA256, 3=USB, 4=LCD, 5=Interrupt,
+    ///              6=Watchdog, 7=Timers, 8=RTC, 9=Protected, A=Keypad,
+    ///              B=Backlight, C=Cxxx, D=SPI, E=UART, F=Control (alt)
+    const PORT_READ_CYCLES: [u64; 16] = [2, 2, 2, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3];
+
+    /// Per-port-range write cycles (indexed by port range 0x0-0xF)
+    /// From CEmu port.c: {2,2,2,4,2,3,3,3,3,3,3,3,3,3,3,3}
+    const PORT_WRITE_CYCLES: [u64; 16] = [2, 2, 2, 4, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3];
+
+    /// Memory-mapped I/O read cycles (used for read_byte at 0xE00000+)
+    /// This is the default timing; IN/OUT use per-port timing above
+    const MMIO_READ_CYCLES: u64 = 3;
+
+    /// Memory-mapped I/O write cycles (used for write_byte at 0xE00000+)
+    const MMIO_WRITE_CYCLES: u64 = 3;
 
     /// Create a new bus with fresh memory
     pub fn new() -> Self {
@@ -337,6 +356,7 @@ impl Bus {
             flash: Flash::new(),
             ram: Ram::new(),
             ports: Ports::new(),
+            spi: SpiController::new(),
             rng: BusRng::new(),
             cycles: 0,
             fetch_buffer: [0; FETCH_BUFFER_SIZE],
@@ -386,7 +406,7 @@ impl Bus {
                 self.ram.read(addr - addr::RAM_START)
             }
             MemoryRegion::Ports => {
-                self.cycles += Self::PORT_READ_CYCLES;
+                self.cycles += Self::MMIO_READ_CYCLES;
                 let keys = *self.ports.key_state();
                 self.ports.read(addr - addr::PORT_START, &keys)
             }
@@ -420,7 +440,7 @@ impl Bus {
                 self.ram.read(addr - addr::RAM_START)
             }
             MemoryRegion::Ports => {
-                self.cycles += Self::PORT_READ_CYCLES;
+                self.cycles += Self::MMIO_READ_CYCLES;
                 let keys = *self.ports.key_state();
                 self.ports.read(addr - addr::PORT_START, &keys)
             }
@@ -495,9 +515,11 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                // Flash writes are ignored from CPU
-                // Real implementation would check for unlock sequences
+                // Flash writes are ignored unless flash is unlocked
                 self.cycles += Self::UNMAPPED_CYCLES;
+                if self.ports.control.flash_unlocked() {
+                    self.flash.write_cpu(addr, value);
+                }
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.cycles += Self::RAM_WRITE_CYCLES;
@@ -508,7 +530,7 @@ impl Bus {
                 self.ram.write(addr - addr::RAM_START, value);
             }
             MemoryRegion::Ports => {
-                self.cycles += Self::PORT_WRITE_CYCLES;
+                self.cycles += Self::MMIO_WRITE_CYCLES;
                 self.ports.write(addr - addr::PORT_START, value);
             }
             MemoryRegion::Unmapped => {
@@ -568,7 +590,23 @@ impl Bus {
         let addr = addr & addr::ADDR_MASK;
 
         match Self::decode_address(addr) {
-            MemoryRegion::Flash => self.flash.read(addr),
+            MemoryRegion::Flash => self.flash.peek(addr),
+            MemoryRegion::Ram | MemoryRegion::Vram => {
+                self.ram.read(addr - addr::RAM_START)
+            }
+            MemoryRegion::Ports => {
+                let keys = *self.ports.key_state();
+                self.ports.read(addr - addr::PORT_START, &keys)
+            }
+            MemoryRegion::Unmapped => 0x00,
+        }
+    }
+
+    /// Peek a byte as it would be fetched by the CPU (includes flash command status)
+    pub fn peek_byte_fetch(&mut self, addr: u32) -> u8 {
+        let addr = addr & addr::ADDR_MASK;
+        match Self::decode_address(addr) {
+            MemoryRegion::Flash => self.flash.peek_status(addr),
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.ram.read(addr - addr::RAM_START)
             }
@@ -646,9 +684,8 @@ impl Bus {
     ///
     /// Based on CEmu's port.c port_map array
     pub fn port_read(&mut self, port: u16) -> u8 {
-        self.cycles += Self::PORT_READ_CYCLES;
-
         let range = (port >> 12) & 0xF;
+        self.cycles += Self::PORT_READ_CYCLES[range as usize];
         let keys = *self.ports.key_state();
 
         match range {
@@ -668,8 +705,8 @@ impl Bus {
                 self.ports.lcd.read(offset)
             }
             0x5 => {
-                // Interrupt controller - mask with 0x1F
-                let offset = (port & 0x1F) as u32;
+                // Interrupt controller - mask with 0xFF (CEmu port_mirrors)
+                let offset = (port & 0xFF) as u32;
                 self.ports.interrupt.read(offset)
             }
             0x6 => {
@@ -709,11 +746,9 @@ impl Bus {
                 self.ports.keypad.read(offset, &keys)
             }
             0xD => {
-                // SPI - stub returning appropriate reset values
-                // At reset, SPI STATUS register (offset 0x0C-0x0F) has bit 1 set (TX FIFO not full)
-                // For port 0xD00D: offset 0x0D, STATUS byte 1 = (2 >> 8) = 0
-                let offset = port & 0x7F;
-                self.spi_read_stub(offset)
+                // SPI - mask with 0x7F (CEmu port_mirrors)
+                let offset = (port & 0x7F) as u32;
+                self.spi.read(offset, self.cycles, self.ports.control.cpu_speed())
             }
             0xF => {
                 // Control ports alternate - mask with 0xFF
@@ -728,9 +763,8 @@ impl Bus {
 
     /// Write to I/O port (for OUT instructions)
     pub fn port_write(&mut self, port: u16, value: u8) {
-        self.cycles += Self::PORT_WRITE_CYCLES;
-
         let range = (port >> 12) & 0xF;
+        self.cycles += Self::PORT_WRITE_CYCLES[range as usize];
 
         match range {
             0x0 => {
@@ -749,8 +783,8 @@ impl Bus {
                 self.ports.lcd.write(offset, value);
             }
             0x5 => {
-                // Interrupt controller - mask with 0x1F
-                let offset = (port & 0x1F) as u32;
+                // Interrupt controller - mask with 0xFF (CEmu port_mirrors)
+                let offset = (port & 0xFF) as u32;
                 self.ports.interrupt.write(offset, value);
             }
             0x6 => {
@@ -790,7 +824,9 @@ impl Bus {
                 self.ports.keypad.write(offset, value);
             }
             0xD => {
-                // SPI - stub (ignore writes)
+                // SPI - mask with 0x7F
+                let offset = (port & 0x7F) as u32;
+                self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
             }
             0xF => {
                 // Control ports alternate - mask with 0xFF
@@ -803,39 +839,11 @@ impl Bus {
         }
     }
 
-    /// SPI read stub - returns appropriate reset values
-    /// Based on CEmu's spi.c spi_read function
-    fn spi_read_stub(&self, offset: u16) -> u8 {
-        let shift = (offset & 3) << 3;
-        // Match on offset >> 2 to get register index
-        // Offsets: CR0=0x00, CR1=0x04, CR2=0x08, STATUS=0x0C, INTCTRL=0x10,
-        //          INTSTATUS=0x14, DATA=0x18, FEATURE=0x1C, REVISION=0x60, FEATURE2=0x64
-        let value: u32 = match offset >> 2 {
-            // CR0(0), CR1(1), CR2(2): 0 at reset
-            0 | 1 | 2 => 0,
-            // STATUS(3): At reset, TX FIFO is not full (bit 1 set)
-            // value = tfve << 12 | rfve << 4 | busy << 2 | txnf << 1 | rxf << 0
-            // At reset: 0 | 0 | 0 | 2 | 0 = 2
-            3 => 2,
-            // INTCTRL(4), INTSTATUS(5): 0 at reset
-            4 | 5 => 0,
-            // DATA(6): 0 at reset
-            6 => 0,
-            // FEATURE(7): SPI_FEATURES << 24 | (TXFIFO_DEPTH-1) << 16 | (RXFIFO_DEPTH-1) << 8 | (WIDTH-1)
-            // CEmu: SPI_FEATURES=3, TXFIFO_DEPTH=16, RXFIFO_DEPTH=16, WIDTH=32
-            // So: 3 << 24 | 15 << 16 | 15 << 8 | 31 = 0x030F0F1F
-            7 | 25 => 0x030F0F1F,
-            // REVISION(24): 0x00002100
-            24 => 0x00002100,
-            _ => 0,
-        };
-        (value >> shift) as u8
-    }
-
     /// Reset bus and all memory to initial state
     pub fn reset(&mut self) {
         self.ram.reset();
         self.ports.reset();
+        self.spi.reset();
         self.cycles = 0;
         self.rng = BusRng::new();
         self.fetch_buffer = [0; FETCH_BUFFER_SIZE];
@@ -1039,15 +1047,15 @@ mod tests {
 
         bus.reset_cycles();
 
-        // Port read: 4 cycles
+        // Memory-mapped I/O read: 3 cycles (MMIO default)
         bus.read_byte(0xE00000);
-        assert_eq!(bus.cycles(), Bus::PORT_READ_CYCLES);
+        assert_eq!(bus.cycles(), Bus::MMIO_READ_CYCLES);
 
         bus.reset_cycles();
 
-        // Port write: 3 cycles
+        // Memory-mapped I/O write: 3 cycles (MMIO default)
         bus.write_byte(0xE00000, 0x00);
-        assert_eq!(bus.cycles(), Bus::PORT_WRITE_CYCLES);
+        assert_eq!(bus.cycles(), Bus::MMIO_WRITE_CYCLES);
 
         bus.reset_cycles();
 

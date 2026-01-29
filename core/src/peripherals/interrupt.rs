@@ -26,7 +26,8 @@ pub mod sources {
     pub const WAKE: u32 = 1 << 19;
 }
 
-/// Register offsets within the interrupt controller
+/// Register offsets within the interrupt controller (used in tests)
+#[cfg(test)]
 mod regs {
     /// Interrupt status/latch (read: status, write: acknowledge)
     pub const STATUS: u32 = 0x00;
@@ -34,16 +35,22 @@ mod regs {
     pub const ENABLED: u32 = 0x04;
     /// Raw interrupt state (before latch)
     pub const RAW: u32 = 0x08;
+    /// Latched mode bitmask
+    pub const LATCHED: u32 = 0x0C;
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InterruptBank {
+    status: u32,
+    enabled: u32,
+    latched: u32,
+    inverted: u32,
 }
 
 /// Interrupt controller for the TI-84 Plus CE
 #[derive(Debug, Clone)]
 pub struct InterruptController {
-    /// Latched interrupt status (must be acknowledged to clear)
-    status: u32,
-    /// Interrupt enable mask
-    enabled: u32,
-    /// Raw interrupt state (direct from sources)
+    banks: [InterruptBank; 2],
     raw: u32,
 }
 
@@ -51,76 +58,120 @@ impl InterruptController {
     /// Create a new interrupt controller
     /// CEmu sets the PWR interrupt (bit 15) immediately on reset
     pub fn new() -> Self {
-        Self {
-            // PWR interrupt is set on power-up/reset (CEmu: intrpt_set(INT_PWR, true))
-            status: sources::PWR,
-            enabled: 0,
-            raw: sources::PWR,
-        }
+        let mut controller = Self {
+            banks: [
+                InterruptBank { status: 0, enabled: 0, latched: 0, inverted: 0 },
+                InterruptBank { status: 0, enabled: 0, latched: 0, inverted: 0 },
+            ],
+            raw: 0,
+        };
+        controller.raise(sources::PWR);
+        controller
     }
 
     /// Reset the interrupt controller
     /// CEmu sets PWR interrupt after clearing all state
     pub fn reset(&mut self) {
-        self.status = sources::PWR;
-        self.enabled = 0;
-        self.raw = sources::PWR;
+        self.banks = [
+            InterruptBank { status: 0, enabled: 0, latched: 0, inverted: 0 },
+            InterruptBank { status: 0, enabled: 0, latched: 0, inverted: 0 },
+        ];
+        self.raw = 0;
+        self.raise(sources::PWR);
     }
 
     /// Check if any enabled interrupt is pending
     pub fn irq_pending(&self) -> bool {
-        (self.status & self.enabled) != 0
+        (self.banks[0].status & self.banks[0].enabled) != 0
+            || (self.banks[1].status & self.banks[1].enabled) != 0
     }
 
     /// Raise an interrupt (set status bit)
     pub fn raise(&mut self, source: u32) {
-        self.raw |= source;
-        self.status |= source;
+        self.set_source(source, true);
     }
 
     /// Clear raw interrupt state (source went inactive)
     pub fn clear_raw(&mut self, source: u32) {
-        self.raw &= !source;
+        self.set_source(source, false);
     }
 
     /// Acknowledge (clear) interrupt status bits
     pub fn acknowledge(&mut self, mask: u32) {
-        self.status &= !mask;
+        for bank in &mut self.banks {
+            bank.status &= !mask;
+        }
+    }
+
+    fn set_source(&mut self, mask: u32, set: bool) {
+        if set {
+            self.raw |= mask;
+        } else {
+            self.raw &= !mask;
+        }
+
+        for bank in &mut self.banks {
+            let inverted = bank.inverted & mask;
+            if set ^ (inverted != 0) {
+                bank.status |= mask;
+            } else {
+                bank.status &= !mask | bank.latched;
+            }
+        }
     }
 
     /// Read a register byte
     /// addr is offset from controller base (0-0x0F)
     pub fn read(&self, addr: u32) -> u8 {
-        let reg = addr & 0x0C; // Align to 4-byte register
-        let byte_offset = (addr & 0x03) * 8;
+        let index = (addr >> 2) & 0x3F;
+        let request = ((addr >> 5) & 0x01) as usize;
+        let bit_offset = (addr & 0x03) * 8;
+        let bank = &self.banks[request];
 
-        let value = match reg {
-            regs::STATUS => self.status,
-            regs::ENABLED => self.enabled,
-            regs::RAW => self.raw,
+        let value = match index {
+            0 | 8 => bank.status,
+            1 | 9 => bank.enabled,
+            2 | 10 => self.raw, // Raw interrupt state
+            3 | 11 => bank.latched,
+            4 | 12 => bank.inverted,
+            5 | 13 => bank.status & bank.enabled,
+            20 => 0x00010900,
+            21 => {
+                if bit_offset & 16 != 0 {
+                    0
+                } else {
+                    22
+                }
+            }
             _ => 0,
         };
 
-        ((value >> byte_offset) & 0xFF) as u8
+        ((value >> bit_offset) & 0xFF) as u8
     }
 
     /// Write a register byte
     /// addr is offset from controller base (0-0x0F)
     pub fn write(&mut self, addr: u32, value: u8) {
-        let reg = addr & 0x0C;
-        let byte_offset = (addr & 0x03) * 8;
-        let mask = 0xFF_u32 << byte_offset;
-        let shifted_value = (value as u32) << byte_offset;
+        let index = (addr >> 2) & 0x3F;
+        let request = ((addr >> 5) & 0x01) as usize;
+        let bit_offset = (addr & 0x03) * 8;
+        let mask = 0xFF_u32 << bit_offset;
+        let shifted_value = (value as u32) << bit_offset;
 
-        match reg {
-            regs::STATUS => {
-                // Writing to status acknowledges (clears) those bits
-                self.status &= !(shifted_value & mask);
+        let bank = &mut self.banks[request];
+        match index {
+            1 | 9 => {
+                bank.enabled = (bank.enabled & !mask) | (shifted_value & mask);
             }
-            regs::ENABLED => {
-                self.enabled = (self.enabled & !mask) | (shifted_value & mask);
+            2 | 10 => {
+                bank.status &= !((shifted_value) & bank.latched);
             }
-            // RAW is read-only
+            3 | 11 => {
+                bank.latched = (bank.latched & !mask) | (shifted_value & mask);
+            }
+            4 | 12 => {
+                bank.inverted = (bank.inverted & !mask) | (shifted_value & mask);
+            }
             _ => {}
         }
     }
@@ -140,9 +191,8 @@ mod tests {
     fn test_new() {
         let ic = InterruptController::new();
         // CEmu sets PWR interrupt (bit 15) on power-up/reset
-        assert_eq!(ic.status, sources::PWR);
-        assert_eq!(ic.raw, sources::PWR);
-        assert_eq!(ic.enabled, 0);
+        assert_eq!(ic.read(0x01), 0x80); // status byte containing bit 15
+        assert_eq!(ic.read(0x04), 0x00); // enabled low byte
         // PWR is set but not enabled, so no IRQ pending
         assert!(!ic.irq_pending());
     }
@@ -151,14 +201,13 @@ mod tests {
     fn test_reset() {
         let mut ic = InterruptController::new();
         ic.raise(sources::TIMER1);
-        ic.enabled = sources::TIMER1;
+        ic.write(0x04, sources::TIMER1 as u8);
         assert!(ic.irq_pending());
 
         ic.reset();
         // CEmu sets PWR interrupt on reset
-        assert_eq!(ic.status, sources::PWR);
-        assert_eq!(ic.raw, sources::PWR);
-        assert_eq!(ic.enabled, 0);
+        assert_eq!(ic.read(0x01), 0x80);
+        assert_eq!(ic.read(0x04), 0x00);
         // PWR is set but not enabled, so no IRQ pending
         assert!(!ic.irq_pending());
     }
@@ -172,7 +221,7 @@ mod tests {
         assert!(!ic.irq_pending());
 
         // Enable the interrupt
-        ic.write(regs::ENABLED, sources::TIMER1 as u8);
+        ic.write(0x04, sources::TIMER1 as u8);
         assert!(ic.irq_pending());
     }
 
@@ -181,11 +230,12 @@ mod tests {
         let mut ic = InterruptController::new();
 
         ic.raise(sources::TIMER1);
-        ic.write(regs::ENABLED, sources::TIMER1 as u8);
+        ic.write(0x04, sources::TIMER1 as u8);
         assert!(ic.irq_pending());
 
-        // Acknowledge the interrupt
-        ic.write(regs::STATUS, sources::TIMER1 as u8);
+        // Latch and then acknowledge the interrupt
+        ic.write(0x0C, sources::TIMER1 as u8);
+        ic.write(0x08, sources::TIMER1 as u8);
         assert!(!ic.irq_pending());
     }
 
@@ -193,12 +243,12 @@ mod tests {
     fn test_read_write_enabled() {
         let mut ic = InterruptController::new();
 
-        ic.write(regs::ENABLED, 0x12);
-        assert_eq!(ic.read(regs::ENABLED), 0x12);
+        ic.write(0x04, 0x12);
+        assert_eq!(ic.read(0x04), 0x12);
 
-        ic.write(regs::ENABLED + 1, 0x34);
-        assert_eq!(ic.read(regs::ENABLED), 0x12);
-        assert_eq!(ic.read(regs::ENABLED + 1), 0x34);
+        ic.write(0x05, 0x34);
+        assert_eq!(ic.read(0x04), 0x12);
+        assert_eq!(ic.read(0x05), 0x34);
     }
 
     #[test]
@@ -206,7 +256,9 @@ mod tests {
         let mut ic = InterruptController::new();
 
         // Enable timer1 and keypad
-        ic.enabled = sources::TIMER1 | sources::KEYPAD;
+        ic.write(0x04, sources::TIMER1 as u8);
+        // Keypad is bit 10 -> byte 0x05 bit 2
+        ic.write(0x05, 0x04);
 
         // Raise only timer1
         ic.raise(sources::TIMER1);
@@ -225,6 +277,9 @@ mod tests {
     fn test_raw_state() {
         let mut ic = InterruptController::new();
 
+        // Configure TIMER2 as latched so status persists after raw clears
+        ic.write(regs::LATCHED, sources::TIMER2 as u8);
+
         // Raise interrupt - sets both raw and status
         ic.raise(sources::TIMER2);
         assert_eq!(ic.read(regs::RAW), sources::TIMER2 as u8);
@@ -233,7 +288,7 @@ mod tests {
         // Clear raw state (source went inactive)
         ic.clear_raw(sources::TIMER2);
         assert_eq!(ic.read(regs::RAW), 0);
-        // Status should still be latched
+        // Status should still be latched (because TIMER2 is configured as latched)
         assert_eq!(ic.read(regs::STATUS), sources::TIMER2 as u8);
     }
 
@@ -256,8 +311,8 @@ mod tests {
     fn test_on_key_interrupt() {
         let mut ic = InterruptController::new();
 
-        // Enable ON key interrupt
-        ic.enabled = sources::ON_KEY;
+        // Enable ON key interrupt via register write
+        ic.write(regs::ENABLED, sources::ON_KEY as u8);
 
         // Raise ON key
         ic.raise(sources::ON_KEY);
@@ -269,8 +324,9 @@ mod tests {
     fn test_all_timer_sources() {
         let mut ic = InterruptController::new();
 
-        // Enable all timer interrupts
-        ic.enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
+        // Enable all timer interrupts via register write
+        let mask = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
+        ic.write(regs::ENABLED, mask as u8);
 
         // Raise timer 3
         ic.raise(sources::TIMER3);

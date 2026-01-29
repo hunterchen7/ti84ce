@@ -109,12 +109,18 @@
 - Control port defaults now match CEmu (CPU speed, flash, PWR interrupt, protection)
 - Added privileged boundary register (ports 0x1D-0x1F) and is_unprivileged() check
 - Fixed battery_status, LCD enable nibble duplication, USB control masking
-- **Boot trace matches CEmu for 40,000+ steps** (full trace comparison)
+- **Boot trace matches CEmu for 3,216,456+ steps** (3.2M+ instruction parity)
 - Fixed LCD register offsets (control at 0x18, upbase at 0x10 - matches CEmu)
 - LCD properly enabled with control value 0x92D (16bpp RGB565, power on)
 - ROM boots to initialization loop, VRAM filled with white pixels
 - CPU reaches main initialization code at ~50M cycles
 - Fixed IM instruction mapping (eZ80 maps y directly to IM, ED 56 = IM 2)
+- SPI timing matches CEmu (24MHz tick conversion, FIFO depth 16, RX-only transfers)
+- RTC stub properly returns load status (0xF8 pending, 0x00 complete)
+- Fixed DD/FD prefix instructions (3E=LD (IX+d),IY, 31=LD IY,(IX+d))
+- Fixed ED z=4 q=1 as MLT (multiply) instead of NEG
+- Fixed control port 0x05 write masking to 0x1F
+- Flash command emulation for sector erase (80h sequence returns 80h status)
 
 ### 5f: CPU/Bus Fixes (Completed)
 - [x] Fixed L/IL suffix mode handling (eZ80 suffix opcodes)
@@ -132,13 +138,14 @@
 - [x] Fixed IM instruction mapping: eZ80 maps y value directly to IM mode (ED 56 = IM 2, not IM 1)
 
 **Key Progress:**
-- Execution trace matches CEmu for 40,001+ steps
+- Execution trace matches CEmu for 3,216,456+ steps (3.2M+ instruction parity)
 - VRAM is being written (screen shows all white pixels)
 - Fixed I/O port addressing: IN/OUT (C) now uses full BC as 16-bit port address
-- SPI stub returns proper reset values (STATUS register)
+- SPI timing now cycle-accurate with CEmu (24MHz conversion, FIFO depth 16)
 - Fixed LD A,MB (ED 6E) - critical for boot to pass CP 0xD0 check
 - Boot now progresses through multiple ON key wake cycles
 - MBASE correctly set to 0xD0 by ROM initialization
+- Divergence at 3.2M steps caused by RTC scheduler timing (would require full scheduler)
 
 **Trace Comparison Commands:**
 ```bash
@@ -152,7 +159,8 @@ cargo run --example trace_boot --manifest-path core/Cargo.toml > trace_ours.log
 **Current Status:**
 Boot progresses past initial hardware init, ON key wake works correctly.
 ROM sets MBASE=0xD0, interrupt handler passes CP 0xD0 check via LD A,MB.
-Currently executing delay loops at 0x5C55 during wake/halt cycles.
+Achieved 3.2M+ instruction parity with CEmu reference emulator.
+Divergence at step 3,216,456 is due to RTC load status timing (scheduler-dependent).
 
 ## Milestone 6: Persistence
 

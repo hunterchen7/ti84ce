@@ -36,8 +36,6 @@ mod regs {
     pub const INT_MASK: u32 = 0x1C;
     /// Raw interrupt status (single byte at 0x20)
     pub const INT_STATUS: u32 = 0x20;
-    /// Masked interrupt status (read-only at 0x24)
-    pub const INT_MASKED: u32 = 0x24;
     /// Palette base address
     pub const PALBASE: u32 = 0x28;
 }

@@ -62,6 +62,14 @@ fn main() {
 
     let mut step: u64 = 0;
     let mut total_cycles: u64 = 0;
+    let dump_step: Option<u64> = env::var("DUMP_STEP").ok().and_then(|s| s.parse().ok());
+    let dump_addr: Option<u32> = env::var("DUMP_ADDR")
+        .ok()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok());
+    let dump_len: usize = env::var("DUMP_LEN")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     while step < max_steps {
         // Run one instruction
@@ -71,6 +79,22 @@ fn main() {
 
         // Log state after each instruction
         log_state(&mut writer, &mut emu, step, total_cycles);
+
+        if let (Some(target_step), Some(addr)) = (dump_step, dump_addr) {
+            if step == target_step {
+                let mut bytes = Vec::with_capacity(dump_len);
+                for i in 0..dump_len {
+                    bytes.push(emu.peek_byte(addr.wrapping_add(i as u32)));
+                }
+                eprintln!(
+                    "DUMP step={} addr=0x{:06X} len={} data={}",
+                    step,
+                    addr,
+                    dump_len,
+                    bytes.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ")
+                );
+            }
+        }
 
         // Progress indicator every 100K steps
         if step % 100_000 == 0 {

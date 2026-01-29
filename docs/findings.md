@@ -51,6 +51,54 @@ On the eZ80 (and in CEmu), block instructions like LDIR, LDDR, CPIR, CPDR execut
 
 **Impact**: Trace comparisons will show different step counts if iterations are counted differently. Also affects cycle counting.
 
+### BIT Preserves F3/F5 (Undocumented) Flags
+
+For CB-prefixed BIT instructions, CEmu preserves F3/F5 from the **previous** F register instead of deriving them from the tested operand or address.
+
+**Impact**: Setting F3/F5 from the operand causes a mismatch in loops that test bits (e.g., SPI status loops around 0x005BB0).
+
+**Source**: CEmu `cpu.c` uses `cpuflag_undef(r->F)` in BIT handling.
+
+### SBC/ADC HL,rr Preserves F3/F5
+
+The 16/24-bit `SBC HL,rr` and `ADC HL,rr` instructions preserve F3/F5 from the previous F rather than using the high byte of the result.
+
+**Impact**: Using result-derived F3/F5 causes flag divergence after ED 4A/52/5A/62 instructions.
+
+**Source**: CEmu `cpu.c` uses `cpuflag_undef(r->F)` for these ops.
+
+### Prefixed z=7 Opcodes Become LD rp3,(IX/IY+d)
+
+With a DD/FD prefix, x=0 z=7 opcodes (normally RLCA/RRCA/RLA/RRA/DAA/CPL/SCF/CCF) become:
+
+- `LD rp3[p],(IX/IY+d)` when q=0
+- `LD (IX/IY+d),rp3[p]` when q=1
+
+**Impact**: Treating these as normal rotate/DAA/CPL instructions causes PC and register divergence near 0x024020.
+
+**Source**: CEmu `cpu.c` handles prefixed z=7 in the DD/FD path.
+
+### DD/FD 0x31 Is NOT LD SP,nn
+
+With DD/FD prefix, opcode 0x31 maps to `LD IY/IX,(IX/IY+d)` (uses a displacement) instead of `LD SP,nn`. Other prefixed `LD rr,nn` opcodes are opcode traps in CEmu.
+
+**Impact**: Executing `DD 31` as `LD SP,nn` corrupts SP and PC around 0x024023.
+
+**Source**: CEmu `cpu.c` prefixed LD rr,nn handling.
+
+### ED 22/23 Are LEA (Load Effective Address)
+
+ED 22/23 are eZ80-specific LEA instructions:
+
+- `ED 22`: `LEA rp3[p],IX+d`
+- `ED 23`: `LEA rp3[p],IY+d`
+
+They consume a displacement byte and write the masked effective address (no MBASE) to rp3.
+
+**Impact**: Treating ED 23 as NOP leaves HL unchanged and desynchronizes PC by one byte.
+
+**Source**: CEmu `cpu.c` ED-prefix x=0 z=2/3 handling.
+
 ### IN/OUT (C) Uses Full BC as Port Address
 
 On eZ80, `IN r,(C)` and `OUT (C),r` use the **full BC register pair** as a 16-bit port address:
@@ -61,6 +109,39 @@ On eZ80, `IN r,(C)` and `OUT (C),r` use the **full BC register pair** as a 16-bi
 ```
 
 **Impact**: Using only C for port address causes wrong peripheral routing.
+
+### DD/FD 3E d Is LD (IX/IY+d),IY/IX
+
+With DD/FD prefix, opcode 0x3E (z=6, y=7) becomes `LD (IX+d),IY` or `LD (IY+d),IX`, not `LD A,n`:
+
+- DD 3E d: `LD (IX+d),IY` (stores IY at IX+displacement)
+- FD 3E d: `LD (IY+d),IX` (stores IX at IY+displacement)
+
+**Impact**: Treating this as `LD A,n` loads the wrong value into A and misses the memory write, causing register divergence around step 1,187,224.
+
+**Source**: CEmu `cpu.c` prefixed LD handling for y=7 case.
+
+### ED z=4 Distinguishes NEG from MLT
+
+For ED prefix with z=4, the instruction depends on q:
+
+- q=0: Various instructions based on p (NEG for p=0, LEA IX,IY+d for p=1, etc.)
+- q=1: MLT rp[p] (multiply high*low bytes, store 16-bit result)
+
+| Opcode | q | p | Instruction |
+| ------ | - | - | ----------- |
+| ED 44  | 0 | 0 | NEG         |
+| ED 4C  | 1 | 0 | MLT BC      |
+| ED 54  | 0 | 1 | LEA IX,IY+d |
+| ED 5C  | 1 | 1 | MLT DE      |
+| ED 64  | 0 | 2 | TST A,n     |
+| ED 6C  | 1 | 2 | MLT HL      |
+| ED 74  | 0 | 3 | TSTIO n     |
+| ED 7C  | 1 | 3 | MLT SP      |
+
+**Impact**: Treating all z=4 as NEG breaks MLT instructions, causing register divergence around step 1,188,549.
+
+**Source**: CEmu `cpu.c` ED x=1 z=4 handling.
 
 ### ED 6E (LD A,MB) - Critical Boot Instruction
 
@@ -145,6 +226,22 @@ Same nibble duplication behavior as CPU speed port.
 
 Writes are masked with 0x03 (only bits 0-1 are writable).
 
+### USB Status Bits in Port 0x0F Reads
+
+Port 0x0F reads OR in USB status bits from the OTGCSR register. At reset this yields **0xC0** (bits 7 and 6 set), so the ROM expects `IN0 A,(0x0F)` to return at least 0xC0 | control.ports[0x0F].
+
+**Impact**: Returning only 0x02 causes a branch at ROM 0x000F69 to go the wrong way, diverging around step ~702,600.
+
+**Source**: CEmu `core/control.c` uses `control.ports[index] | usb_status()`, and `usb_status()` sets 0x80/0x40 based on OTGCSR bits (see `core/usb/usb.c`).
+
+### Control Flags Port (0x05) Masks to 0x1F
+
+Writes to port 0x05 are masked with 0x1F; bits 5-7 are cleared on write in CEmu.
+
+**Impact**: Leaving bit 5 set makes `IN0 A,(0x05)` return 0x20 too high and diverges after ED 38.
+
+**Source**: CEmu `control.c` (`control.ports[index] = byte & 0x1F`).
+
 ## Interrupt Controller
 
 ### PWR Interrupt at Reset
@@ -178,6 +275,35 @@ CEmu-compatible defaults for boot:
 - Map select: 0x06
 
 Using incorrect defaults causes flash access timing issues.
+
+## Flash Memory
+
+### Sector Erase Command Status (DQ7)
+
+The ROM issues the AMD-style erase sequence:
+`AA 55 80 AA 55 30` (to 0x0AAA / 0x0555 / target). During sector erase, CEmu returns **0x80** for the first few reads from flash (DQ7 ready), then clears command state.
+
+**Impact**: Ignoring flash writes causes reads to return ROM data (0x00) instead of 0x80, breaking the erase-poll loop around 0xD18C50.
+
+**Source**: CEmu `mem.c` `FLASH_SECTOR_ERASE` read path returns 0x80 for 3 reads.
+
+## SPI Controller
+
+### FIFO Depth Is 16 (Not 4)
+
+The SPI TX/RX FIFO depth is **16 entries**, matching CEmu's `SPI_TXFIFO_DEPTH`/`SPI_RXFIFO_DEPTH`.
+
+**Impact**: Using depth 4 caps tfve too early and causes the ROM SPI polling loop to exit prematurely (PC diverges at ~699,900 steps).
+
+**Source**: CEmu `core/spi.h` (`#define SPI_TXFIFO_DEPTH 16`, `SPI_RXFIFO_DEPTH 16`).
+
+### CR0[11] (FLASH) Enables RX-Only Transfers
+
+When RX is enabled (`CR2` bit 7) and `CR0` bit 11 is set, CEmu allows SPI transfers to continue **even with an empty TX FIFO**. This fills the RX FIFO and keeps the STATUS transfer-active bit set until RX FIFO nears full.
+
+**Impact**: Without RX-only transfers, the ROM's second SPI polling loop (BIT 2 on STATUS byte 0) exits too early, diverging around step ~699,910.
+
+**Source**: CEmu `core/spi.c` logic in `spi_next_transfer()` and ROM trace comparison.
 
 ## Boot Sequence
 
@@ -265,12 +391,39 @@ The most effective debugging technique was capturing execution traces from both 
 
 Many peripherals can be stubbed with safe return values during early boot:
 
-- RTC: Return fixed time values
+- RTC: Return zero time values (CEmu initializes to 0)
 - Watchdog: Accept writes, never trigger
 - SPI: Return "TX not full" status
 
 The ROM usually just checks that peripherals exist and have sane values.
 
+## RTC (Real-Time Clock)
+
+### Initialization Matches CEmu memset
+
+CEmu initializes the RTC with `memset(&rtc, 0, sizeof rtc)`, meaning:
+
+- Control register: 0 (not 0x81)
+- All time registers: 0 (not arbitrary values)
+- Load status: LOAD_TOTAL_TICKS (51, meaning complete)
+
+**Impact**: Initializing control to 0x81 or time to non-zero causes IN A,(C) to read wrong values, diverging around step 1,188,774.
+
+### Load Status Register (0x40) Behavior
+
+The load status register at offset 0x40 reflects the state of an RTC load operation:
+
+- **LOAD_PENDING (0xFF as i8 = -1)**: Returns 0xF8 (bits 3-7 set)
+- **In progress (ticks 0-50)**: Returns bitmask based on which fields finished
+- **Complete (ticks >= 51)**: Returns 0
+
+When bit 6 of control is written, a load operation is triggered:
+1. `loadTicksProcessed` is set to LOAD_PENDING (255)
+2. On first scheduler tick, becomes 0 (actively loading)
+3. Advances 1 tick per 32kHz cycle until reaching LOAD_TOTAL_TICKS
+
+**Impact**: Without scheduler-based timing, the load status cannot match CEmu exactly. For parity during early boot (first 3M+ instructions), keeping load status pending (0xF8) matches CEmu behavior.
+
 ---
 
-_Last updated: During Milestone 5 boot debugging_
+_Last updated: 2026-01-29 - Extended trace parity to 3.2M+ instructions_

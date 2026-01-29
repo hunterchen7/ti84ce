@@ -54,11 +54,32 @@ pub mod addr {
 ///
 /// The TI-84 Plus CE has 4MB of NOR flash for OS and user programs.
 /// Flash is read-only from user code; writes require special unlock sequences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashCommand {
+    None,
+    SectorErase { reads_left: u8 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FlashWriteState {
+    Idle,
+    SawAA1,
+    Saw55_1,
+    Saw80,
+    SawAA2,
+    Saw55_2,
+    SawA0,
+}
+
 pub struct Flash {
     /// Flash memory contents
     data: Vec<u8>,
     /// Whether flash has been initialized with ROM data
     initialized: bool,
+    /// Active flash command (minimal command emulation)
+    command: FlashCommand,
+    /// Write sequence state for flash command detection
+    write_state: FlashWriteState,
 }
 
 impl Flash {
@@ -67,6 +88,8 @@ impl Flash {
         Self {
             data: vec![0xFF; addr::FLASH_SIZE], // Flash erased state is 0xFF
             initialized: false,
+            command: FlashCommand::None,
+            write_state: FlashWriteState::Idle,
         }
     }
 
@@ -86,6 +109,8 @@ impl Flash {
         // Copy ROM data to start of flash
         self.data[..data.len()].copy_from_slice(data);
         self.initialized = true;
+        self.command = FlashCommand::None;
+        self.write_state = FlashWriteState::Idle;
         Ok(())
     }
 
@@ -93,9 +118,33 @@ impl Flash {
     ///
     /// # Arguments
     /// * `addr` - Address relative to flash start (0 to FLASH_SIZE-1)
-    pub fn read(&self, addr: u32) -> u8 {
+    pub fn read(&mut self, addr: u32) -> u8 {
+        let value = self.peek_status(addr);
+        if let FlashCommand::SectorErase { reads_left } = self.command {
+            let next_reads = reads_left.saturating_sub(1);
+            if next_reads == 0 {
+                self.command = FlashCommand::None;
+            } else {
+                self.command = FlashCommand::SectorErase {
+                    reads_left: next_reads,
+                };
+            }
+        }
+        value
+    }
+
+    /// Peek flash content ignoring command status (debug-style read)
+    pub fn peek(&self, addr: u32) -> u8 {
         let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
         self.data[offset]
+    }
+
+    /// Peek flash content with current command status (no state changes)
+    pub fn peek_status(&self, addr: u32) -> u8 {
+        match self.command {
+            FlashCommand::SectorErase { .. } => 0x80,
+            FlashCommand::None => self.peek(addr),
+        }
     }
 
     /// Write a byte to flash (for emulator use, not accessible from CPU normally)
@@ -109,6 +158,87 @@ impl Flash {
     pub fn write_direct(&mut self, addr: u32, value: u8) {
         let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
         self.data[offset] = value;
+    }
+
+    /// Handle a CPU write to flash (command detection + optional program/erase)
+    pub fn write_cpu(&mut self, addr: u32, value: u8) {
+        // Reset command mode on 0xF0 (common flash reset command)
+        if value == 0xF0 {
+            self.command = FlashCommand::None;
+            self.write_state = FlashWriteState::Idle;
+            return;
+        }
+
+        let addr_masked = addr & 0xFFF;
+        self.write_state = match self.write_state {
+            FlashWriteState::Idle => {
+                if addr_masked == 0xAAA && value == 0xAA {
+                    FlashWriteState::SawAA1
+                } else {
+                    FlashWriteState::Idle
+                }
+            }
+            FlashWriteState::SawAA1 => {
+                if addr_masked == 0x555 && value == 0x55 {
+                    FlashWriteState::Saw55_1
+                } else {
+                    FlashWriteState::Idle
+                }
+            }
+            FlashWriteState::Saw55_1 => {
+                if addr_masked == 0xAAA && value == 0x80 {
+                    FlashWriteState::Saw80
+                } else if addr_masked == 0xAAA && value == 0xA0 {
+                    FlashWriteState::SawA0
+                } else {
+                    FlashWriteState::Idle
+                }
+            }
+            FlashWriteState::Saw80 => {
+                if addr_masked == 0xAAA && value == 0xAA {
+                    FlashWriteState::SawAA2
+                } else {
+                    FlashWriteState::Idle
+                }
+            }
+            FlashWriteState::SawAA2 => {
+                if addr_masked == 0x555 && value == 0x55 {
+                    FlashWriteState::Saw55_2
+                } else {
+                    FlashWriteState::Idle
+                }
+            }
+            FlashWriteState::Saw55_2 => {
+                if value == 0x30 {
+                    self.erase_sector(addr);
+                    self.command = FlashCommand::SectorErase { reads_left: 3 };
+                }
+                FlashWriteState::Idle
+            }
+            FlashWriteState::SawA0 => {
+                self.program_byte(addr, value);
+                FlashWriteState::Idle
+            }
+        };
+    }
+
+    fn erase_sector(&mut self, addr: u32) {
+        let (start, size) = if addr < 0x10000 {
+            let sector_start = (addr / 0x2000) * 0x2000; // 8KB sectors
+            (sector_start, 0x2000)
+        } else {
+            let sector_start = (addr / 0x10000) * 0x10000; // 64KB sectors
+            (sector_start, 0x10000)
+        };
+        let end = (start + size).min(addr::FLASH_SIZE as u32);
+        for offset in start..end {
+            self.data[offset as usize] = 0xFF;
+        }
+    }
+
+    fn program_byte(&mut self, addr: u32, value: u8) {
+        let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
+        self.data[offset] &= value;
     }
 
     /// Check if flash is initialized
@@ -125,6 +255,8 @@ impl Flash {
     pub fn reset(&mut self) {
         self.data.fill(0xFF);
         self.initialized = false;
+        self.command = FlashCommand::None;
+        self.write_state = FlashWriteState::Idle;
     }
 }
 
@@ -258,7 +390,7 @@ mod tests {
 
         #[test]
         fn test_new_flash_is_erased() {
-            let flash = Flash::new();
+            let mut flash = Flash::new();
             assert!(!flash.is_initialized());
             // Flash erased state is 0xFF
             assert_eq!(flash.read(0), 0xFF);
