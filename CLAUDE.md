@@ -18,11 +18,23 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 ## Workflow
 
 - **Update milestones when completing features** - After implementing a feature from [docs/milestones.md](docs/milestones.md), mark it as complete (`[x]`) and update the test count and status section.
+- **Document interesting findings** - When discovering esoteric behavior or surprising implementation details, add them to [docs/findings.md](docs/findings.md). This includes:
+  - Hardware quirks (timing, undocumented registers, differences from standard Z80)
+  - Boot sequence discoveries (what the ROM expects, why it stalls)
+  - CPU instruction encoding surprises (eZ80 vs Z80 differences)
+  - Peripheral initialization requirements
+  - Any "aha!" moments that took significant debugging to uncover
+
+  For each finding, document:
+  - What the behavior is
+  - Why it matters (what breaks without it)
+  - Where the information came from (CEmu source file, ROM trace analysis, etc.)
 
 ## Architecture
 
 - See [docs/architecture.md](docs/architecture.md) for system design
 - See [docs/milestones.md](docs/milestones.md) for implementation roadmap
+- See [docs/findings.md](docs/findings.md) for interesting discoveries
 
 ## CEmu Reference
 
@@ -65,13 +77,13 @@ CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
 | `control.c`    | ✅ Implemented | peripherals/control.rs                                    |
 | `flash.c`      | ✅ Implemented | peripherals/flash.rs                                      |
 | `lcd.c`        | ✅ Implemented | peripherals/lcd.rs                                        |
-| `timers.c`     | ✅ Implemented | peripherals/timers.rs                                     |
+| `timers.c`     | ✅ Implemented | peripherals/timers.rs + OS Timer in mod.rs                |
 | `keypad.c`     | ✅ Implemented | peripherals/keypad.rs                                     |
 | `interrupt.c`  | ✅ Implemented | peripherals/interrupt.rs                                  |
 | `mem.c`        | ⚠️ Partial     | Memory protection checks disabled                         |
 | `backlight.c`  | ❌ Stub        | Not needed for boot                                       |
-| `misc.c`       | ❌ Missing     | Watchdog timer, power events                              |
-| `realclock.c`  | ❌ Missing     | RTC - may need stub for boot                              |
+| `misc.c`       | ✅ Stub        | peripherals/watchdog.rs                                   |
+| `realclock.c`  | ✅ Stub        | peripherals/rtc.rs                                        |
 | `sha256.c`     | ❌ Missing     | SHA256 accelerator                                        |
 | `spi.c`        | ⚠️ Stub        | Status register stub for boot                             |
 | `uart.c`       | ❌ Missing     | Serial port                                               |

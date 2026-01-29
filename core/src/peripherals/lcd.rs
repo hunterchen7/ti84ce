@@ -16,7 +16,7 @@ pub const DEFAULT_VRAM_BASE: u32 = 0xD40000;
 /// 48_000_000 / 60 = 800_000 cycles
 const CYCLES_PER_FRAME: u32 = 800_000;
 
-/// Register offsets
+/// Register offsets (based on CEmu lcd.c)
 mod regs {
     /// Horizontal timing
     pub const TIMING0: u32 = 0x00;
@@ -26,16 +26,18 @@ mod regs {
     pub const TIMING2: u32 = 0x08;
     /// Timing 3
     pub const TIMING3: u32 = 0x0C;
-    /// LCD control register
-    pub const CONTROL: u32 = 0x10;
-    /// Interrupt mask
-    pub const INT_MASK: u32 = 0x14;
-    /// Interrupt status (write to clear)
-    pub const INT_STATUS: u32 = 0x18;
     /// Upper panel base address (VRAM pointer)
-    pub const UPBASE: u32 = 0x1C;
+    pub const UPBASE: u32 = 0x10;
     /// Lower panel base address (unused on TI-84 CE)
-    pub const LPBASE: u32 = 0x20;
+    pub const LPBASE: u32 = 0x14;
+    /// LCD control register
+    pub const CONTROL: u32 = 0x18;
+    /// Interrupt mask (single byte at 0x1C)
+    pub const INT_MASK: u32 = 0x1C;
+    /// Raw interrupt status (single byte at 0x20)
+    pub const INT_STATUS: u32 = 0x20;
+    /// Masked interrupt status (read-only at 0x24)
+    pub const INT_MASKED: u32 = 0x24;
     /// Palette base address
     pub const PALBASE: u32 = 0x28;
 }

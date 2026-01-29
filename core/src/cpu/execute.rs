@@ -1018,10 +1018,11 @@ impl Cpu {
             }
             6 => {
                 // z=6 has various eZ80-specific instructions based on y
+                // eZ80 maps y directly to IM mode (different from standard Z80!)
                 // y=0: IM 0 (ED 46)
                 // y=1: OPCODETRAP (ED 4E) - trap on eZ80
-                // y=2: IM 1 (ED 56)
-                // y=3: IM 2 (ED 5E)
+                // y=2: IM 2 (ED 56) - NOTE: standard Z80 uses IM 1 here, but eZ80 uses IM 2
+                // y=3: IM 3 (ED 5E) - eZ80-specific IM 3 mode (not used on TI-84 CE)
                 // y=4: PEA IY+d (ED 66) - push effective address
                 // y=5: LD A,MB (ED 6E) - load MBASE into A
                 // y=6: SLP (ED 76) - sleep/halt
@@ -1031,7 +1032,10 @@ impl Cpu {
                     1 => {
                         // OPCODETRAP - treated as NOP on TI-84 CE
                     }
-                    2 => self.im = InterruptMode::Mode1,
+                    // eZ80 sets IM = y directly, so y=2 becomes IM 2 (Mode2)
+                    2 => self.im = InterruptMode::Mode2,
+                    // y=3 would be IM 3 on eZ80, but we only have Mode0/1/2
+                    // Treat as Mode2 for compatibility (TI-84 CE doesn't use this)
                     3 => self.im = InterruptMode::Mode2,
                     4 => {
                         // PEA IY+d - push IY + signed offset

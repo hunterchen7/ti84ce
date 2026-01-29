@@ -166,8 +166,9 @@ fn main() {
     println!("=== Boot trace (from reset) ===\n");
 
     let mut step: u64 = 0;
-    let log_every: u64 = 1; // Log every step for proper comparison with CEmu
+    let log_every: u64 = 1_000_000; // Log progress every million cycles
     let mut last = Snapshot::capture(&mut emu);
+    let mut last_pc = emu.pc();
     let pc = emu.pc();
     let (op_bytes, op_len) = peek_opcode_bytes(&mut emu, pc);
     println!(
@@ -178,83 +179,178 @@ fn main() {
     );
 
     // Run until first HALT (or max cycles)
-    for _ in 0..20000 {
+    // Need millions of cycles to get through delay loops
+    for _ in 0..50_000_000 {
         emu.run_cycles(1);
         step += 1;
 
         let snap = Snapshot::capture(&mut emu);
-        if snap != last || (step % log_every == 0) {
+        // Only log when PC leaves the delay loop region, state changes, or periodic progress
+        let pc_changed = snap.pc != last_pc && (snap.pc < 0x5C55 || snap.pc > 0x5C58);
+        let state_changed = snap.halted != last.halted || snap.iff1 != last.iff1;
+        let periodic = step % log_every == 0;
+
+        if pc_changed || state_changed || periodic {
             let note = if !last.halted && snap.halted {
                 "HALT"
             } else if last.halted && !snap.halted {
                 "WAKE"
-            } else if last.irq_pending && !snap.irq_pending && !snap.iff1 {
-                "IRQ taken"
+            } else if !last.iff1 && snap.iff1 {
+                "EI"
+            } else if periodic {
+                "progress"
             } else {
                 ""
             };
             let (op_bytes, op_len) = peek_opcode_bytes(&mut emu, snap.pc);
             let op = format_opcode(op_bytes, op_len);
-            if note.is_empty() {
-                println!("[snapshot] step={} {} op={}", step, snap.format_line(), op);
-            } else {
-                println!(
-                    "[snapshot] step={} {} op={}  {}",
-                    step,
-                    snap.format_line(),
-                    op,
-                    note
-                );
-            }
+            eprintln!(
+                "[snapshot] step={} {} op={}  {}",
+                step,
+                snap.format_line(),
+                op,
+                note
+            );
             last = snap;
+            last_pc = snap.pc;
         }
 
         if emu.is_halted() && step > 5000 {
-            println!("\n=== HALTED at {:06X} ===", emu.pc());
+            eprintln!("\n=== HALTED at {:06X} ===", emu.pc());
             break;
         }
     }
 
-    println!("\n=== Press ON key ===");
+    eprintln!("\n=== First HALT complete at step {} ===", step);
+
+    // Press ON key to wake from HALT
+    eprintln!("\n=== Pressing ON key to wake ===\n");
     emu.press_on_key();
-    let snap = Snapshot::capture(&mut emu);
-    println!("[snapshot] step={} {}", step, snap.format_line());
-    last = snap;
 
-    // Run after ON key to see if interrupt path executes
-    for _ in 0..20000 {
+    // Continue execution after wake
+    let wake_step = step;
+    for _ in 0..50_000_000 {
         emu.run_cycles(1);
         step += 1;
+
         let snap = Snapshot::capture(&mut emu);
-        if snap != last || (step % log_every == 0) {
+        // Only log when PC leaves the delay loop region, state changes, or periodic progress
+        let pc_changed = snap.pc != last_pc && (snap.pc < 0x5C55 || snap.pc > 0x5C58);
+        let state_changed = snap.halted != last.halted || snap.iff1 != last.iff1;
+        let periodic = step % log_every == 0;
+
+        if pc_changed || state_changed || periodic {
             let note = if !last.halted && snap.halted {
                 "HALT"
             } else if last.halted && !snap.halted {
                 "WAKE"
-            } else if last.irq_pending && !snap.irq_pending && !snap.iff1 {
-                "IRQ taken"
+            } else if !last.iff1 && snap.iff1 {
+                "EI"
+            } else if periodic {
+                "progress"
             } else {
                 ""
             };
             let (op_bytes, op_len) = peek_opcode_bytes(&mut emu, snap.pc);
             let op = format_opcode(op_bytes, op_len);
-            if note.is_empty() {
-                println!("[snapshot] step={} {} op={}", step, snap.format_line(), op);
-            } else {
-                println!(
-                    "[snapshot] step={} {} op={}  {}",
-                    step,
-                    snap.format_line(),
-                    op,
-                    note
-                );
-            }
+            eprintln!(
+                "[snapshot] step={} {} op={}  {}",
+                step,
+                snap.format_line(),
+                op,
+                note
+            );
             last = snap;
+            last_pc = snap.pc;
         }
 
-        if emu.is_halted() && step > 5000 {
-            println!("\n=== HALTED at {:06X} ===", emu.pc());
+        if emu.is_halted() && step > wake_step + 5000 {
+            eprintln!("\n=== Second HALT at {:06X} ===", emu.pc());
             break;
         }
     }
+
+    eprintln!("\n=== Boot phase complete at step {} ===", step);
+
+    // Analyze VRAM contents
+    eprintln!("\n=== VRAM/Framebuffer Analysis ===");
+
+    // Get LCD state
+    let lcd = emu.lcd_snapshot();
+    eprintln!(
+        "LCD: control={:08X} upbase={:06X}",
+        lcd.control, lcd.upbase
+    );
+
+    // Check raw VRAM at the LCD upbase address
+    let vram_base = lcd.upbase;
+    eprintln!("\nVRAM sample at {:06X}:", vram_base);
+    let mut non_zero_pixels = 0;
+    let mut white_pixels = 0;
+    let mut sample_values: Vec<u16> = Vec::new();
+    for i in 0..320 * 240 {
+        let addr = vram_base + (i * 2) as u32; // 2 bytes per RGB565 pixel
+        let lo = emu.peek_byte(addr);
+        let hi = emu.peek_byte(addr + 1);
+        let rgb565 = (hi as u16) << 8 | (lo as u16);
+        if rgb565 != 0 {
+            non_zero_pixels += 1;
+        }
+        if rgb565 == 0xFFFF {
+            white_pixels += 1;
+        }
+        // Sample some pixel values
+        if i < 10 || (i >= 320 * 120 && i < 320 * 120 + 10) {
+            sample_values.push(rgb565);
+        }
+    }
+    eprintln!(
+        "  Non-zero pixels: {} / {} ({:.1}%)",
+        non_zero_pixels,
+        320 * 240,
+        100.0 * non_zero_pixels as f64 / (320.0 * 240.0)
+    );
+    eprintln!(
+        "  White pixels (0xFFFF): {} / {} ({:.1}%)",
+        white_pixels,
+        320 * 240,
+        100.0 * white_pixels as f64 / (320.0 * 240.0)
+    );
+    eprintln!("  First 10 pixels (row 0): {:04X?}", &sample_values[..10]);
+    eprintln!(
+        "  Middle 10 pixels (row 120): {:04X?}",
+        &sample_values[10..20]
+    );
+
+    // Render to framebuffer and analyze
+    emu.render_frame();
+    let (w, h) = emu.framebuffer_size();
+    let fb = emu.framebuffer_ptr();
+    let fb_slice = unsafe { std::slice::from_raw_parts(fb, w * h) };
+
+    let mut fb_non_black = 0;
+    let mut fb_white = 0;
+    for &pixel in fb_slice {
+        if pixel != 0xFF000000 {
+            // Not black
+            fb_non_black += 1;
+        }
+        if pixel == 0xFFFFFFFF {
+            fb_white += 1;
+        }
+    }
+    eprintln!("\nFramebuffer ({w}x{h}):");
+    eprintln!(
+        "  Non-black pixels: {} / {} ({:.1}%)",
+        fb_non_black,
+        w * h,
+        100.0 * fb_non_black as f64 / (w * h) as f64
+    );
+    eprintln!(
+        "  White pixels: {} / {} ({:.1}%)",
+        fb_white,
+        w * h,
+        100.0 * fb_white as f64 / (w * h) as f64
+    );
+    eprintln!("  First few pixels: {:08X?}", &fb_slice[..5]);
 }

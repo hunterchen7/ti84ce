@@ -89,8 +89,8 @@
 - [x] Fix port 0x0F USB control to mask with 0x03 on write
 
 ### 5c: Missing Peripheral Stubs
-- [ ] Watchdog timer (port 0x6) - basic stub
-- [ ] RTC (port 0x8) - read-only stub returning safe values
+- [x] Watchdog timer (port 0x6) - basic stub
+- [x] RTC (port 0x8) - read-only stub returning safe values
 - [ ] SHA256 accelerator (port 0x2) - stub or full implementation
 - [x] SPI controller (port 0xD) - status stub returning reset values
 
@@ -105,13 +105,16 @@
 - [ ] Execution continues past RAM initialization
 - [ ] LCD shows boot screen or OS UI
 
-**Current Status (322 tests passing):**
+**Current Status (336 tests passing):**
 - Control port defaults now match CEmu (CPU speed, flash, PWR interrupt, protection)
 - Added privileged boundary register (ports 0x1D-0x1F) and is_unprivileged() check
 - Fixed battery_status, LCD enable nibble duplication, USB control masking
 - **Boot trace matches CEmu for 40,000+ steps** (full trace comparison)
+- Fixed LCD register offsets (control at 0x18, upbase at 0x10 - matches CEmu)
+- LCD properly enabled with control value 0x92D (16bpp RGB565, power on)
 - ROM boots to initialization loop, VRAM filled with white pixels
 - CPU reaches main initialization code at ~50M cycles
+- Fixed IM instruction mapping (eZ80 maps y directly to IM, ED 56 = IM 2)
 
 ### 5f: CPU/Bus Fixes (Completed)
 - [x] Fixed L/IL suffix mode handling (eZ80 suffix opcodes)
@@ -126,6 +129,7 @@
 - [x] Added ED 6D (LD MB,A), ED 7D (STMIX), ED 7E (RSMIX) eZ80 instructions
 - [x] Added ED 65 (PEA IX+d) and ED 66 (PEA IY+d) instructions
 - [x] Added madl field to CPU struct for mixed memory mode
+- [x] Fixed IM instruction mapping: eZ80 maps y value directly to IM mode (ED 56 = IM 2, not IM 1)
 
 **Key Progress:**
 - Execution trace matches CEmu for 40,001+ steps

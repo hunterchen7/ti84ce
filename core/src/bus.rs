@@ -633,7 +633,7 @@ impl Bus {
     ///   0x3xxx -> USB (stub)
     ///   0x4xxx -> LCD controller
     ///   0x5xxx -> Interrupt controller
-    ///   0x6xxx -> Watchdog (stub)
+    ///   0x6xxx -> Watchdog
     ///   0x7xxx -> Timers
     ///   0x8xxx -> RTC (stub)
     ///   0x9xxx -> Protected (stub)
@@ -672,6 +672,11 @@ impl Bus {
                 let offset = (port & 0x1F) as u32;
                 self.ports.interrupt.read(offset)
             }
+            0x6 => {
+                // Watchdog - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.watchdog.read(offset)
+            }
             0x7 => {
                 // Timers - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
@@ -693,6 +698,11 @@ impl Bus {
                     }
                 }
             }
+            0x8 => {
+                // RTC - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.rtc.read(offset)
+            }
             0xA => {
                 // Keypad - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
@@ -710,7 +720,7 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.read(offset)
             }
-            // Unimplemented: SHA256(2), USB(3), Watchdog(6), RTC(8), Protected(9),
+            // Unimplemented: SHA256(2), USB(3), Protected(9),
             // Backlight(B), Cxxx(C), UART(E)
             _ => 0x00,
         }
@@ -743,6 +753,11 @@ impl Bus {
                 let offset = (port & 0x1F) as u32;
                 self.ports.interrupt.write(offset, value);
             }
+            0x6 => {
+                // Watchdog - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.watchdog.write(offset, value);
+            }
             0x7 => {
                 // Timers - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
@@ -764,6 +779,11 @@ impl Bus {
                     }
                 }
             }
+            0x8 => {
+                // RTC - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.rtc.write(offset, value);
+            }
             0xA => {
                 // Keypad - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
@@ -777,7 +797,7 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
             }
-            // Unimplemented: SHA256(2), USB(3), Watchdog(6), RTC(8), Protected(9),
+            // Unimplemented: SHA256(2), USB(3), Protected(9),
             // Backlight(B), Cxxx(C), UART(E)
             _ => {}
         }

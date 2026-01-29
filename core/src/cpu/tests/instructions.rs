@@ -908,13 +908,14 @@ fn test_im_modes() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
 
-    // IM 1 (ED 56)
+    // eZ80 maps y value directly to IM mode (different from standard Z80!)
+    // ED 56 (y=2) -> IM 2 on eZ80 (would be IM 1 on standard Z80)
     bus.poke_byte(0, 0xED);
     bus.poke_byte(1, 0x56);
     cpu.step(&mut bus);
-    assert_eq!(cpu.im, InterruptMode::Mode1);
+    assert_eq!(cpu.im, InterruptMode::Mode2);
 
-    // IM 2 (ED 5E)
+    // ED 5E (y=3) -> IM 3 on eZ80 (treated as Mode2 since we don't have IM 3)
     bus.poke_byte(2, 0xED);
     bus.poke_byte(3, 0x5E);
     cpu.step(&mut bus);
