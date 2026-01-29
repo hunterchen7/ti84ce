@@ -73,7 +73,7 @@ CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
 | `misc.c`       | ❌ Missing     | Watchdog timer, power events                              |
 | `realclock.c`  | ❌ Missing     | RTC - may need stub for boot                              |
 | `sha256.c`     | ❌ Missing     | SHA256 accelerator                                        |
-| `spi.c`        | ❌ Missing     | SPI bus                                                   |
+| `spi.c`        | ⚠️ Stub        | Status register stub for boot                             |
 | `uart.c`       | ❌ Missing     | Serial port                                               |
 | `usb/`         | ❌ Missing     | USB controller                                            |
 
