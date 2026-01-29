@@ -1,26 +1,153 @@
-//! Detailed boot trace - shows port accesses and helps identify missing hardware
+//! Test ON key wake with pushed return address
 
 use std::fs;
 use std::path::Path;
 
-use emu_core::Emu;
+use emu_core::cpu::InterruptMode;
+use emu_core::{Emu, LcdSnapshot, TimerSnapshot};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Snapshot {
+    pc: u32,
+    sp: u32,
+    im: InterruptMode,
+    adl: bool,
+    iff1: bool,
+    iff2: bool,
+    halted: bool,
+    irq_pending: bool,
+    on_key_wake: bool,
+    intr_status: u32,
+    intr_enabled: u32,
+    intr_raw: u32,
+    power: u8,
+    cpu_speed: u8,
+    unlock_status: u8,
+    flash_unlock: u8,
+    timer1: TimerSnapshot,
+    timer2: TimerSnapshot,
+    timer3: TimerSnapshot,
+    lcd: LcdSnapshot,
+}
+
+impl Snapshot {
+    fn capture(emu: &mut Emu) -> Self {
+        Self {
+            pc: emu.pc(),
+            sp: emu.sp(),
+            im: emu.interrupt_mode(),
+            adl: emu.adl(),
+            iff1: emu.iff1(),
+            iff2: emu.iff2(),
+            halted: emu.is_halted(),
+            irq_pending: emu.irq_pending(),
+            on_key_wake: emu.on_key_wake(),
+            intr_status: emu.interrupt_status(),
+            intr_enabled: emu.interrupt_enabled(),
+            intr_raw: emu.interrupt_raw(),
+            power: emu.control_read(0x00),
+            cpu_speed: emu.control_read(0x01),
+            unlock_status: emu.control_read(0x06),
+            flash_unlock: emu.control_read(0x28),
+            timer1: emu.timer_snapshot(1).expect("timer1 snapshot"),
+            timer2: emu.timer_snapshot(2).expect("timer2 snapshot"),
+            timer3: emu.timer_snapshot(3).expect("timer3 snapshot"),
+            lcd: emu.lcd_snapshot(),
+        }
+    }
+
+    fn format_line(&self) -> String {
+        format!(
+            "PC={:06X} SP={:06X} IM={:?} ADL={} IFF1={} IFF2={} HALT={} IRQ_PEND={} ON_WAKE={} INTR[stat={:06X} en={:06X} raw={:06X}] CTRL[pwr={:02X} spd={:02X} unlock={:02X} flash={:02X}] T1[cnt={:08X} rst={:08X} m1={:08X} m2={:08X} ctl={:02X}] T2[cnt={:08X} rst={:08X} m1={:08X} m2={:08X} ctl={:02X}] T3[cnt={:08X} rst={:08X} m1={:08X} m2={:08X} ctl={:02X}] LCD[ctl={:08X} mask={:08X} stat={:08X} up={:06X} lp={:06X} pal={:06X} fc={:08X}]",
+            self.pc,
+            self.sp,
+            self.im,
+            self.adl,
+            self.iff1,
+            self.iff2,
+            self.halted,
+            self.irq_pending,
+            self.on_key_wake,
+            self.intr_status & 0x3FFFFF,
+            self.intr_enabled & 0x3FFFFF,
+            self.intr_raw & 0x3FFFFF,
+            self.power,
+            self.cpu_speed,
+            self.unlock_status,
+            self.flash_unlock,
+            self.timer1.counter,
+            self.timer1.reset_value,
+            self.timer1.match1,
+            self.timer1.match2,
+            self.timer1.control,
+            self.timer2.counter,
+            self.timer2.reset_value,
+            self.timer2.match1,
+            self.timer2.match2,
+            self.timer2.control,
+            self.timer3.counter,
+            self.timer3.reset_value,
+            self.timer3.match1,
+            self.timer3.match2,
+            self.timer3.control,
+            self.lcd.control,
+            self.lcd.int_mask,
+            self.lcd.int_status,
+            self.lcd.upbase,
+            self.lcd.lpbase,
+            self.lcd.palbase,
+            self.lcd.frame_cycles,
+        )
+    }
+}
+
+fn peek_opcode_bytes(emu: &mut Emu, addr: u32) -> ([u8; 4], usize) {
+    let read = |emu: &mut Emu, offset: u32| {
+        let pc = addr.wrapping_add(offset);
+        let effective = emu.mask_addr(pc);
+        emu.peek_byte(effective)
+    };
+    let mut bytes = [0u8; 4];
+    let first = read(emu, 0);
+    bytes[0] = first;
+    let len = match first {
+        0xCB | 0xED => {
+            bytes[1] = read(emu, 1);
+            2
+        }
+        0xDD | 0xFD => {
+            let second = read(emu, 1);
+            bytes[1] = second;
+            if second == 0xCB {
+                bytes[2] = read(emu, 2);
+                bytes[3] = read(emu, 3);
+                4
+            } else {
+                2
+            }
+        }
+        _ => 1,
+    };
+    (bytes, len)
+}
+
+fn format_opcode(bytes: [u8; 4], len: usize) -> String {
+    bytes[..len]
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
 
 fn main() {
-    // Try to find the ROM file
     let rom_paths = ["TI-84 CE.rom", "../TI-84 CE.rom"];
 
     let mut rom_data = None;
     for path in &rom_paths {
         if Path::new(path).exists() {
-            println!("Found ROM at: {}", path);
-            match fs::read(path) {
-                Ok(data) => {
-                    rom_data = Some(data);
-                    break;
-                }
-                Err(e) => {
-                    eprintln!("Failed to read ROM: {}", e);
-                }
+            if let Ok(data) = fs::read(path) {
+                rom_data = Some(data);
+                break;
             }
         }
     }
@@ -28,116 +155,106 @@ fn main() {
     let rom_data = match rom_data {
         Some(data) => data,
         None => {
-            eprintln!("No ROM file found. Place 'TI-84 CE.rom' in the project root.");
+            eprintln!("No ROM file found.");
             return;
         }
     };
 
-    println!("ROM size: {} bytes", rom_data.len());
-
     let mut emu = Emu::new();
     emu.load_rom(&rom_data).expect("Failed to load ROM");
 
-    println!("\nTracing boot sequence...\n");
+    println!("=== Boot trace (from reset) ===\n");
 
-    // Run until we hit HALT
-    let executed1 = emu.run_cycles(10000);
-    println!("Phase 1: {} cycles, halted={}", executed1, emu.is_halted());
+    let mut step: u64 = 0;
+    let log_every: u64 = 1; // Log every step for proper comparison with CEmu
+    let mut last = Snapshot::capture(&mut emu);
+    let pc = emu.pc();
+    let (op_bytes, op_len) = peek_opcode_bytes(&mut emu, pc);
+    println!(
+        "[snapshot] step={} {} op={}",
+        step,
+        last.format_line(),
+        format_opcode(op_bytes, op_len)
+    );
 
-    // Keep waking from HALT until we reach a different location
-    let mut wake_count = 0;
-    let initial_halt_pc = emu.pc();
-    while emu.is_halted() && wake_count < 1000 {
-        wake_count += 1;
-        emu.press_on_key();
-        emu.run_cycles(100000);
+    // Run until first HALT (or max cycles)
+    for _ in 0..20000 {
+        emu.run_cycles(1);
+        step += 1;
 
-        // Check if we've moved to a different location
-        if emu.pc() != initial_halt_pc && emu.pc() != initial_halt_pc - 1 {
-            println!("After {} wakes: PC moved from {:06X} to {:06X}!",
-                     wake_count, initial_halt_pc, emu.pc());
+        let snap = Snapshot::capture(&mut emu);
+        if snap != last || (step % log_every == 0) {
+            let note = if !last.halted && snap.halted {
+                "HALT"
+            } else if last.halted && !snap.halted {
+                "WAKE"
+            } else if last.irq_pending && !snap.irq_pending && !snap.iff1 {
+                "IRQ taken"
+            } else {
+                ""
+            };
+            let (op_bytes, op_len) = peek_opcode_bytes(&mut emu, snap.pc);
+            let op = format_opcode(op_bytes, op_len);
+            if note.is_empty() {
+                println!("[snapshot] step={} {} op={}", step, snap.format_line(), op);
+            } else {
+                println!(
+                    "[snapshot] step={} {} op={}  {}",
+                    step,
+                    snap.format_line(),
+                    op,
+                    note
+                );
+            }
+            last = snap;
+        }
+
+        if emu.is_halted() && step > 5000 {
+            println!("\n=== HALTED at {:06X} ===", emu.pc());
             break;
         }
     }
-    if wake_count > 0 {
-        println!("Woke {} times, final PC={:06X}, halted={}", wake_count, emu.pc(), emu.is_halted());
-    }
 
-    let executed = emu.total_cycles();
+    println!("\n=== Press ON key ===");
+    emu.press_on_key();
+    let snap = Snapshot::capture(&mut emu);
+    println!("[snapshot] step={} {}", step, snap.format_line());
+    last = snap;
 
-    println!("Cycles executed: {}", executed);
-    println!("Stop reason: {:?}", emu.last_stop_reason());
-    println!("\n{}", emu.dump_registers());
-
-    // Dump memory around the HALT location to see what code does
-    println!("\nCode around PC=0x001414:");
-    for addr in (0x001400..0x001430).step_by(16) {
-        print!("{:06X}: ", addr);
-        for i in 0..16 {
-            print!("{:02X} ", emu.peek_byte(addr + i));
+    // Run after ON key to see if interrupt path executes
+    for _ in 0..20000 {
+        emu.run_cycles(1);
+        step += 1;
+        let snap = Snapshot::capture(&mut emu);
+        if snap != last || (step % log_every == 0) {
+            let note = if !last.halted && snap.halted {
+                "HALT"
+            } else if last.halted && !snap.halted {
+                "WAKE"
+            } else if last.irq_pending && !snap.irq_pending && !snap.iff1 {
+                "IRQ taken"
+            } else {
+                ""
+            };
+            let (op_bytes, op_len) = peek_opcode_bytes(&mut emu, snap.pc);
+            let op = format_opcode(op_bytes, op_len);
+            if note.is_empty() {
+                println!("[snapshot] step={} {} op={}", step, snap.format_line(), op);
+            } else {
+                println!(
+                    "[snapshot] step={} {} op={}  {}",
+                    step,
+                    snap.format_line(),
+                    op,
+                    note
+                );
+            }
+            last = snap;
         }
-        println!();
-    }
 
-    // Dump code at the IN0 check location
-    println!("\nCode around PC=0x000C2E (IN0 check):");
-    for addr in (0x000C20..0x000C40).step_by(16) {
-        print!("{:06X}: ", addr);
-        for i in 0..16 {
-            print!("{:02X} ", emu.peek_byte(addr + i));
+        if emu.is_halted() && step > 5000 {
+            println!("\n=== HALTED at {:06X} ===", emu.pc());
+            break;
         }
-        println!();
     }
-
-    // Dump code around the second check location (0x001680-0x0016A0)
-    println!("\nCode around PC=0x001680 (second check):");
-    for addr in (0x001670..0x0016B0).step_by(16) {
-        print!("{:06X}: ", addr);
-        for i in 0..16 {
-            print!("{:02X} ", emu.peek_byte(addr + i));
-        }
-        println!();
-    }
-
-    // Check key peripheral registers
-    println!("\nPeripheral Status:");
-
-    // Interrupt controller (0xF00000)
-    println!("  Interrupt latch:   {:02X}", emu.peek_byte(0xF00000));
-    println!("  Interrupt raw:     {:02X}", emu.peek_byte(0xF00004));
-    println!("  Interrupt enabled: {:02X}", emu.peek_byte(0xF00008));
-
-    // LCD controller (0xE30000)
-    println!("  LCD control:       {:02X}", emu.peek_byte(0xE30010));
-    println!(
-        "  LCD upbase:        {:06X}",
-        emu.peek_byte(0xE3001C) as u32
-            | ((emu.peek_byte(0xE3001D) as u32) << 8)
-            | ((emu.peek_byte(0xE3001E) as u32) << 16)
-    );
-
-    // Control ports
-    println!("\n  Control Ports (0xE000xx / 0xFF00xx):");
-    println!("    Port 0x00 (power):  {:02X}", emu.peek_byte(0xE00000));
-    println!("    Port 0x01 (speed):  {:02X}", emu.peek_byte(0xE00001));
-    println!("    Port 0x02 (battery): {:02X}", emu.peek_byte(0xE00002));
-    println!("    Port 0x03 (device):  {:02X}", emu.peek_byte(0xE00003));
-    println!("    Port 0x05 (ctrl):   {:02X}", emu.peek_byte(0xE00005));
-    println!("    Port 0x06 (unlock): {:02X}", emu.peek_byte(0xE00006));
-    println!("    Port 0x08 (fixed):  {:02X}", emu.peek_byte(0xE00008));
-    println!("    Port 0x09 (panel):  {:02X}", emu.peek_byte(0xE00009));
-    println!("    Port 0x0D (lcd en): {:02X}", emu.peek_byte(0xE0000D));
-    println!("    Port 0x0F (usb):    {:02X}", emu.peek_byte(0xE0000F));
-    println!("    Port 0x1C (fixed):  {:02X}", emu.peek_byte(0xE0001C));
-    println!("    Port 0x28 (flash):  {:02X}", emu.peek_byte(0xE00028));
-
-    // Flash controller (0xE10000)
-    println!("\n  Flash Controller (0xE10000):");
-    println!("    Port 0x00: {:02X}", emu.peek_byte(0xE10000));
-    println!("    Port 0x01: {:02X}", emu.peek_byte(0xE10001));
-    println!("    Port 0x02: {:02X}", emu.peek_byte(0xE10002));
-    println!("    Port 0x05: {:02X}", emu.peek_byte(0xE10005));
-    println!("    Port 0x08: {:02X}", emu.peek_byte(0xE10008));
-
-    println!("\n{}", emu.dump_history());
 }

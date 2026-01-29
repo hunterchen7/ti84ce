@@ -325,7 +325,8 @@ impl Cpu {
     pub fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
         // Apply MBASE for actual memory access in Z80 mode
         let effective_pc = self.mask_addr(self.pc);
-        let byte = bus.read_byte(effective_pc);
+        // Use fetch_byte which tracks instruction bytes for flash unlock sequence detection
+        let byte = bus.fetch_byte(effective_pc, self.pc);
         // PC stays as 16-bit in Z80 mode, 24-bit in ADL mode (no MBASE added)
         self.pc = if self.adl {
             self.pc.wrapping_add(1) & 0xFFFFFF
@@ -344,11 +345,12 @@ impl Cpu {
         lo | (hi << 8)
     }
 
-    /// Fetch address at PC - 24-bit in ADL mode, 16-bit in Z80 mode
+    /// Fetch address at PC - 24-bit if IL mode, 16-bit otherwise
+    /// Uses the IL (instruction/index) mode flag set by suffix opcodes.
     /// Returns raw value without MBASE (for PC/SP assignments)
     #[inline]
     pub fn fetch_addr(&mut self, bus: &mut Bus) -> u32 {
-        if self.adl {
+        if self.il {
             let b0 = self.fetch_byte(bus) as u32;
             let b1 = self.fetch_byte(bus) as u32;
             let b2 = self.fetch_byte(bus) as u32;
@@ -391,10 +393,11 @@ impl Cpu {
         lo | (hi << 8)
     }
 
-    /// Push address (24-bit in ADL, 16-bit otherwise)
+    /// Push address (24-bit if L mode, 16-bit otherwise)
+    /// Uses L mode (data addressing) which can be overridden by suffix opcodes
     #[inline]
     pub fn push_addr(&mut self, bus: &mut Bus, val: u32) {
-        if self.adl {
+        if self.l {
             self.push_byte(bus, (val >> 16) as u8);
             self.push_byte(bus, (val >> 8) as u8);
             self.push_byte(bus, val as u8);
@@ -403,10 +406,11 @@ impl Cpu {
         }
     }
 
-    /// Pop address (24-bit in ADL, 16-bit otherwise)
+    /// Pop address (24-bit if L mode, 16-bit otherwise)
+    /// Uses L mode (data addressing) which can be overridden by suffix opcodes
     #[inline]
     pub fn pop_addr(&mut self, bus: &mut Bus) -> u32 {
-        if self.adl {
+        if self.l {
             let lo = self.pop_byte(bus) as u32;
             let mid = self.pop_byte(bus) as u32;
             let hi = self.pop_byte(bus) as u32;

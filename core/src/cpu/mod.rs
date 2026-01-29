@@ -107,6 +107,25 @@ pub struct Cpu {
     /// ON key wake signal - wakes CPU from HALT even with interrupts disabled
     /// This is a TI-84 CE specific feature where the ON key can always wake the calculator
     pub on_key_wake: bool,
+    /// EI delay counter - EI enables interrupts after the NEXT instruction
+    /// When EI is executed, this is set to 2. It decrements each step, and when
+    /// it reaches 0, IFF1/IFF2 are set to true.
+    ei_delay: u8,
+    /// Pending ADL override from eZ80 suffix opcode (applies to next instruction)
+    pending_adl: Option<bool>,
+
+    // Per-instruction mode flags (eZ80 suffix support)
+    // These are reset to ADL at the start of each instruction, but can be
+    // overridden by suffix opcodes (.SIS, .LIS, .SIL, .LIL)
+    /// L mode - data addressing mode for current instruction
+    /// When true, use 24-bit addresses for data operations
+    pub l: bool,
+    /// IL mode - instruction/index addressing mode for current instruction
+    /// When true, use 24-bit addresses for instruction word fetches
+    /// JP/CALL/RET with IL=true set ADL=true permanently
+    pub il: bool,
+    /// Whether current instruction was prefixed by a suffix opcode
+    suffix: bool,
 }
 
 impl Cpu {
@@ -132,23 +151,30 @@ impl Cpu {
             iy: 0,
 
             // Special registers
-            sp: 0xFFFF, // Stack starts at top of 16-bit range (or 24-bit in ADL)
+            sp: 0x000000, // Matches CEmu reset; ROM sets stack later
             pc: 0,
             i: 0,
             r: 0,
-            mbase: 0xD0, // Default MBASE for TI-84 CE
+            mbase: 0x00, // CEmu resets MBASE to 0; ROM sets it later
 
             // State
             iff1: false,
             iff2: false,
             im: InterruptMode::Mode0,
-            adl: true, // TI-84 CE runs in ADL mode
+            adl: false, // CEmu resets in Z80 mode; ROM enables ADL
             halted: false,
 
             // Interrupts
             irq_pending: false,
             nmi_pending: false,
             on_key_wake: false,
+            ei_delay: 0,
+            pending_adl: None,
+
+            // Per-instruction modes (reset to ADL at start of each instruction)
+            l: false,
+            il: false,
+            suffix: false,
         }
     }
 
@@ -157,17 +183,23 @@ impl Cpu {
         self.a = 0xFF;
         self.f = 0xFF;
         self.pc = 0;
-        self.sp = 0xFFFF;
+        self.sp = 0x000000;
         self.i = 0;
         self.r = 0;
+        self.mbase = 0x00;
         self.iff1 = false;
         self.iff2 = false;
         self.im = InterruptMode::Mode0;
-        self.adl = true;
+        self.adl = false;
         self.halted = false;
         self.irq_pending = false;
         self.nmi_pending = false;
         self.on_key_wake = false;
+        self.ei_delay = 0;
+        self.pending_adl = None;
+        self.l = false;
+        self.il = false;
+        self.suffix = false;
         // Other registers are undefined after reset
     }
 
@@ -175,6 +207,19 @@ impl Cpu {
 
     /// Execute one instruction, returns cycles used
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
+        // Process EI delay - interrupts enable AFTER the instruction following EI
+        // This happens BEFORE we check for interrupts, so that:
+        // 1. EI is executed, sets ei_delay = 1
+        // 2. Next instruction executes, ei_delay decrements to 0, IFF set true
+        // 3. Following instruction's interrupt check sees IFF1 = true
+        if self.ei_delay > 0 {
+            self.ei_delay -= 1;
+            if self.ei_delay == 0 {
+                self.iff1 = true;
+                self.iff2 = true;
+            }
+        }
+
         // Check for NMI first (highest priority)
         if self.nmi_pending {
             self.nmi_pending = false;
@@ -189,11 +234,27 @@ impl Cpu {
 
         // Check for ON key wake - can wake CPU even with interrupts disabled
         // This is a TI-84 CE specific feature
+        //
+        // On the real TI-84 CE, the ON key can wake the CPU from HALT regardless of IFF1.
+        // When woken, if there's a pending interrupt (ON_KEY or WAKE), we need to
+        // enable interrupts so the interrupt handler can run properly.
+        //
+        // Without this, the ROM code path after HALT expects to have been entered
+        // via interrupt (so RETI has a valid return address), but with DI active
+        // no interrupt is taken and RETI pops garbage.
+        //
+        // Solution: When ON key wakes with a pending interrupt, enable IFF1/IFF2
+        // so the interrupt is taken on the next step() call.
         if self.on_key_wake {
             self.on_key_wake = false;
             if self.halted {
                 self.halted = false;
-                // Just wake, don't jump anywhere - execution resumes after HALT
+                // If there's a pending interrupt, enable interrupts so it gets taken
+                // This matches TI-84 CE behavior where ON key wake triggers the interrupt
+                if self.irq_pending {
+                    self.iff1 = true;
+                    self.iff2 = true;
+                }
                 return 4;
             }
         }
@@ -204,6 +265,16 @@ impl Cpu {
             return 4;
         }
 
+        // eZ80 per-instruction mode handling:
+        // L and IL are reset to ADL at the start of each instruction, UNLESS
+        // the previous instruction was a suffix opcode that set them.
+        if !self.suffix {
+            self.l = self.adl;
+            self.il = self.adl;
+        }
+        self.suffix = false;
+        let _ = self.pending_adl.take(); // Clear legacy pending_adl
+
         let opcode = self.fetch_byte(bus);
 
         // Decode using x-y-z-p-q decomposition
@@ -212,6 +283,26 @@ impl Cpu {
         let z = opcode & 0x07;
         let p = (y >> 1) & 0x03;
         let q = y & 0x01;
+
+        // eZ80 suffix opcodes: .SIS (0x40), .LIS (0x49), .SIL (0x52), .LIL (0x5B)
+        // These are encoded as LD r,r where y==z and z<4.
+        // They set L and IL for the NEXT instruction.
+        // - Bit 0 (s): Sets L (data addressing mode)
+        // - Bit 1 (r): Sets IL (instruction/index addressing mode)
+        // CEmu: cpu.L = context.s, cpu.IL = context.r
+        // Note: CEmu loops and fetches the next instruction immediately, but we
+        // return here and let the caller call step() again. This matches CEmu's
+        // trace behavior where the suffix is counted as a separate instruction.
+        if x == 1 && y == z && z < 4 {
+            let s = (opcode & 0x01) != 0; // L mode (bit 0)
+            let r = (opcode & 0x02) != 0; // IL mode (bit 1)
+            self.l = s;
+            self.il = r;
+            self.suffix = true;
+            // Return - the next step() call will execute with the suffix modes
+            // The suffix flag prevents L/IL from being reset to ADL
+            return 4;
+        }
 
         match x {
             0 => self.execute_x0(bus, y, z, p, q),

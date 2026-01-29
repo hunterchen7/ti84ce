@@ -65,8 +65,7 @@
 
 **Goal:** Reach visible OS UI.
 
-**Deliverables:**
-
+### 5a: Core Peripherals ✓
 - [x] Interrupt controller (0xF00000) with source tracking
 - [x] CPU interrupt dispatch (Mode 0/1/2, NMI support)
 - [x] General purpose timers (3x at 0xF20000)
@@ -77,21 +76,63 @@
 - [x] render_frame() for RGB565 → ARGB8888 conversion
 - [x] ON key wake-from-HALT (special non-maskable wake signal)
 - [x] Flash controller (0xE10000) - wait states, status registers
-- [ ] Visible OS screen
 
-**Current Status (307 tests passing):**
-- ROM executes ~4000 cycles of initialization
-- Sets up stack, interrupt mode, CPU speed
-- Writes 0x10 to power port then HALTs at 0x001414
-- ON key can wake CPU from HALT even with interrupts disabled
-- Flash controller returns ready status for ROM boot
-- Interrupt sources now match CEmu (KEYPAD=10, LCD=11, WAKE=19)
-- Power port bit 4 always reads as 1 (power stable)
-- ROM wakes from HALT but loops back (4513 cycles per wake)
+### 5b: Control Port Initialization Fixes ✓
+- [x] Fix CPU speed default: 6 MHz (0x00) instead of 48 MHz (0x03)
+- [x] Set PWR interrupt (bit 15) during reset
+- [x] Fix flash map_select default: 0x06 instead of 0x00
+- [x] Fix flash wait_states default: 0x04 instead of 0x00
+- [x] Set protected memory defaults to 0xD1887C (start=end)
+- [x] Add privileged region ports (0x1D-0x1F) with is_unprivileged() check
+- [x] Fix battery_status default: 0x00 instead of 0x0B
+- [x] Fix port 0x0D LCD enable to duplicate nibble on write (CEmu behavior)
+- [x] Fix port 0x0F USB control to mask with 0x03 on write
 
-**Next Steps:**
-1. Investigate what condition ROM checks before proceeding past HALT loop
-2. Compare execution trace with CEmu to identify missing hardware behavior
+### 5c: Missing Peripheral Stubs
+- [ ] Watchdog timer (port 0x6) - basic stub
+- [ ] RTC (port 0x8) - read-only stub returning safe values
+- [ ] SHA256 accelerator (port 0x2) - stub or full implementation
+- [ ] SPI controller (port 0xD) - basic stub
+
+### 5d: Boot Debugging
+- [ ] Compare execution trace with CEmu at divergence point
+- [ ] Verify LDIR/block instructions execute during boot
+- [ ] Trace why RAM isn't initialized (107 writes = stack only)
+- [ ] Test with corrected control port defaults
+
+### 5e: Visible OS Screen
+- [ ] ROM successfully copies code to RAM
+- [ ] Execution continues past RAM initialization
+- [ ] LCD shows boot screen or OS UI
+
+**Current Status (322 tests passing):**
+- Control port defaults now match CEmu (CPU speed, flash, PWR interrupt, protection)
+- Added privileged boundary register (ports 0x1D-0x1F) and is_unprivileged() check
+- Fixed battery_status, LCD enable nibble duplication, USB control masking
+- **Boot trace matches CEmu for 40,000+ steps** (full trace comparison)
+- ROM boots to initialization loop, VRAM filled with white pixels
+- CPU reaches main initialization code at ~50M cycles
+
+### 5f: CPU/Bus Fixes (Completed)
+- [x] Fixed L/IL suffix mode handling (eZ80 suffix opcodes)
+- [x] Fixed block instruction internal looping (LDIR, LDDR, CPIR, CPDR)
+- [x] Fixed eZ80 block I/O instructions (OTIMR, OTDMR, INIMR, INDMR)
+- [x] Fixed ED z=5 RETN/RETI (only y=0,1 valid, others are NOP)
+- [x] Fixed IN r,(C) and OUT (C),r to use memory-mapped I/O at 0xFF00xx
+- [x] Fixed ED x=0 z=7 instructions (LD rp3,(HL), LD (HL),rp3, LD IY,(HL), LD (HL),IY)
+- [x] Updated LDIR test for internal looping behavior
+
+**Key Progress:**
+- Boot trace comparison tool created (docs/trace-comparison.md)
+- CEmu reference clone configured for trace comparison
+- Execution trace shows 40,001+ matching steps before divergence
+- VRAM is being written (screen shows all white pixels)
+- ROM is now waiting on port 0x0D (LCD enable) status
+
+**Current Blocker:**
+ROM is stuck in a loop at PC=0x5BA9 polling port 0x0D (LCD enable).
+The loop reads port 0x0D, ANDs with a mask, and loops while non-zero.
+This may require proper LCD enable/status bit simulation.
 
 ## Milestone 6: Persistence
 

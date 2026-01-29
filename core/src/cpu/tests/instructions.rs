@@ -23,7 +23,7 @@ use super::*;
 fn test_new_cpu() {
     let cpu = Cpu::new();
     assert_eq!(cpu.pc, 0);
-    assert!(cpu.adl);
+    assert!(!cpu.adl);
     assert!(!cpu.halted);
     assert!(!cpu.iff1);
 }
@@ -179,8 +179,8 @@ fn test_ex_de_hl() {
 
 #[test]
 fn test_mask_addr_adl() {
-    let cpu = Cpu::new();
-    assert!(cpu.adl);
+    let mut cpu = Cpu::new();
+    cpu.adl = true;
     assert_eq!(cpu.mask_addr(0x123456), 0x123456);
     assert_eq!(cpu.mask_addr(0xFF123456), 0x123456); // Upper bits masked
 }
@@ -256,6 +256,7 @@ fn test_ld_reg_reg() {
 fn test_ld_rp_imm() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // LD BC,0x123456 (opcode 0x01, then 24-bit immediate in ADL mode)
     bus.poke_byte(0, 0x01);
@@ -407,6 +408,7 @@ fn test_dec_reg() {
 fn test_inc_rp() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.bc = 0x00FFFF;
     // INC BC (opcode 0x03)
@@ -464,6 +466,7 @@ fn test_jr_negative() {
 fn test_call_ret() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.sp = 0xD00100;
     // CALL 0x001234
@@ -487,6 +490,7 @@ fn test_call_ret() {
 fn test_push_pop() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.sp = 0xD00100;
     cpu.bc = 0x001234;
@@ -536,6 +540,18 @@ fn test_di_ei() {
 
     // EI (opcode 0xFB)
     bus.poke_byte(1, 0xFB);
+    cpu.step(&mut bus);
+    assert!(!cpu.iff1);
+    assert!(!cpu.iff2);
+
+    // Next instruction executes with interrupts still disabled
+    bus.poke_byte(2, 0x00); // NOP
+    cpu.step(&mut bus);
+    assert!(!cpu.iff1);
+    assert!(!cpu.iff2);
+
+    // After one instruction, interrupts become enabled
+    bus.poke_byte(3, 0x00); // NOP
     cpu.step(&mut bus);
     assert!(cpu.iff1);
     assert!(cpu.iff2);
@@ -766,6 +782,7 @@ fn test_set() {
 fn test_cb_memory() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     bus.poke_byte(0xD00100, 0x00);
@@ -852,6 +869,7 @@ fn test_adc_hl() {
 fn test_ld_rp_nn_indirect() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.bc = 0x123456;
 
@@ -907,6 +925,7 @@ fn test_im_modes() {
 fn test_ldi() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     cpu.de = 0xD00200;
@@ -929,6 +948,7 @@ fn test_ldi() {
 fn test_ldd() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00105;
     cpu.de = 0xD00205;
@@ -950,6 +970,7 @@ fn test_ldd() {
 fn test_ldir() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     cpu.de = 0xD00200;
@@ -962,20 +983,17 @@ fn test_ldir() {
     bus.poke_byte(0, 0xED);
     bus.poke_byte(1, 0xB0);
 
-    // First iteration
-    cpu.step(&mut bus);
-    assert_eq!(cpu.bc, 0x000002);
-    assert_eq!(cpu.pc, 0); // Loops back
+    // LDIR executes all iterations in a single step (matches CEmu behavior)
+    let cycles = cpu.step(&mut bus);
 
-    // Second iteration
-    cpu.step(&mut bus);
-    assert_eq!(cpu.bc, 0x000001);
-    assert_eq!(cpu.pc, 0);
-
-    // Third iteration
-    cpu.step(&mut bus);
+    // All 3 bytes copied in one step
     assert_eq!(cpu.bc, 0x000000);
     assert_eq!(cpu.pc, 2); // Done, advances
+    assert_eq!(cpu.hl, 0xD00103); // Source pointer advanced
+    assert_eq!(cpu.de, 0xD00203); // Dest pointer advanced
+
+    // Cycles: 21 + 21 + 16 = 58 (first two iterations repeat, last one doesn't)
+    assert_eq!(cycles, 58);
 
     // Check memory was copied
     assert_eq!(bus.peek_byte(0xD00200), 0x11);
@@ -987,6 +1005,7 @@ fn test_ldir() {
 fn test_cpi() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.a = 0x42;
     cpu.hl = 0xD00100;
@@ -1007,6 +1026,7 @@ fn test_cpi() {
 fn test_rrd() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.a = 0x12;
     cpu.hl = 0xD00100;
@@ -1027,6 +1047,7 @@ fn test_rrd() {
 fn test_rld() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.a = 0x12;
     cpu.hl = 0xD00100;
@@ -1049,6 +1070,7 @@ fn test_rld() {
 fn test_ld_ix_imm() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // LD IX,0x123456 (DD 21 56 34 12)
     bus.poke_byte(0, 0xDD);
@@ -1065,6 +1087,7 @@ fn test_ld_ix_imm() {
 fn test_ld_iy_imm() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // LD IY,0xABCDEF (FD 21 EF CD AB)
     bus.poke_byte(0, 0xFD);
@@ -1081,6 +1104,7 @@ fn test_ld_iy_imm() {
 fn test_ld_indexed_mem() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0xD00100;
     cpu.a = 0x42;
@@ -1098,6 +1122,7 @@ fn test_ld_indexed_mem() {
 fn test_ld_from_indexed_mem() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0xD00100;
     bus.poke_byte(0xD00105, 0x55);
@@ -1115,6 +1140,7 @@ fn test_ld_from_indexed_mem() {
 fn test_indexed_negative_offset() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.iy = 0xD00110;
     bus.poke_byte(0xD00100, 0x77);
@@ -1148,6 +1174,7 @@ fn test_add_ix_bc() {
 fn test_add_ix_bc_flags_f3_f5_adl() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     // ADL mode: F3/F5 from high byte of 24-bit result
     cpu.ix = 0x280000;
@@ -1196,6 +1223,7 @@ fn test_add_iy_iy_flags_f3_f5_z80() {
 fn test_inc_ix() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0x00FFFF;
 
@@ -1211,6 +1239,7 @@ fn test_inc_ix() {
 fn test_push_pop_ix() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.sp = 0xD00200;
     cpu.ix = 0x123456;
@@ -1283,6 +1312,7 @@ fn test_indexed_cb_bit() {
 fn test_indexed_cb_set() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0xD00100;
     bus.poke_byte(0xD00105, 0x00);
@@ -1301,6 +1331,7 @@ fn test_indexed_cb_set() {
 fn test_indexed_cb_res() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.iy = 0xD00100;
     bus.poke_byte(0xD00105, 0xFF);
@@ -1319,6 +1350,7 @@ fn test_indexed_cb_res() {
 fn test_inc_indexed_mem() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0xD00100;
     bus.poke_byte(0xD00105, 0x41);
@@ -1336,6 +1368,7 @@ fn test_inc_indexed_mem() {
 fn test_add_a_indexed_mem() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.a = 0x10;
     cpu.ix = 0xD00100;
@@ -1428,6 +1461,7 @@ fn test_ld_a_hl_uses_read_byte() {
     // This test verifies that LD A,(HL) properly reads from memory
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     bus.poke_byte(0xD00100, 0x42);
@@ -1448,6 +1482,7 @@ fn test_add_a_hl_uses_read_byte() {
     // Verify ADD A,(HL) properly reads from memory
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.a = 0x10;
     cpu.hl = 0xD00100;
@@ -1469,6 +1504,7 @@ fn test_inc_indexed_mem_r_register() {
     // This test verifies the fix doesn't cause extra R increments beyond the fetch calls
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.ix = 0xD00100;
     cpu.r = 0;
@@ -1500,6 +1536,7 @@ fn test_dec_indexed_mem_r_register() {
     // Bug fixed: DEC (IY+d) no longer double-fetches the displacement
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.iy = 0xD00100;
     cpu.r = 0;
@@ -1646,7 +1683,8 @@ fn test_push_pop_bc_16bit_z80_mode() {
     let mut bus = Bus::new();
 
     cpu.adl = false;
-    // Keep default MBASE (0xD0) which maps to RAM region
+    // Use MBASE=0xD0 to map into RAM region
+    cpu.mbase = 0xD0;
     // SP low 16-bits = 0x0200, with MBASE=0xD0 gives address 0xD00200 (in RAM)
     cpu.sp = 0xD00200;
     cpu.bc = 0x123456; // Upper byte should be ignored in 16-bit push
@@ -1716,6 +1754,7 @@ fn test_cb_bit_hl_uses_read_byte() {
     // BIT n,(HL) should use read_byte for proper cycle counting
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     bus.poke_byte(0xD00100, 0x80); // Bit 7 set
@@ -1735,6 +1774,7 @@ fn test_ld_hl_indirect_memory_read() {
     // LD r,(HL) variants should all properly read from memory
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     bus.poke_byte(0xD00100, 0x55);
@@ -1758,6 +1798,7 @@ fn test_inc_hl_indirect_cycle_count() {
     // INC (HL) should have proper cycle count including memory read/write
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     bus.poke_byte(0xD00100, 0x41);
@@ -1775,6 +1816,7 @@ fn test_dec_hl_indirect_cycle_count() {
     // DEC (HL) should have proper cycle count
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
+    cpu.adl = true;
 
     cpu.hl = 0xD00100;
     bus.poke_byte(0xD00100, 0x42);
