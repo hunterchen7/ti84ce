@@ -315,31 +315,39 @@ impl Peripherals {
         // Cycles per 32KHz tick at current CPU speed
         let cycles_per_32k_tick = cpu_clock / Self::CLOCK_32K as u64;
 
-        // OS Timer interval in 32K ticks depends on state:
-        // - When state is false: wait ost_ticks[speed] ticks
-        // - When state is true: wait 1 tick
-        let ticks_needed = if self.os_timer_state {
-            1u64
-        } else {
-            Self::OS_TIMER_TICKS[speed] as u64
-        };
-
-        let cycles_needed = ticks_needed * cycles_per_32k_tick;
-
         self.os_timer_cycles += cycles as u64;
 
         // Check if enough cycles have passed to toggle state
-        while self.os_timer_cycles >= cycles_needed {
-            self.os_timer_cycles -= cycles_needed;
-            self.os_timer_state = !self.os_timer_state;
+        // cycles_needed must be recalculated each iteration since it depends on os_timer_state
+        loop {
+            // OS Timer interval in 32K ticks depends on state:
+            // - When state is false: wait ost_ticks[speed] ticks
+            // - When state is true: wait 1 tick
+            let ticks_needed = if self.os_timer_state {
+                1u64
+            } else {
+                Self::OS_TIMER_TICKS[speed] as u64
+            };
+            let cycles_needed = ticks_needed * cycles_per_32k_tick;
 
-            // Update interrupt state based on os_timer_state
-            // CEmu: intrpt_set(INT_OSTIMER, gpt.osTimerState);
+            if self.os_timer_cycles < cycles_needed {
+                break;
+            }
+
+            self.os_timer_cycles -= cycles_needed;
+
+            // CEmu order: intrpt_set(INT_OSTIMER, gpt.osTimerState) BEFORE toggle
+            // This sets raw interrupt state to match current timer state
             if self.os_timer_state {
                 self.interrupt.raise(sources::OSTIMER);
+            } else {
+                // Clear raw state when timer state is false
+                // Latched status remains until software acknowledges it
+                self.interrupt.clear_raw(sources::OSTIMER);
             }
-            // Note: We don't clear the interrupt here - it's level-triggered
-            // and will be cleared by software acknowledging it
+
+            // Toggle state AFTER setting interrupt (CEmu order)
+            self.os_timer_state = !self.os_timer_state;
         }
     }
 
