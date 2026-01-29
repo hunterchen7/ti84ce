@@ -1,4 +1,4 @@
-//! Test ON key wake with pushed return address
+//! Boot trace logger - captures detailed emulator state during boot for CEmu comparison
 
 use std::fs;
 use std::path::Path;

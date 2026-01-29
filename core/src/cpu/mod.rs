@@ -111,8 +111,6 @@ pub struct Cpu {
     /// When EI is executed, this is set to 2. It decrements each step, and when
     /// it reaches 0, IFF1/IFF2 are set to true.
     ei_delay: u8,
-    /// Pending ADL override from eZ80 suffix opcode (applies to next instruction)
-    pending_adl: Option<bool>,
 
     // Per-instruction mode flags (eZ80 suffix support)
     // These are reset to ADL at the start of each instruction, but can be
@@ -169,7 +167,6 @@ impl Cpu {
             nmi_pending: false,
             on_key_wake: false,
             ei_delay: 0,
-            pending_adl: None,
 
             // Per-instruction modes (reset to ADL at start of each instruction)
             l: false,
@@ -196,7 +193,6 @@ impl Cpu {
         self.nmi_pending = false;
         self.on_key_wake = false;
         self.ei_delay = 0;
-        self.pending_adl = None;
         self.l = false;
         self.il = false;
         self.suffix = false;
@@ -209,9 +205,9 @@ impl Cpu {
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         // Process EI delay - interrupts enable AFTER the instruction following EI
         // This happens BEFORE we check for interrupts, so that:
-        // 1. EI is executed, sets ei_delay = 1
-        // 2. Next instruction executes, ei_delay decrements to 0, IFF set true
-        // 3. Following instruction's interrupt check sees IFF1 = true
+        // 1. EI is executed, sets ei_delay = 2
+        // 2. Next instruction executes, ei_delay decrements to 1
+        // 3. Following instruction: ei_delay decrements to 0, IFF1/IFF2 set true
         if self.ei_delay > 0 {
             self.ei_delay -= 1;
             if self.ei_delay == 0 {
@@ -273,7 +269,6 @@ impl Cpu {
             self.il = self.adl;
         }
         self.suffix = false;
-        let _ = self.pending_adl.take(); // Clear legacy pending_adl
 
         let opcode = self.fetch_byte(bus);
 
