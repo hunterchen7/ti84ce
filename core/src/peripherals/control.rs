@@ -455,16 +455,16 @@ mod tests {
     #[test]
     fn test_usb_control_masked() {
         let mut ctrl = ControlPorts::new();
-        // Initial value is 0x02
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x02);
+        // Initial value is 0x02, but read ORs in 0xC0 (usb_status)
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC2);
 
-        // Writing 0xFF should be masked to 0x03
+        // Writing 0xFF should be masked to 0x03, read shows 0xC3 (with USB status)
         ctrl.write(regs::USB_CONTROL, 0xFF);
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x03);
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC3);
 
-        // Writing 0x01
+        // Writing 0x01, read shows 0xC1 (with USB status)
         ctrl.write(regs::USB_CONTROL, 0x01);
-        assert_eq!(ctrl.read(regs::USB_CONTROL), 0x01);
+        assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC1);
     }
 
     #[test]

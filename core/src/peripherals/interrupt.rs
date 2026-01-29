@@ -34,6 +34,8 @@ mod regs {
     pub const ENABLED: u32 = 0x04;
     /// Raw interrupt state (before latch)
     pub const RAW: u32 = 0x08;
+    /// Latched mode bitmask
+    pub const LATCHED: u32 = 0x0C;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -128,6 +130,7 @@ impl InterruptController {
         let value = match index {
             0 | 8 => bank.status,
             1 | 9 => bank.enabled,
+            2 | 10 => self.raw, // Raw interrupt state
             3 | 11 => bank.latched,
             4 | 12 => bank.inverted,
             5 | 13 => bank.status & bank.enabled,
@@ -273,6 +276,9 @@ mod tests {
     fn test_raw_state() {
         let mut ic = InterruptController::new();
 
+        // Configure TIMER2 as latched so status persists after raw clears
+        ic.write(regs::LATCHED, sources::TIMER2 as u8);
+
         // Raise interrupt - sets both raw and status
         ic.raise(sources::TIMER2);
         assert_eq!(ic.read(regs::RAW), sources::TIMER2 as u8);
@@ -281,7 +287,7 @@ mod tests {
         // Clear raw state (source went inactive)
         ic.clear_raw(sources::TIMER2);
         assert_eq!(ic.read(regs::RAW), 0);
-        // Status should still be latched
+        // Status should still be latched (because TIMER2 is configured as latched)
         assert_eq!(ic.read(regs::STATUS), sources::TIMER2 as u8);
     }
 

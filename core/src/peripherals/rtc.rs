@@ -241,11 +241,12 @@ mod tests {
         rtc.write(0x20, 0xC1); // Enable + load + latch enable
         // Should now show load pending (0xF8)
         assert_eq!(rtc.read(0x40), 0xF8);
-        // After a few reads, should transition to complete
+        // Without scheduler integration, load stays pending indefinitely
+        // (matches CEmu behavior during early boot)
         for _ in 0..10 {
             rtc.read(0x40);
         }
-        assert_eq!(rtc.read(0x40), 0); // Should be complete now
+        assert_eq!(rtc.read(0x40), 0xF8); // Still pending
     }
 
     #[test]

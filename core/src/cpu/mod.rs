@@ -319,8 +319,7 @@ impl Cpu {
         if self.prefix != 0 {
             let use_ix = self.prefix == 2; // 2=DD (IX), 3=FD (IY)
             self.prefix = 0;
-            self.execute_index(bus, use_ix);
-            return (bus.cycles() - start_cycles) as u32;
+            return self.execute_index(bus, use_ix);
         }
 
         let opcode = self.fetch_byte(bus);
