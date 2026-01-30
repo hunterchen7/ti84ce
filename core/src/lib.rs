@@ -163,11 +163,6 @@ pub extern "C" fn emu_set_key(emu: *mut SyncEmu, row: i32, col: i32, down: i32) 
         return;
     }
 
-    log_event(&format!(
-        "KEY row={} col={} down={}",
-        row, col, down != 0
-    ));
-
     let sync_emu = unsafe { &*emu };
     let mut emu = sync_emu.inner.lock().unwrap();
     emu.set_key(row as usize, col as usize, down != 0);

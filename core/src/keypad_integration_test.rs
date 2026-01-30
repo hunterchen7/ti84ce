@@ -14,6 +14,19 @@ mod tests {
     const KEYPAD_INT_ACK: u32 = KEYPAD_BASE + 0x0C;
     const KEYPAD_DATA_BASE: u32 = KEYPAD_BASE + 0x10;
 
+    /// Set up keypad in mode 1 (any-key detection mode) for testing.
+    /// This is how TI-OS uses the keypad for key detection.
+    fn setup_keypad_mode1(bus: &mut Bus) {
+        bus.write_byte(KEYPAD_CONTROL, 0x01); // Mode 1
+    }
+
+    /// Trigger any_key_check by clearing INT_STATUS (simulates TI-OS acknowledging)
+    /// This is how TI-OS causes the keypad data registers to be populated.
+    /// CEmu calls keypad_any_check() after INT_STATUS is written.
+    fn trigger_keypad_check(bus: &mut Bus) {
+        bus.write_byte(KEYPAD_STATUS, 0xFF); // Clear all status bits
+    }
+
     fn read_keypad_row(bus: &mut Bus, row: usize) -> u16 {
         let addr = KEYPAD_DATA_BASE + (row as u32) * 2;
         let lo = bus.read_byte(addr) as u16;
@@ -25,6 +38,9 @@ mod tests {
     fn test_keypad_pipeline_basic() {
         let mut bus = Bus::new();
 
+        // Set mode 1 (any-key detection mode, like TI-OS uses)
+        setup_keypad_mode1(&mut bus);
+
         // Initially no keys pressed - all rows should be 0x0000
         for row in 0..KEYPAD_ROWS {
             let data = read_keypad_row(&mut bus, row);
@@ -33,28 +49,34 @@ mod tests {
 
         // Press key at row 3, col 2 (e.g., the "4" key)
         bus.set_key(3, 2, true);
+        // Trigger any_key_check (simulates TI-OS clearing INT_STATUS)
+        trigger_keypad_check(&mut bus);
 
-        // Now row 3 should have bit 2 set
-        let row3_data = read_keypad_row(&mut bus, 3);
+        // In mode 1, all rows contain combined key data (CEmu behavior)
+        // Verify the key bit is set (reading any row works)
+        let key_data = read_keypad_row(&mut bus, 3);
         assert_eq!(
-            row3_data,
+            key_data,
             1 << 2,
             "Row 3 should have bit 2 set after pressing key (3,2). Got: 0x{:04X}",
-            row3_data
+            key_data
         );
 
-        // Other rows should still be 0
-        for row in 0..KEYPAD_ROWS {
-            if row != 3 {
-                let data = read_keypad_row(&mut bus, row);
-                assert_eq!(data, 0x0000, "Row {} should still be 0x0000", row);
-            }
-        }
+        // In mode 1, ALL rows have the same combined data
+        // This is how CEmu's any_key_check works
+        let row0_data = read_keypad_row(&mut bus, 0);
+        assert_eq!(
+            row0_data,
+            1 << 2,
+            "In mode 1, all rows have combined data. Got: 0x{:04X}",
+            row0_data
+        );
 
         // Release the key
         bus.set_key(3, 2, false);
+        trigger_keypad_check(&mut bus);
 
-        // Now row 3 should be back to 0
+        // Now all rows should be back to 0 (edge was cleared by previous query)
         let row3_data = read_keypad_row(&mut bus, 3);
         assert_eq!(
             row3_data, 0x0000,
@@ -65,46 +87,40 @@ mod tests {
     #[test]
     fn test_keypad_multiple_keys() {
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // Press multiple keys in different rows
         bus.set_key(1, 5, true); // 2nd key
         bus.set_key(3, 3, true); // 7 key
         bus.set_key(6, 0, true); // enter key
+        trigger_keypad_check(&mut bus);
 
-        // Check each row
-        assert_eq!(
-            read_keypad_row(&mut bus, 1),
-            1 << 5,
-            "Row 1 should have bit 5 set"
-        );
-        assert_eq!(
-            read_keypad_row(&mut bus, 3),
-            1 << 3,
-            "Row 3 should have bit 3 set"
-        );
-        assert_eq!(
-            read_keypad_row(&mut bus, 6),
-            1 << 0,
-            "Row 6 should have bit 0 set"
-        );
+        // In mode 1, all rows contain the combined OR of all pressed keys
+        // Combined: (1 << 5) | (1 << 3) | (1 << 0) = 0x29
+        let expected = (1 << 5) | (1 << 3) | (1 << 0);
 
-        // Rows without pressed keys should be 0
-        assert_eq!(read_keypad_row(&mut bus, 0), 0x0000);
-        assert_eq!(read_keypad_row(&mut bus, 2), 0x0000);
-        assert_eq!(read_keypad_row(&mut bus, 4), 0x0000);
-        assert_eq!(read_keypad_row(&mut bus, 5), 0x0000);
-        assert_eq!(read_keypad_row(&mut bus, 7), 0x0000);
+        // All rows should have the combined data
+        for row in 0..KEYPAD_ROWS {
+            let data = read_keypad_row(&mut bus, row);
+            assert_eq!(
+                data, expected,
+                "Row {} should have combined data 0x{:04X}, got 0x{:04X}",
+                row, expected, data
+            );
+        }
     }
 
     #[test]
     fn test_keypad_multiple_keys_same_row() {
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // Press multiple keys in the same row
         bus.set_key(3, 0, true); // 0 key
         bus.set_key(3, 1, true); // 1 key
         bus.set_key(3, 2, true); // 4 key
         bus.set_key(3, 3, true); // 7 key
+        trigger_keypad_check(&mut bus);
 
         let row3_data = read_keypad_row(&mut bus, 3);
         let expected = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
@@ -118,9 +134,11 @@ mod tests {
     #[test]
     fn test_keypad_on_key() {
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // ON key is at row 2, col 0
         bus.set_key(2, 0, true);
+        trigger_keypad_check(&mut bus);
 
         let row2_data = read_keypad_row(&mut bus, 2);
         assert_eq!(
@@ -134,6 +152,7 @@ mod tests {
     #[test]
     fn test_keypad_arrow_keys() {
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // Arrow keys per CEmu mapping:
         // DOWN: row 7, col 0
@@ -142,9 +161,11 @@ mod tests {
         // UP: row 7, col 3
 
         bus.set_key(7, 0, true); // DOWN
+        trigger_keypad_check(&mut bus);
         assert_eq!(read_keypad_row(&mut bus, 7), 1 << 0, "DOWN key");
 
         bus.set_key(7, 1, true); // LEFT
+        trigger_keypad_check(&mut bus);
         assert_eq!(
             read_keypad_row(&mut bus, 7),
             (1 << 0) | (1 << 1),
@@ -152,6 +173,7 @@ mod tests {
         );
 
         bus.set_key(7, 2, true); // RIGHT
+        trigger_keypad_check(&mut bus);
         assert_eq!(
             read_keypad_row(&mut bus, 7),
             (1 << 0) | (1 << 1) | (1 << 2),
@@ -159,6 +181,7 @@ mod tests {
         );
 
         bus.set_key(7, 3, true); // UP
+        trigger_keypad_check(&mut bus);
         assert_eq!(
             read_keypad_row(&mut bus, 7),
             (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3),
@@ -171,9 +194,11 @@ mod tests {
         // Test the full Emu pipeline using Bus directly
         // (Emu.bus is private, so we test Bus separately)
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // This simulates what Emu.set_key does internally
         bus.set_key(3, 2, true);
+        trigger_keypad_check(&mut bus);
 
         // Read the keypad register through the bus
         let addr = KEYPAD_DATA_BASE + 3 * 2; // Row 3
@@ -197,9 +222,16 @@ mod tests {
         let control = bus.read_byte(KEYPAD_CONTROL);
         println!("Keypad CONTROL: 0x{:02X}", control);
 
-        // Read size register (should be 0x88 for 8x8 matrix)
-        let size = bus.read_byte(KEYPAD_SIZE);
-        assert_eq!(size, 0x88, "Size should be 0x88 for 8x8 matrix");
+        // Read size register bytes
+        // SIZE register is now 4 bytes: rows (8), cols (8), mask_lo (0xFF), mask_hi (0x00)
+        let rows = bus.read_byte(KEYPAD_SIZE);
+        assert_eq!(rows, 8, "Rows should be 8");
+        let cols = bus.read_byte(KEYPAD_SIZE + 1);
+        assert_eq!(cols, 8, "Cols should be 8");
+        let mask_lo = bus.read_byte(KEYPAD_SIZE + 2);
+        assert_eq!(mask_lo, 0xFF, "Mask low byte should be 0xFF (all 8 rows enabled)");
+        let mask_hi = bus.read_byte(KEYPAD_SIZE + 3);
+        assert_eq!(mask_hi, 0x00, "Mask high byte should be 0x00");
 
         // Read status register
         let status = bus.read_byte(KEYPAD_STATUS);
@@ -214,9 +246,11 @@ mod tests {
     fn test_keypad_data_format() {
         // This test documents the expected data format
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // Press key at (5, 3) - the "9" key
         bus.set_key(5, 3, true);
+        trigger_keypad_check(&mut bus);
 
         // The data register for row 5 is at KEYPAD_DATA_BASE + 5*2 = 0xF5001A
         let addr = KEYPAD_DATA_BASE + 5 * 2;
@@ -240,9 +274,11 @@ mod tests {
     fn test_keypad_address_routing() {
         // Test that addresses are correctly routed to the keypad controller
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // Press a key
         bus.set_key(3, 2, true);
+        trigger_keypad_check(&mut bus);
 
         // Test various address formats that might be used to read keypad
         let addresses = [
@@ -272,6 +308,7 @@ mod tests {
     fn test_keypad_timing_simulation() {
         // Simulate what happens during emulation with key presses
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         println!("\nTiming simulation:");
 
@@ -284,17 +321,18 @@ mod tests {
         // Press key
         println!("2. Press key (3, 2)");
         bus.set_key(3, 2, true);
+        trigger_keypad_check(&mut bus);
 
-        // Immediate read
+        // Immediate read after keypad check
         let row3 = bus.read_byte(0xF50016);
-        println!("   Row 3 data immediately after press: 0x{:02X}", row3);
+        println!("   Row 3 data after check: 0x{:02X}", row3);
         assert_eq!(row3, 0x04);
 
         // Simulate some cycles (tick the peripherals)
         println!("3. Run 1000 cycles");
         bus.ports.tick(1000);
 
-        // Read again
+        // Read again - data persists since key is still held
         let row3 = bus.read_byte(0xF50016);
         println!("   Row 3 data after tick: 0x{:02X}", row3);
         assert_eq!(row3, 0x04, "Key should still be pressed after tick");
@@ -302,6 +340,7 @@ mod tests {
         // Release key
         println!("4. Release key");
         bus.set_key(3, 2, false);
+        trigger_keypad_check(&mut bus);
 
         let row3 = bus.read_byte(0xF50016);
         println!("   Row 3 data after release: 0x{:02X}", row3);
@@ -329,8 +368,12 @@ mod tests {
         println!("   Status: 0x{:02X}", status);
         println!("   Int mask: 0x{:02X}", int_mask);
 
+        // Set mode 1 for key detection
+        bus.write_byte(0xF50000, 0x01);
+
         println!("2. Press the '5' key (row 4, col 2)");
         bus.set_key(4, 2, true);
+        trigger_keypad_check(&mut bus);
 
         println!("3. Read all row data:");
         for row in 0..8 {
@@ -354,6 +397,7 @@ mod tests {
     fn test_keypad_android_mapping() {
         // Test the specific key mappings used in Android
         let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
 
         // These are the mappings from MainActivity.kt
         let android_keys = [
@@ -430,6 +474,7 @@ mod tests {
 
             // Press the key
             bus.set_key(*row, *col, true);
+            trigger_keypad_check(&mut bus);
 
             // Verify it's readable
             let row_data = read_keypad_row(&mut bus, *row);
@@ -448,5 +493,74 @@ mod tests {
             bus.set_key(*row, *col, false);
         }
         println!("All {} Android key mappings verified!", android_keys.len());
+    }
+
+    #[test]
+    fn test_keypad_edge_detection() {
+        // Test the edge detection mechanism:
+        // A key pressed and released BEFORE the query should still be detected
+        // This is critical for fast key presses on Android where the key might
+        // be released before TI-OS has a chance to poll the keypad.
+        let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
+
+        // Press key
+        bus.set_key(3, 2, true);
+
+        // Release key BEFORE triggering the check
+        bus.set_key(3, 2, false);
+
+        // Now trigger the keypad check (simulates TI-OS clearing INT_STATUS)
+        // Even though the key is released, the edge flag should still be set
+        trigger_keypad_check(&mut bus);
+
+        // The key should be detected because the edge flag was preserved!
+        let row_data = read_keypad_row(&mut bus, 3);
+        assert_eq!(
+            row_data,
+            1 << 2,
+            "Edge detection failed: key pressed+released before query should still be detected. Got: 0x{:04X}",
+            row_data
+        );
+
+        // A second query should show 0 (edge was cleared by first query, key not held)
+        trigger_keypad_check(&mut bus);
+        let row_data = read_keypad_row(&mut bus, 3);
+        assert_eq!(
+            row_data, 0x0000,
+            "After edge is consumed, data should be 0. Got: 0x{:04X}",
+            row_data
+        );
+    }
+
+    #[test]
+    fn test_keypad_edge_multiple_press_release() {
+        // Test that multiple quick press-release cycles accumulate edges
+        let mut bus = Bus::new();
+        setup_keypad_mode1(&mut bus);
+
+        // Press and release key 1
+        bus.set_key(3, 1, true);
+        bus.set_key(3, 1, false);
+
+        // Press and release key 2
+        bus.set_key(4, 2, true);
+        bus.set_key(4, 2, false);
+
+        // Press and release key 3
+        bus.set_key(5, 3, true);
+        bus.set_key(5, 3, false);
+
+        // Now trigger check - should see all three keys!
+        trigger_keypad_check(&mut bus);
+
+        // All edges should be detected (combined in mode 1)
+        let expected = (1 << 1) | (1 << 2) | (1 << 3);
+        let row_data = read_keypad_row(&mut bus, 0); // Any row in mode 1
+        assert_eq!(
+            row_data, expected,
+            "Multiple press-release should accumulate edges. Got: 0x{:04X}, expected: 0x{:04X}",
+            row_data, expected
+        );
     }
 }

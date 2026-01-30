@@ -17,6 +17,13 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
 
 ## Workflow
 
+- **Check findings.md before peripheral fixes** - Before attempting to fix or modify any peripheral emulation (keypad, LCD, timers, interrupts, etc.), ALWAYS read [docs/findings.md](docs/findings.md) first. Look for:
+  - "What we tried that didn't work" sections documenting failed approaches
+  - Critical behavior notes that explain CEmu's implementation details
+  - Hardware quirks that affect the specific peripheral
+
+  This prevents wasting time retreading failed approaches. Many peripheral bugs have subtle causes that aren't obvious from reading code alone.
+
 - **Use the debug tool for testing** - From `core/` directory, use cargo aliases:
   ```bash
   cd core

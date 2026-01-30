@@ -577,6 +577,156 @@ TI-OS typically sets mode 1 (SINGLE) after boot. In this mode:
 
 **Source**: CEmu's `keypad.c`, mode definitions and `keypad_any_check()`
 
+### Mode 1 Combined Data Behavior (CRITICAL)
+
+In mode 1 (SINGLE/any-key), `keypad_any_check()` stores the **combined OR of all pressed keys** into **ALL** data registers, not individual row data:
+
+```c
+// CEmu keypad_any_check():
+for (row = 0; row < rowLimit; row++) {
+    if (queryMask & (1 << row)) {
+        any |= keypad_query_keymap(row);  // OR all row data together
+    }
+}
+// Store 'any' in ALL rows:
+for (row = 0; row < rowLimit; row++) {
+    if (mask & (1 << row)) {
+        keypad.data[row] = any;  // Same combined data in every row!
+    }
+}
+```
+
+This means reading ANY data register in mode 1 returns the same combined bitmask.
+
+**Why**: TI-OS uses mode 1 for quick "is any key pressed?" detection. It doesn't care which specific row - it just needs to know if keys are down.
+
+**Impact**: If you store individual row data instead of combined data, TI-OS sees 0 for rows without pressed keys and fails to detect the key.
+
+### any_key_check Called on INT_STATUS Write (CRITICAL)
+
+CEmu calls `keypad_any_check()` **after clearing INT_STATUS** (write to offset 0x08):
+
+```c
+// CEmu keypad_write():
+case 0x02:  // INT_STATUS
+    write8(keypad.status, bit_offset, keypad.status >> bit_offset & ~byte);
+    keypad_any_check();  // <-- Critical! Updates data registers
+    keypad_intrpt_check();
+    break;
+```
+
+This is the mechanism by which TI-OS sees key data:
+
+1. Key pressed → `any_key_wake` wakes CPU from HALT
+2. TI-OS clears INT_STATUS to acknowledge
+3. **CEmu calls `any_key_check()` which populates data registers**
+4. TI-OS reads data registers → sees key data
+
+**Impact**: Without calling `any_key_check()` on status clear, data registers stay empty even though keys are pressed.
+
+### TI-OS Keypad Flow (Verified)
+
+The actual flow TI-OS uses for regular key input:
+
+1. OS enters HALT (with interrupts enabled but KEYPAD interrupt NOT enabled)
+2. Key pressed → `any_key_wake` signal wakes CPU
+3. OS clears keypad INT_STATUS (triggers `any_key_check()`)
+4. `any_key_check()` fills data registers with combined key bitmask
+5. OS reads data registers → detects which keys are pressed
+6. OS processes key input
+
+**What we tried that didn't work:**
+- Raising KEYPAD interrupt (bit 10) - TI-OS doesn't enable it
+- Storing individual row data - mode 1 expects combined data
+- Computing live data on read - CEmu uses stored data populated by any_key_check
+- Calling `any_key_check` immediately on key press - this clears edge flags too early
+
+### Key Press Edge Detection (CRITICAL)
+
+CEmu uses an **edge detection** mechanism for key presses that is essential for detecting fast key presses:
+
+**How it works in CEmu:**
+
+1. **When key pressed** (`emu_keypad_event`):
+   ```c
+   // Sets TWO bits: current (bit col) AND edge (bit col+8)
+   atomic16_fetch_or_explicit(&keyMap[row], (1 | 1 << 8) << col, ...)
+   ```
+
+2. **When key released:**
+   ```c
+   // Only clears current bit, NOT the edge bit!
+   atomic16_fetch_and_explicit(&keyMap[row], ~(1 << col), ...)
+   ```
+
+3. **When querying (`keypad_query_keymap`):**
+   ```c
+   // Returns current | edge, then clears edge flags
+   data = atomic16_fetch_and_explicit(&keyMap[row], 0xFF, ...)
+   return (data | data >> 8) & 0xFF;  // Combines current and edge
+   ```
+
+**Why this matters:**
+
+On Android, key press events can be very short (<100ms). The key might be pressed and released before TI-OS has a chance to poll the keypad. Without edge detection:
+- Key press sets current state
+- Key release clears current state
+- TI-OS polls keypad → sees 0 → key missed!
+
+With edge detection:
+- Key press sets current AND edge bits
+- Key release clears current bit only (edge preserved)
+- TI-OS polls keypad → query sees edge bit → key detected!
+
+**Our implementation:**
+- `key_edge_flags` array tracks edge state per key
+- `set_key_edge()` sets edge on press (not on release)
+- `query_row_data()` returns current | edge, then clears edge
+- `any_key_check()` uses `query_row_data()` for edge-aware queries
+
+**Source**: CEmu's `keypad.c` lines 174-190 (emu_keypad_event) and lines 49-57 (keypad_query_keymap)
+
+### Port I/O vs Memory-Mapped I/O (CRITICAL)
+
+TI-OS accesses the keypad controller via **port I/O** (IN/OUT instructions using port address 0xAxxxx), NOT via memory-mapped I/O (reads/writes to 0xF50000):
+
+**Port I/O Path (what TI-OS uses):**
+```
+OUT (C),A  where BC=0xA008  →  bus.port_write(0xA008, A)  →  keypad.write(0x08, value)
+```
+
+**Memory-Mapped Path (not used by TI-OS for keypad):**
+```
+LD (0xF50008),A  →  bus.write(0xF50008, value)  →  peripherals.write(...)  →  keypad.write(...)
+```
+
+The eZ80 routes port addresses based on bits 15:12, so port 0xA000-0xAFFF maps to the keypad controller.
+
+**The Bug:**
+Our `bus.port_write()` function called `keypad.write()` directly, but `Peripherals.write()` had additional logic to check the `needs_any_key_check` flag and call `any_key_check()`. Since TI-OS uses port I/O, this flag handling was being bypassed.
+
+**The Fix:**
+Add the same `needs_any_key_check` flag handling to `bus.port_write()` for port 0xA (keypad):
+
+```rust
+0xA => {
+    let offset = (port & 0x7F) as u32;
+    self.ports.keypad.write(offset, value);
+
+    // Handle any_key_check flag (same as Peripherals.write)
+    if self.ports.keypad.needs_any_key_check {
+        self.ports.keypad.needs_any_key_check = false;
+        let key_state = *self.ports.key_state();
+        let should_interrupt = self.ports.keypad.any_key_check(&key_state);
+        // ... handle interrupt
+    }
+}
+```
+
+**Impact**: Without this fix, regular keys would never appear in TI-OS because `any_key_check()` was never called when TI-OS cleared the INT_STATUS register via port I/O.
+
+**Source**: Discovered via diagnostic logging showing `needs_any_key_check` flag being set but `any_key_check()` never being called.
+
 ---
 
-_Last updated: 2026-01-30 - Added keypad findings, Android display working_
+_Last updated: 2026-01-30 - Added port I/O vs memory-mapped I/O finding_

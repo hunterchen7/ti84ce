@@ -123,25 +123,28 @@ impl Peripherals {
     }
 
     /// Update keypad state from emulator
-    /// Also does an immediate keypad check to update status bits
-    /// Similar to CEmu's keypad_any_check() behavior
+    /// Sets key_state and edge flag, but does NOT call any_key_check immediately.
+    /// CEmu's emu_keypad_event just sets the atomic flags and signals CPU -
+    /// the any_key_check is called later when TI-OS writes to registers.
     pub fn set_key(&mut self, row: usize, col: usize, pressed: bool) {
+        // Log ALL key events to verify they're reaching the emulator
+        crate::emu::log_event(&format!(
+            "KEY_EVENT: row={} col={} pressed={} (valid={})",
+            row, col, pressed, row < KEYPAD_ROWS && col < KEYPAD_COLS
+        ));
+
         if row < KEYPAD_ROWS && col < KEYPAD_COLS {
             self.key_state[row][col] = pressed;
 
-            // Do immediate keypad check (like CEmu's keypad_any_check)
-            // This updates the data registers and status bits
-            // Note: We don't raise KEYPAD interrupt here because TI-OS doesn't enable it
-            // TI-OS uses polling to read keypad data registers
-            // CPU wake from HALT is handled by the any_key_wake signal in Emu::set_key()
-            let _should_interrupt = self.keypad.any_key_check(&self.key_state);
+            // Set edge flag on key press (CEmu sets both current and edge bits)
+            // Edge flag persists until queried by any_key_check, allowing
+            // detection of quick press/release even if released before query
+            self.keypad.set_key_edge(row, col, pressed);
 
-            if pressed {
-                crate::log_event(&format!(
-                    "KEYPAD set_key: row={}, col={}, key_state updated",
-                    row, col
-                ));
-            }
+            // NOTE: We do NOT call any_key_check here! CEmu doesn't either.
+            // The any_key_check is triggered by TI-OS writing to registers
+            // (INT_STATUS, CONTROL, SIZE), not by key events themselves.
+            // The edge flag will be seen when TI-OS does its query.
         }
     }
 
@@ -296,7 +299,57 @@ impl Peripherals {
             }
 
             // Keypad Controller (0xF50000 - 0xF5003F)
-            a if a >= KEYPAD_BASE && a < KEYPAD_END => self.keypad.write(a - KEYPAD_BASE, value),
+            a if a >= KEYPAD_BASE && a < KEYPAD_END => {
+                let offset = a - KEYPAD_BASE;
+
+                // DIAGNOSTIC: Unconditional log to see if writes go through here
+                static mut WRITE_COUNT: u32 = 0;
+                unsafe {
+                    WRITE_COUNT += 1;
+                    if WRITE_COUNT % 10000 == 1 {
+                        crate::emu::log_event(&format!(
+                            "PERIPHERALS_KEYPAD_WRITE: offset=0x{:02X} value=0x{:02X} count={}",
+                            offset, value, WRITE_COUNT
+                        ));
+                    }
+                }
+
+                let flag_before = self.keypad.needs_any_key_check;
+                self.keypad.write(offset, value);
+                let flag_after = self.keypad.needs_any_key_check;
+
+                // Debug: log flag state changes
+                if flag_after && !flag_before {
+                    crate::emu::log_event(&format!(
+                        "KEYPAD: offset=0x{:02X} set needs_any_key_check flag",
+                        offset
+                    ));
+                }
+
+                // CEmu calls keypad_any_check() after certain writes (STATUS, SIZE, CONTROL mode 0/1)
+                // This updates data registers with current key state
+                if self.keypad.needs_any_key_check {
+                    self.keypad.needs_any_key_check = false;
+
+                    // Log which register triggered the check
+                    let reg_name = match offset {
+                        0x00 => "CONTROL",
+                        0x04..=0x07 => "SIZE",
+                        0x08 => "INT_STATUS",
+                        _ => "OTHER",
+                    };
+                    crate::emu::log_event(&format!("KEYPAD: {} write triggered any_key_check", reg_name));
+
+                    let should_interrupt = self.keypad.any_key_check(&self.key_state);
+
+                    // Update keypad interrupt state
+                    if should_interrupt {
+                        self.interrupt.raise(sources::KEYPAD);
+                    } else {
+                        self.interrupt.clear_raw(sources::KEYPAD);
+                    }
+                }
+            }
 
             // Watchdog Controller (0xF60000 - 0xF600FF)
             a if a >= WATCHDOG_BASE && a < WATCHDOG_END => self.watchdog.write(a - WATCHDOG_BASE, value),
@@ -515,16 +568,26 @@ mod tests {
     #[test]
     fn test_keypad_routing() {
         let mut p = Peripherals::new();
-        let mut keys = empty_keys();
+        let keys = empty_keys();
 
         // All keys released - should read 0x00 (active-high: no bits set)
-        // Keypad data registers return live state when read (like CEmu's keypad_query_keymap)
         assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 0x00);
 
-        // Press a key
-        keys[0][3] = true;
+        // Set mode to 1 (any-key detection mode, like TI-OS uses)
+        p.write_test(KEYPAD_BASE + 0x00, 0x01);
+
+        // Press a key via set_key() which sets edge flag
+        p.set_key(0, 3, true);
+
+        // Trigger keypad check by writing to INT_STATUS (like TI-OS does)
+        // This calls any_key_check which populates data registers from edges
+        p.write_test(KEYPAD_BASE + 0x08, 0xFF);
+
         // Now reading should show bit 3 set (active-high: 1 = pressed)
-        assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 1 << 3);
+        // In mode 1, data contains combined key data from any_key_check
+        // Copy key_state first to avoid borrow conflict
+        let keys_copy = *p.key_state();
+        assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys_copy), 1 << 3);
     }
 
     #[test]
