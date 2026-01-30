@@ -195,13 +195,17 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [x] ON key (row 2, col 0) raises ON_KEY interrupt and wakes CPU
 - [x] any_key_wake signal for regular keys to wake from HALT
 - [x] Keypad data registers return live key state when polled
-- [ ] Regular keys register in TI-OS after boot (polling works but OS not responding)
+- [x] Regular keys register in TI-OS (keys display on screen)
+- [x] Edge detection mechanism for fast key presses
+- [x] Port I/O path (via IN/OUT instructions) properly triggers any_key_check
+- [ ] Key mappings are correct (currently displaying wrong values)
 
 **Key Findings:**
 - TI-OS polls keypad data registers (0xF50010-0xF5002F) rather than using interrupts
 - ON key uses dedicated ON_KEY interrupt (bit 0) which IS enabled
 - KEYPAD interrupt (bit 10) is NOT enabled by TI-OS
 - CPU wake from HALT is handled via signals, not interrupts for regular keys
+- **CRITICAL**: TI-OS uses port I/O (port 0xA via IN/OUT) not memory-mapped writes, requiring both I/O paths to call any_key_check
 
 ## Milestone 7: Persistence
 

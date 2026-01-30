@@ -7,7 +7,7 @@
 //!
 //! ## Scan Timing
 //!
-//! When scanning is initiated (modes 2 or 3), the controller scans one row
+//! When scanning is initiated (modes 1, 2 or 3), the controller scans one row
 //! at a time with a configurable delay between rows. After all rows are
 //! scanned, status bits are updated and the scan either repeats (continuous)
 //! or stops (single scan).
@@ -74,8 +74,12 @@ mod mode {
 pub struct KeypadController {
     /// Control/mode register
     control: u8,
-    /// Matrix size configuration
-    size: u8,
+    /// Matrix rows configuration (byte 0 of SIZE)
+    rows: u8,
+    /// Matrix cols configuration (byte 1 of SIZE)
+    cols: u8,
+    /// Row mask (bytes 2-3 of SIZE) - determines which rows are active
+    mask: u16,
     /// Interrupt status
     int_status: u8,
     /// Interrupt mask
@@ -92,12 +96,18 @@ pub struct KeypadController {
     scan_wait: u32,
     /// Previous scan results for detecting data changes
     prev_scan_data: [u16; KEYPAD_ROWS],
-    /// Current scan results
+    /// Current scan results (used for mode 1 combined data)
     current_scan_data: [u16; KEYPAD_ROWS],
     /// Whether any key was detected during current scan
     any_key_in_scan: bool,
     /// Whether data changed during current scan
     data_changed_in_scan: bool,
+    /// Flag: any_key_check needs to be called (set by write, cleared by caller)
+    pub needs_any_key_check: bool,
+    /// Edge flags for key presses (CEmu's "edge" bit mechanism)
+    /// Set when key is pressed, cleared when queried by any_key_check
+    /// This allows detecting quick press/release even if released before query
+    key_edge_flags: [[bool; KEYPAD_COLS]; KEYPAD_ROWS],
 }
 
 impl KeypadController {
@@ -105,7 +115,9 @@ impl KeypadController {
     pub fn new() -> Self {
         Self {
             control: 0,
-            size: 0x88, // 8 rows, 8 columns
+            rows: 8,
+            cols: 8,
+            mask: 0x00FF, // Default: all 8 rows enabled
             int_status: 0,
             int_mask: 0,
             scan_row: 0,
@@ -117,13 +129,17 @@ impl KeypadController {
             current_scan_data: [0x0000; KEYPAD_ROWS],
             any_key_in_scan: false,
             data_changed_in_scan: false,
+            needs_any_key_check: false,
+            key_edge_flags: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
         }
     }
 
     /// Reset the keypad controller
     pub fn reset(&mut self) {
         self.control = 0;
-        self.size = 0x88;
+        self.rows = 8;
+        self.cols = 8;
+        self.mask = 0x00FF;
         self.int_status = 0;
         self.int_mask = 0;
         self.scan_row = 0;
@@ -135,6 +151,23 @@ impl KeypadController {
         self.current_scan_data = [0x0000; KEYPAD_ROWS];
         self.any_key_in_scan = false;
         self.data_changed_in_scan = false;
+        self.needs_any_key_check = false;
+        self.key_edge_flags = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
+    }
+
+    /// Update key edge flag (called when key state changes)
+    /// When pressed=true, sets edge flag (will be seen by next query)
+    /// When pressed=false, does NOT clear edge (CEmu behavior)
+    /// Edge flags are cleared only by query_row_data()
+    pub fn set_key_edge(&mut self, row: usize, col: usize, pressed: bool) {
+        if row < KEYPAD_ROWS && col < KEYPAD_COLS && pressed {
+            // Only set edge on press, not on release (CEmu behavior)
+            self.key_edge_flags[row][col] = true;
+            crate::emu::log_event(&format!(
+                "KEYPAD_EDGE_SET: row={} col={} (will be seen by next scan/query)",
+                row, col
+            ));
+        }
     }
 
     /// Get the current scan mode
@@ -164,6 +197,19 @@ impl KeypadController {
             self.int_status |= status::ANY_KEY;
         }
 
+        // Log scan completion with results
+        static mut FINISH_COUNT: u32 = 0;
+        unsafe {
+            FINISH_COUNT += 1;
+            if FINISH_COUNT % 1000 == 1 || self.any_key_in_scan {
+                crate::emu::log_event(&format!(
+                    "KEYPAD_SCAN_DONE: mode={} any_key={} data_changed={} data={:?}",
+                    self.mode(), self.any_key_in_scan, self.data_changed_in_scan,
+                    self.current_scan_data.iter().take(8).collect::<Vec<_>>()
+                ));
+            }
+        }
+
         // Save current scan data as previous for next comparison
         self.prev_scan_data = self.current_scan_data;
 
@@ -187,6 +233,15 @@ impl KeypadController {
             return false;
         }
 
+        // Log scan activity (only occasionally to avoid spam)
+        static mut SCAN_LOG_COUNT: u32 = 0;
+        unsafe {
+            SCAN_LOG_COUNT += 1;
+            if SCAN_LOG_COUNT % 100000 == 1 {
+                crate::emu::log_event(&format!("KEYPAD_SCAN: active, mode={}, row={}", self.mode(), self.scan_row));
+            }
+        }
+
         let mut cycles_left = cycles;
         let mut interrupt_pending = false;
 
@@ -197,13 +252,23 @@ impl KeypadController {
 
                 // Scan the current row
                 if self.scan_row < KEYPAD_ROWS {
-                    let row_data = self.compute_row_data(self.scan_row, key_state);
+                    // Use query_row_data instead of compute_row_data!
+                    // CEmu's keypad_scan_event calls keypad_query_keymap() which:
+                    // 1. Returns current state OR edge flags
+                    // 2. Clears edge flags after reading
+                    // This allows detecting quick press/release even if released before scan
+                    let row_data = self.query_row_data(self.scan_row, key_state);
                     self.current_scan_data[self.scan_row] = row_data;
 
                     // Check if any key is pressed in this row
                     // Any key pressed = non-zero (active high)
                     if row_data != 0 {
                         self.any_key_in_scan = true;
+                        // Log when we detect a key during scan
+                        crate::emu::log_event(&format!(
+                            "KEYPAD_SCAN_KEY: row={} data=0x{:04X}",
+                            self.scan_row, row_data
+                        ));
                     }
 
                     // Check if data changed from previous scan
@@ -234,7 +299,7 @@ impl KeypadController {
         interrupt_pending
     }
 
-    /// Compute row data from key matrix
+    /// Compute row data from key matrix (non-destructive, current state only)
     /// Returns a bitmask where 1 = pressed, 0 = not pressed (active high, matches CEmu)
     fn compute_row_data(&self, row: usize, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u16 {
         let mut result = 0x0000_u16; // All keys released
@@ -244,6 +309,28 @@ impl KeypadController {
                 if key_state[row][col] {
                     result |= 1 << col; // Key pressed = bit set
                 }
+            }
+        }
+
+        result
+    }
+
+    /// Query row data (destructive - clears edge flags after reading)
+    /// Returns current state OR edge flags, then clears edge flags.
+    /// This matches CEmu's keypad_query_keymap() behavior.
+    /// Edge flags are set when key is pressed, preserved through release,
+    /// and only cleared here. This allows detecting quick press/release.
+    fn query_row_data(&mut self, row: usize, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u16 {
+        let mut result = 0x0000_u16;
+
+        if row < KEYPAD_ROWS {
+            for col in 0..KEYPAD_COLS {
+                // Combine current state with edge flag (CEmu: data | data >> 8)
+                if key_state[row][col] || self.key_edge_flags[row][col] {
+                    result |= 1 << col;
+                }
+                // Clear edge flag after query (CEmu: fetch_and with 0xFF mask)
+                self.key_edge_flags[row][col] = false;
             }
         }
 
@@ -284,52 +371,49 @@ impl KeypadController {
     pub fn read(&mut self, addr: u32, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
         match addr {
             regs::CONTROL => {
-                // Log control register reads (first few only to avoid spam)
-                static READ_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                let count = READ_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if count < 5 {
-                    crate::log_event(&format!("KEYPAD CONTROL read: mode={}", self.mode()));
-                }
                 self.control
             }
-            regs::SIZE => self.size,
+            // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
+            a if a >= regs::SIZE && a < regs::SIZE + 4 => {
+                match a - regs::SIZE {
+                    0 => self.rows,
+                    1 => self.cols,
+                    2 => self.mask as u8,
+                    3 => (self.mask >> 8) as u8,
+                    _ => 0,
+                }
+            }
             regs::INT_STATUS => {
-                let status = self.int_status;
-                // Reading status clears the status bits (auto-clear behavior)
-                // This matches CEmu behavior where reading acknowledges the status
-                self.int_status = 0;
-                status
+                // CEmu returns (status & enable), not raw status!
+                self.int_status & self.int_mask
             }
             regs::INT_ACK => self.int_mask,
             a if a >= regs::DATA_BASE && a < regs::DATA_BASE + 0x20 => {
-                // Row data registers
-                // Each row has 2 bytes (16 bits, though only 8 columns used)
+                // Row data registers - each row has 2 bytes (16 bits)
                 let row_offset = (a - regs::DATA_BASE) as usize;
                 let row = row_offset / 2;
                 let byte = row_offset % 2;
 
                 if row < KEYPAD_ROWS {
-                    // Compute live key state directly (like CEmu's keypad_query_keymap)
-                    // This ensures reads always see current key state
-                    let row_data = self.compute_row_data(row, key_state);
+                    // Read from stored data (populated by any_key_check or scan events)
+                    let row_data = self.current_scan_data[row];
 
-                    // Debug: log every 10000th read to show OS is polling
-                    static DATA_READ_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-                    let count = DATA_READ_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if count % 10000 == 0 {
-                        crate::log_event(&format!(
-                            "KEYPAD poll #{} row={} data=0x{:04X}",
-                            count, row, row_data
-                        ));
+                    // Log data reads (only occasionally to avoid spam)
+                    static mut READ_LOG_COUNT: u32 = 0;
+                    unsafe {
+                        READ_LOG_COUNT += 1;
+                        if READ_LOG_COUNT % 50000 == 1 {
+                            crate::emu::log_event(&format!(
+                                "KEYPAD_READ: row={} data=0x{:04X} mode={} key_state={:?}",
+                                row, row_data, self.mode(),
+                                key_state[row].iter().enumerate()
+                                    .filter(|(_, &v)| v)
+                                    .map(|(i, _)| i)
+                                    .collect::<Vec<_>>()
+                            ));
+                        }
                     }
 
-                    // Also log non-zero reads immediately
-                    if row_data != 0 {
-                        crate::log_event(&format!(
-                            "KEYPAD READ row={} data=0x{:04X}",
-                            row, row_data
-                        ));
-                    }
                     if byte == 0 {
                         row_data as u8
                     } else {
@@ -358,8 +442,17 @@ impl KeypadController {
     pub fn peek(&self, addr: u32, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
         match addr {
             regs::CONTROL => self.control,
-            regs::SIZE => self.size,
-            regs::INT_STATUS => self.int_status,
+            // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
+            a if a >= regs::SIZE && a < regs::SIZE + 4 => {
+                match a - regs::SIZE {
+                    0 => self.rows,
+                    1 => self.cols,
+                    2 => self.mask as u8,
+                    3 => (self.mask >> 8) as u8,
+                    _ => 0,
+                }
+            }
+            regs::INT_STATUS => self.int_status & self.int_mask, // CEmu returns masked status
             regs::INT_ACK => self.int_mask,
             a if a >= regs::DATA_BASE && a < regs::DATA_BASE + 0x20 => {
                 let row_offset = (a - regs::DATA_BASE) as usize;
@@ -367,8 +460,8 @@ impl KeypadController {
                 let byte = row_offset % 2;
 
                 if row < KEYPAD_ROWS {
-                    // For peek, return live key state for compatibility
-                    let row_data = self.compute_row_data(row, key_state);
+                    // Return stored scan data (consistent with read behavior)
+                    let row_data = self.current_scan_data[row];
                     if byte == 0 {
                         row_data as u8
                     } else {
@@ -399,36 +492,44 @@ impl KeypadController {
                 self.control = value;
                 let new_mode = self.mode();
 
-                // Log mode changes
+                // Only log when mode actually changes (not 1->1 spam)
                 if old_mode != new_mode {
-                    crate::log_event(&format!(
-                        "KEYPAD MODE change: {} -> {}",
-                        old_mode, new_mode
-                    ));
+                    crate::emu::log_event(&format!("KEYPAD_MODE: changed {} -> {}", old_mode, new_mode));
                 }
 
-                // If scanning mode is being enabled (modes 2 or 3), start a scan
-                if (new_mode & 0x02) != 0 && (old_mode & 0x02) == 0 {
-                    self.start_scan();
-                } else if (new_mode & 0x02) == 0 {
-                    // Scanning disabled
+                // CEmu: if (mode & 2) start scanning, else call any_key_check
+                if (new_mode & 2) != 0 {
+                    // Mode 2 or 3: start scheduled scanning
+                    if old_mode != new_mode || new_mode == mode::MULTI_GROUP {
+                        self.start_scan();
+                    }
+                } else {
+                    // Mode 0 or 1: stop scanning and do immediate key check
                     self.scanning = false;
+                    self.needs_any_key_check = true;
+                    crate::emu::log_event("KEYPAD: CONTROL write set needs_any_key_check=true");
                 }
             }
-            regs::SIZE => {
-                self.size = value;
+            // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
+            a if a >= regs::SIZE && a < regs::SIZE + 4 => {
+                match a - regs::SIZE {
+                    0 => self.rows = value,
+                    1 => self.cols = value,
+                    2 => self.mask = (self.mask & 0xFF00) | (value as u16),
+                    3 => self.mask = (self.mask & 0x00FF) | ((value as u16) << 8),
+                    _ => {}
+                }
+                // CEmu calls keypad_any_check() after SIZE write
+                self.needs_any_key_check = true;
             }
             regs::INT_STATUS => {
-                // Writing clears status bits
+                // Writing clears status bits (write-1-to-clear)
                 self.int_status &= !value;
+                // CEmu calls keypad_any_check() after clearing status!
+                // This updates data registers with current key state.
+                self.needs_any_key_check = true;
             }
             regs::INT_ACK => {
-                if self.int_mask != value {
-                    crate::log_event(&format!(
-                        "KEYPAD INT_MASK change: 0x{:02X} -> 0x{:02X}",
-                        self.int_mask, value
-                    ));
-                }
                 self.int_mask = value;
             }
             // Row wait register (32-bit, little-endian)
@@ -459,28 +560,65 @@ impl KeypadController {
     }
 
     /// Immediate key check - called when a key is pressed to update data registers
-    /// Similar to CEmu's keypad_any_check() function
+    /// Matches CEmu's keypad_any_check() function behavior:
+    /// - Only runs in mode 1 (any-key mode)
+    /// - Queries all rows in the mask and ORs them together (using edge detection)
+    /// - Stores the combined result in ALL data registers
     /// Returns true if an interrupt should be raised
     pub fn any_key_check(&mut self, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> bool {
-        // Update all row data with current key state
-        let mut any_pressed = false;
-        for row in 0..KEYPAD_ROWS {
-            let row_data = self.compute_row_data(row, key_state);
-
-            // Check if data changed
-            if row_data != self.current_scan_data[row] {
-                self.int_status |= status::DATA_CHANGED;
-                self.current_scan_data[row] = row_data;
+        let current_mode = self.mode();
+        // CEmu: if (keypad.mode != 1) return;
+        // Only run in mode 1 (any-key detection mode)
+        if current_mode != mode::SINGLE {
+            // Log only occasionally to avoid spam
+            static mut SKIP_COUNT: u32 = 0;
+            unsafe {
+                SKIP_COUNT += 1;
+                if SKIP_COUNT % 10000 == 1 {
+                    crate::emu::log_event(&format!("KEYPAD_CHECK: skipped (mode={}), count={}", current_mode, SKIP_COUNT));
+                }
             }
+            return false;
+        }
 
-            // Check if any key pressed in this row (non-zero means keys pressed)
-            if row_data != 0 {
-                any_pressed = true;
+        // Compute combined key data from all rows in the mask
+        // Uses query_row_data which includes edge flags and clears them
+        let mut any: u16 = 0;
+        let row_limit = std::cmp::min(self.rows as usize, KEYPAD_ROWS);
+
+        for row in 0..row_limit {
+            // Only query rows that are enabled in the mask
+            if (self.mask & (1 << row)) != 0 {
+                // Use query_row_data for edge detection (CEmu: keypad_query_keymap)
+                any |= self.query_row_data(row, key_state);
             }
         }
 
-        // Set any-key status if keys are pressed
-        if any_pressed {
+        // Apply column mask (data_mask in CEmu)
+        let col_limit = std::cmp::min(self.cols as usize, KEYPAD_COLS);
+        let data_mask: u16 = (1 << col_limit) - 1;
+        any &= data_mask;
+
+        // Log when we actually detect keys
+        if any != 0 {
+            crate::emu::log_event(&format!("KEYPAD_CHECK: detected keys! any=0x{:04X}", any));
+        }
+
+        // CEmu: Store combined 'any' in ALL rows that are in the mask
+        // This is the critical behavior for TI-OS key detection!
+        let row_limit_full = std::cmp::min(self.rows as usize, KEYPAD_ROWS);
+        for row in 0..row_limit_full {
+            if (self.mask & (1 << row)) != 0 {
+                // Check if data changed
+                if self.current_scan_data[row] != any {
+                    self.int_status |= status::DATA_CHANGED;
+                }
+                self.current_scan_data[row] = any;
+            }
+        }
+
+        // Set any-key status if keys are pressed (CEmu: if (any & mask))
+        if any != 0 {
             self.int_status |= status::ANY_KEY;
         }
 
@@ -509,11 +647,20 @@ mod tests {
         [[false; KEYPAD_COLS]; KEYPAD_ROWS]
     }
 
+    /// Set up mode 1 (any-key) and update data registers with key state.
+    /// This matches how TI-OS uses the keypad for key detection.
+    fn update_keys(kp: &mut KeypadController, keys: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) {
+        kp.write(regs::CONTROL, mode::SINGLE);
+        kp.any_key_check(keys);
+    }
+
     #[test]
     fn test_new() {
         let kp = KeypadController::new();
         assert_eq!(kp.mode(), mode::IDLE);
-        assert_eq!(kp.size, 0x88); // 8x8 matrix
+        assert_eq!(kp.rows, 8); // 8 rows
+        assert_eq!(kp.cols, 8); // 8 columns
+        assert_eq!(kp.mask, 0x00FF); // All 8 rows enabled
     }
 
     #[test]
@@ -527,7 +674,8 @@ mod tests {
         assert_eq!(kp.mode(), mode::IDLE);
         assert_eq!(kp.int_mask, 0);
         assert_eq!(kp.int_status, 0);
-        assert_eq!(kp.size, 0x88);
+        assert_eq!(kp.rows, 8);
+        assert_eq!(kp.cols, 8);
     }
 
     #[test]
@@ -550,13 +698,18 @@ mod tests {
         // Press key at row 2, column 3
         keys[2][3] = true;
 
-        // Row 2 should have bit 3 set (active-high: 1 = pressed)
+        // Use mode 1 (any-key) and update data registers (like TI-OS does)
+        update_keys(&mut kp, &keys);
+
+        // In mode 1, all rows contain the combined key data (CEmu behavior)
+        // Bit 3 should be set since we pressed (2, 3)
         let data = kp.read(regs::DATA_BASE + 4, &keys);
         assert_eq!(data, 1 << 3, "Row 2 should have bit 3 set");
 
-        // Other rows should be 0x00
+        // In mode 1, ALL rows contain the same combined data
+        // This is how CEmu's any_key_check works - it stores 'any' in all rows
         let data = kp.read(regs::DATA_BASE, &keys);
-        assert_eq!(data, 0x00, "Row 0 should be 0x00");
+        assert_eq!(data, 1 << 3, "Row 0 should also have the combined data");
     }
 
     #[test]
@@ -566,6 +719,9 @@ mod tests {
 
         // Press key - should only affect low byte
         keys[0][3] = true;
+
+        // Use mode 1 and update data registers
+        update_keys(&mut kp, &keys);
 
         // Low byte should have bit 3 set (active-high)
         let lo = kp.read(regs::DATA_BASE, &keys);
@@ -586,6 +742,9 @@ mod tests {
         keys[0][2] = true;
         keys[0][5] = true;
 
+        // Use mode 1 and update data registers
+        update_keys(&mut kp, &keys);
+
         let data = kp.read(regs::DATA_BASE, &keys);
         let expected = (1 << 0) | (1 << 2) | (1 << 5);
         assert_eq!(data, expected as u8);
@@ -597,10 +756,15 @@ mod tests {
         let keys = empty_key_state();
 
         kp.int_status = 0xFF;
+        kp.int_mask = 0xFF; // Enable all bits so we can read them back
 
         // Writing to INT_STATUS should clear those bits
         kp.write(regs::INT_STATUS, 0x05);
-        assert_eq!(kp.read(regs::INT_STATUS, &keys), 0xFF & !0x05);
+        let status = kp.read(regs::INT_STATUS, &keys);
+        // CEmu returns status & enable, so we expect (0xFF & !0x05) & 0xFF = 0xFA
+        assert_eq!(status, 0xFA);
+        // Internal status should also be 0xFA
+        assert_eq!(kp.int_status, 0xFA);
     }
 
     #[test]

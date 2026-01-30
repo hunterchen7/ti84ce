@@ -34,21 +34,39 @@ mod keypad_integration_test;
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
+use std::sync::Mutex;
 
 pub use emu::{Emu, LcdSnapshot, TimerSnapshot, log_event};
 
+/// Thread-safe wrapper for the emulator.
+/// All FFI calls go through this mutex to prevent data races between
+/// the UI thread (key events) and emulation thread (run_cycles).
+/// This is an opaque type from C's perspective (used via void*).
+pub struct SyncEmu {
+    inner: Mutex<Emu>,
+}
+
+impl SyncEmu {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(Emu::new()),
+        }
+    }
+}
+
 /// Create a new emulator instance.
 /// Returns null on allocation failure.
+/// The returned pointer is thread-safe - all operations are synchronized.
 #[no_mangle]
-pub extern "C" fn emu_create() -> *mut Emu {
-    let emu = Box::new(Emu::new());
+pub extern "C" fn emu_create() -> *mut SyncEmu {
+    let emu = Box::new(SyncEmu::new());
     Box::into_raw(emu)
 }
 
 /// Destroy an emulator instance.
 /// Safe to call with null pointer.
 #[no_mangle]
-pub extern "C" fn emu_destroy(emu: *mut Emu) {
+pub extern "C" fn emu_destroy(emu: *mut SyncEmu) {
     if !emu.is_null() {
         unsafe {
             drop(Box::from_raw(emu));
@@ -66,14 +84,15 @@ pub extern "C" fn emu_set_log_callback(cb: Option<extern "C" fn(*const c_char)>)
 /// Load ROM data into the emulator.
 /// Returns 0 on success, negative error code on failure.
 #[no_mangle]
-pub extern "C" fn emu_load_rom(emu: *mut Emu, data: *const u8, len: usize) -> i32 {
+pub extern "C" fn emu_load_rom(emu: *mut SyncEmu, data: *const u8, len: usize) -> i32 {
     if emu.is_null() || data.is_null() {
         return -1;
     }
 
-    let emu = unsafe { &mut *emu };
+    let sync_emu = unsafe { &*emu };
     let rom_data = unsafe { slice::from_raw_parts(data, len) };
 
+    let mut emu = sync_emu.inner.lock().unwrap();
     match emu.load_rom(rom_data) {
         Ok(()) => 0,
         Err(code) => code,
@@ -82,12 +101,13 @@ pub extern "C" fn emu_load_rom(emu: *mut Emu, data: *const u8, len: usize) -> i3
 
 /// Reset the emulator to initial state.
 #[no_mangle]
-pub extern "C" fn emu_reset(emu: *mut Emu) {
+pub extern "C" fn emu_reset(emu: *mut SyncEmu) {
     if emu.is_null() {
         return;
     }
 
-    let emu = unsafe { &mut *emu };
+    let sync_emu = unsafe { &*emu };
+    let mut emu = sync_emu.inner.lock().unwrap();
     emu.reset();
 }
 
@@ -95,12 +115,13 @@ pub extern "C" fn emu_reset(emu: *mut Emu) {
 /// Returns the number of cycles actually executed.
 /// Also updates the framebuffer with current VRAM contents.
 #[no_mangle]
-pub extern "C" fn emu_run_cycles(emu: *mut Emu, cycles: i32) -> i32 {
+pub extern "C" fn emu_run_cycles(emu: *mut SyncEmu, cycles: i32) -> i32 {
     if emu.is_null() || cycles <= 0 {
         return 0;
     }
 
-    let emu = unsafe { &mut *emu };
+    let sync_emu = unsafe { &*emu };
+    let mut emu = sync_emu.inner.lock().unwrap();
     let executed = emu.run_cycles(cycles as u32) as i32;
     emu.render_frame();
     executed
@@ -110,13 +131,17 @@ pub extern "C" fn emu_run_cycles(emu: *mut Emu, cycles: i32) -> i32 {
 /// The framebuffer is ARGB8888 format, owned by the emulator.
 /// Writes width and height to the provided pointers if non-null.
 /// Returns null if emulator pointer is null.
+///
+/// WARNING: The returned pointer is only valid while the mutex is held.
+/// The caller should copy the framebuffer data immediately.
 #[no_mangle]
-pub extern "C" fn emu_framebuffer(emu: *const Emu, w: *mut i32, h: *mut i32) -> *const u32 {
+pub extern "C" fn emu_framebuffer(emu: *const SyncEmu, w: *mut i32, h: *mut i32) -> *const u32 {
     if emu.is_null() {
         return ptr::null();
     }
 
-    let emu = unsafe { &*emu };
+    let sync_emu = unsafe { &*emu };
+    let emu = sync_emu.inner.lock().unwrap();
     let (width, height) = emu.framebuffer_size();
 
     if !w.is_null() {
@@ -133,40 +158,38 @@ pub extern "C" fn emu_framebuffer(emu: *const Emu, w: *mut i32, h: *mut i32) -> 
 /// row: 0-7, col: 0-7
 /// down: non-zero for pressed, zero for released
 #[no_mangle]
-pub extern "C" fn emu_set_key(emu: *mut Emu, row: i32, col: i32, down: i32) {
+pub extern "C" fn emu_set_key(emu: *mut SyncEmu, row: i32, col: i32, down: i32) {
     if emu.is_null() {
         return;
     }
 
-    log_event(&format!(
-        "KEY row={} col={} down={}",
-        row, col, down != 0
-    ));
-
-    let emu = unsafe { &mut *emu };
+    let sync_emu = unsafe { &*emu };
+    let mut emu = sync_emu.inner.lock().unwrap();
     emu.set_key(row as usize, col as usize, down != 0);
 }
 
 /// Get the size needed for a save state buffer.
 #[no_mangle]
-pub extern "C" fn emu_save_state_size(emu: *const Emu) -> usize {
+pub extern "C" fn emu_save_state_size(emu: *const SyncEmu) -> usize {
     if emu.is_null() {
         return 0;
     }
 
-    let emu = unsafe { &*emu };
+    let sync_emu = unsafe { &*emu };
+    let emu = sync_emu.inner.lock().unwrap();
     emu.save_state_size()
 }
 
 /// Save emulator state to a buffer.
 /// Returns bytes written on success, negative error code on failure.
 #[no_mangle]
-pub extern "C" fn emu_save_state(emu: *const Emu, out: *mut u8, cap: usize) -> i32 {
+pub extern "C" fn emu_save_state(emu: *const SyncEmu, out: *mut u8, cap: usize) -> i32 {
     if emu.is_null() || out.is_null() {
         return -1;
     }
 
-    let emu = unsafe { &*emu };
+    let sync_emu = unsafe { &*emu };
+    let emu = sync_emu.inner.lock().unwrap();
     let buffer = unsafe { slice::from_raw_parts_mut(out, cap) };
 
     match emu.save_state(buffer) {
@@ -178,12 +201,13 @@ pub extern "C" fn emu_save_state(emu: *const Emu, out: *mut u8, cap: usize) -> i
 /// Load emulator state from a buffer.
 /// Returns 0 on success, negative error code on failure.
 #[no_mangle]
-pub extern "C" fn emu_load_state(emu: *mut Emu, data: *const u8, len: usize) -> i32 {
+pub extern "C" fn emu_load_state(emu: *mut SyncEmu, data: *const u8, len: usize) -> i32 {
     if emu.is_null() || data.is_null() {
         return -1;
     }
 
-    let emu = unsafe { &mut *emu };
+    let sync_emu = unsafe { &*emu };
+    let mut emu = sync_emu.inner.lock().unwrap();
     let buffer = unsafe { slice::from_raw_parts(data, len) };
 
     match emu.load_state(buffer) {
@@ -231,6 +255,43 @@ mod tests {
         let emu = emu_create();
         emu_set_key(emu, 0, 0, 1);
         emu_set_key(emu, 0, 0, 0);
+        emu_destroy(emu);
+    }
+
+    #[test]
+    fn test_thread_safety() {
+        use std::thread;
+        use std::sync::Arc;
+
+        let emu = emu_create();
+
+        // Load a minimal ROM so we can run cycles
+        let rom = vec![0x00, 0x00, 0x76]; // NOP, NOP, HALT
+        emu_load_rom(emu, rom.as_ptr(), rom.len());
+
+        // Wrap in Arc for sharing across threads
+        let emu_ptr = emu as usize; // Convert to usize for Send
+
+        // Spawn threads that access the emulator concurrently
+        let handles: Vec<_> = (0..4).map(|i| {
+            thread::spawn(move || {
+                let emu = emu_ptr as *mut SyncEmu;
+                for _ in 0..100 {
+                    if i % 2 == 0 {
+                        emu_set_key(emu, (i % 8) as i32, 0, 1);
+                        emu_set_key(emu, (i % 8) as i32, 0, 0);
+                    } else {
+                        emu_run_cycles(emu, 10);
+                    }
+                }
+            })
+        }).collect();
+
+        // Wait for all threads
+        for h in handles {
+            h.join().unwrap();
+        }
+
         emu_destroy(emu);
     }
 }

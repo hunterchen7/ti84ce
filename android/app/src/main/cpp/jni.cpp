@@ -42,6 +42,9 @@ static inline jlong fromEmu(Emu* emu) {
 
 JNIEXPORT jlong JNICALL
 Java_com_calc_emulator_EmulatorBridge_nativeCreate(JNIEnv* env, jobject thiz) {
+    LOGI("========================================");
+    LOGI("=== TI-84 CE Emulator Starting ===");
+    LOGI("========================================");
     LOGI("Creating emulator instance");
     static bool log_set = false;
     if (!log_set) {

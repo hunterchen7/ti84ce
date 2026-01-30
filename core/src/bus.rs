@@ -834,6 +834,21 @@ impl Bus {
                 // Keypad - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
                 self.ports.keypad.write(offset, value);
+
+                // Handle any_key_check flag (same as Peripherals.write)
+                // This is critical for TI-OS to see key data!
+                if self.ports.keypad.needs_any_key_check {
+                    self.ports.keypad.needs_any_key_check = false;
+
+                    let key_state = *self.ports.key_state();
+                    let should_interrupt = self.ports.keypad.any_key_check(&key_state);
+
+                    if should_interrupt {
+                        self.ports.interrupt.raise(crate::peripherals::interrupt::sources::KEYPAD);
+                    } else {
+                        self.ports.interrupt.clear_raw(crate::peripherals::interrupt::sources::KEYPAD);
+                    }
+                }
             }
             0xD => {
                 // SPI - mask with 0x7F

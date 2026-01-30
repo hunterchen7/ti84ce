@@ -307,12 +307,12 @@ impl Cpu {
         // This is separate from the interrupt mechanism - it just wakes the CPU so
         // the OS can poll the keypad registers and see the key press.
         if self.any_key_wake {
-            self.any_key_wake = false;
             if self.halted {
                 crate::log_event(&format!(
                     "ANY_KEY_WAKE: waking CPU from HALT at PC=0x{:06X}, iff1={}",
                     self.pc, self.iff1
                 ));
+                self.any_key_wake = false;
                 self.halted = false;
                 bus.add_cycles(4); // Wake from halt cycle cost
                 return (bus.cycles() - start_cycles) as u32;
