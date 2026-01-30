@@ -107,6 +107,9 @@ pub struct Cpu {
     /// ON key wake signal - wakes CPU from HALT even with interrupts disabled
     /// This is a TI-84 CE specific feature where the ON key can always wake the calculator
     pub on_key_wake: bool,
+    /// Any key wake signal - wakes CPU from HALT when any key is pressed
+    /// Like CEmu's CPU_SIGNAL_ANY_KEY, this allows keys to wake the CPU
+    pub any_key_wake: bool,
     /// EI delay counter - EI enables interrupts after the NEXT instruction
     /// When EI is executed, this is set to 2. It decrements each step, and when
     /// it reaches 0, IFF1/IFF2 are set to true.
@@ -174,6 +177,7 @@ impl Cpu {
             irq_pending: false,
             nmi_pending: false,
             on_key_wake: false,
+            any_key_wake: false,
             ei_delay: 0,
 
             // Per-instruction modes (reset to ADL at start of each instruction)
@@ -224,6 +228,7 @@ impl Cpu {
         self.irq_pending = false;
         self.nmi_pending = false;
         self.on_key_wake = false;
+        self.any_key_wake = false;
         self.ei_delay = 0;
         self.l = false;
         self.il = false;
@@ -293,6 +298,22 @@ impl Cpu {
                     self.iff1 = true;
                     self.iff2 = true;
                 }
+                bus.add_cycles(4); // Wake from halt cycle cost
+                return (bus.cycles() - start_cycles) as u32;
+            }
+        }
+
+        // Check for any key wake - wakes CPU from HALT like CEmu's CPU_SIGNAL_ANY_KEY
+        // This is separate from the interrupt mechanism - it just wakes the CPU so
+        // the OS can poll the keypad registers and see the key press.
+        if self.any_key_wake {
+            self.any_key_wake = false;
+            if self.halted {
+                crate::log_event(&format!(
+                    "ANY_KEY_WAKE: waking CPU from HALT at PC=0x{:06X}, iff1={}",
+                    self.pc, self.iff1
+                ));
+                self.halted = false;
                 bus.add_cycles(4); // Wake from halt cycle cost
                 return (bus.cycles() - start_cycles) as u32;
             }

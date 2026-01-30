@@ -146,6 +146,14 @@ class EmulatorBridge {
      */
     fun isCreated(): Boolean = handle != 0L
 
+    /**
+     * Drain pending emulator log lines (if any).
+     */
+    fun drainLogs(): List<String> {
+        if (handle == 0L) return emptyList()
+        return nativeDrainLogs(handle)?.toList().orEmpty()
+    }
+
     // Native methods
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
@@ -156,6 +164,7 @@ class EmulatorBridge {
     private external fun nativeGetHeight(handle: Long): Int
     private external fun nativeCopyFramebuffer(handle: Long, outArgb: IntArray): Int
     private external fun nativeSetKey(handle: Long, row: Int, col: Int, down: Boolean)
+    private external fun nativeDrainLogs(handle: Long): Array<String>?
     private external fun nativeSaveStateSize(handle: Long): Long
     private external fun nativeSaveState(handle: Long, outData: ByteArray): Int
     private external fun nativeLoadState(handle: Long, stateData: ByteArray): Int

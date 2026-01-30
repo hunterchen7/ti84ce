@@ -5,6 +5,12 @@
 use crate::bus::Bus;
 use crate::cpu::{Cpu, InterruptMode};
 use crate::scheduler::{EventId, Scheduler};
+use std::ffi::CString;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::os::raw::c_char;
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
 /// TI-84 Plus CE screen dimensions
 pub const SCREEN_WIDTH: usize = 320;
@@ -79,6 +85,24 @@ impl ExecutionHistory {
     }
 }
 
+static LOG_CALLBACK: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
+
+pub(crate) fn set_log_callback(cb: Option<extern "C" fn(*const c_char)>) {
+    let ptr = cb.map(|f| f as *mut std::ffi::c_void).unwrap_or(ptr::null_mut());
+    LOG_CALLBACK.store(ptr, Ordering::SeqCst);
+}
+
+/// Public logging function for use by other modules
+pub fn log_event(message: &str) {
+    let cb_ptr = LOG_CALLBACK.load(Ordering::SeqCst);
+    if !cb_ptr.is_null() {
+        let cb: extern "C" fn(*const c_char) = unsafe { std::mem::transmute(cb_ptr) };
+        if let Ok(cstr) = std::ffi::CString::new(message) {
+            cb(cstr.as_ptr());
+        }
+    }
+}
+
 /// Reason for stopping execution
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -109,6 +133,10 @@ pub struct Emu {
     /// ROM loaded flag
     rom_loaded: bool,
 
+    /// Calculator is powered on (ON key was pressed)
+    /// CPU won't execute until this is true
+    powered_on: bool,
+
     /// Execution history for crash diagnostics
     history: ExecutionHistory,
 
@@ -117,6 +145,8 @@ pub struct Emu {
 
     /// Total cycles executed
     total_cycles: u64,
+    /// Whether we've already logged a HALT state
+    halt_logged: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,9 +179,11 @@ impl Emu {
             scheduler: Scheduler::new(),
             framebuffer: vec![0xFF000000; SCREEN_WIDTH * SCREEN_HEIGHT],
             rom_loaded: false,
+            powered_on: false,
             history: ExecutionHistory::new(),
             last_stop: StopReason::CyclesComplete,
             total_cycles: 0,
+            halt_logged: false,
         }
     }
 
@@ -163,18 +195,22 @@ impl Emu {
 
         self.bus.load_rom(data).map_err(|_| -3)?; // -3 = ROM too large
         self.rom_loaded = true;
+        Self::log_event(&format!("ROM_LOADED bytes={}", data.len()));
         self.reset();
         Ok(())
     }
 
     /// Reset emulator to initial state
     pub fn reset(&mut self) {
+        Self::log_event("RESET");
         self.cpu.reset();
         self.bus.reset();
         self.scheduler.reset();
         self.history.clear();
         self.last_stop = StopReason::CyclesComplete;
         self.total_cycles = 0;
+        self.halt_logged = false;
+        self.powered_on = false; // Require ON key press to power on again
 
         // Clear framebuffer to black
         for pixel in &mut self.framebuffer {
@@ -184,7 +220,7 @@ impl Emu {
 
     /// Run for specified cycles, returns cycles actually executed
     pub fn run_cycles(&mut self, cycles: u32) -> u32 {
-        if !self.rom_loaded {
+        if !self.rom_loaded || !self.powered_on {
             return 0;
         }
 
@@ -227,10 +263,12 @@ impl Emu {
                 self.scheduler.set(EventId::Rtc, 1);
             }
 
-            // Check for halt
+            // Don't return early when halted - peripherals need to keep ticking!
+            // CEmu continues the main loop when halted, fast-forwarding to next scheduled event.
+            // We do similar by continuing the loop - cpu.step() returns quickly with 4 cycles,
+            // which allows peripherals to tick and generate interrupts that can wake the CPU.
             if self.cpu.halted {
                 self.last_stop = StopReason::Halted;
-                return (self.total_cycles - start_cycles) as u32;
             }
         }
 
@@ -310,8 +348,26 @@ impl Emu {
     }
 
     /// Set key state
+    /// Special handling for ON key (row 2, col 0) which has dedicated interrupt
     pub fn set_key(&mut self, row: usize, col: usize, down: bool) {
-        self.bus.set_key(row, col, down);
+        // ON key (row 2, col 0) has special handling - it can wake from HALT
+        // even with interrupts disabled and raises dedicated ON_KEY interrupt
+        if row == 2 && col == 0 {
+            if down {
+                self.press_on_key();
+            } else {
+                self.release_on_key();
+            }
+        } else {
+            self.bus.set_key(row, col, down);
+            // Set any_key_wake signal to wake CPU from HALT (like CEmu's CPU_SIGNAL_ANY_KEY)
+            // This allows keys to wake the CPU so the OS can poll the keypad
+            // We do NOT raise any interrupt here - regular keys don't use interrupts
+            // TI-OS polls the keypad data registers to detect which key was pressed
+            if down {
+                self.cpu.any_key_wake = true;
+            }
+        }
     }
 
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
@@ -319,6 +375,9 @@ impl Emu {
     pub fn press_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
+        Self::log_event("ON_KEY pressed");
+        // Power on the calculator
+        self.powered_on = true;
         // Set the wake signal - this wakes CPU from HALT regardless of IFF1
         self.cpu.on_key_wake = true;
 
@@ -339,6 +398,7 @@ impl Emu {
     pub fn release_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
+        Self::log_event("ON_KEY released");
         // Clear ON key in keypad matrix
         self.bus.set_key(2, 0, false);
 
@@ -384,6 +444,22 @@ impl Emu {
                 let argb = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
                 self.framebuffer[y * SCREEN_WIDTH + x] = argb;
             }
+        }
+    }
+
+    /// Append an emulator event to a log callback or emu.log (best-effort).
+    fn log_event(message: &str) {
+        let cb_ptr = LOG_CALLBACK.load(Ordering::SeqCst);
+        if !cb_ptr.is_null() {
+            if let Ok(cstr) = CString::new(message) {
+                let cb: extern "C" fn(*const c_char) = unsafe { std::mem::transmute(cb_ptr) };
+                cb(cstr.as_ptr());
+            }
+            return;
+        }
+
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("emu.log") {
+            let _ = writeln!(file, "{message}");
         }
     }
 
@@ -835,11 +911,14 @@ mod tests {
         // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
         let rom = vec![0x00, 0x00, 0x00, 0x76]; // NOP, NOP, NOP, HALT
         emu.load_rom(&rom).unwrap();
+        emu.powered_on = true; // Power on for test
         let executed = emu.run_cycles(1000);
 
         // Should have executed some cycles and halted
+        // Note: Since we don't return early on HALT (to keep peripherals ticking),
+        // the stop reason is CyclesComplete, but the CPU IS halted.
         assert!(executed > 0);
-        assert_eq!(emu.last_stop_reason(), StopReason::Halted);
+        assert_eq!(emu.last_stop_reason(), StopReason::CyclesComplete);
         assert!(emu.cpu.halted);
     }
 
@@ -849,6 +928,7 @@ mod tests {
         // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
         let rom = vec![0x00, 0x76]; // NOP, HALT
         emu.load_rom(&rom).unwrap();
+        emu.powered_on = true; // Power on for test
         emu.run_cycles(100);
         emu.set_key(1, 1, true);
         emu.reset();
@@ -856,6 +936,7 @@ mod tests {
         assert_eq!(emu.cpu.pc, 0);
         assert!(!emu.bus.key_state()[1][1]);
         assert_eq!(emu.total_cycles, 0);
+        assert!(!emu.powered_on); // Reset should power off the calculator
     }
 
     #[test]
@@ -864,6 +945,7 @@ mod tests {
         // Minimal ROM - flash defaults to 0xFF so we only need the bytes we use
         let rom = vec![0x00, 0x00, 0x00, 0x76]; // NOP, NOP, NOP, HALT
         emu.load_rom(&rom).unwrap();
+        emu.powered_on = true; // Power on for test
         emu.run_cycles(100);
 
         let history = emu.dump_history();
@@ -878,6 +960,7 @@ mod tests {
         // After DI + HALT, interrupts are disabled but ON key should still wake
         let rom = vec![0xF3, 0x76, 0x00, 0x00];
         emu.load_rom(&rom).unwrap();
+        emu.powered_on = true; // Power on for test (without ON key side effects)
 
         // Run until HALT
         emu.run_cycles(100);
@@ -903,6 +986,7 @@ mod tests {
         // ROM: DI (F3), HALT (76), NOP (00)
         let rom = vec![0xF3, 0x76, 0x00];
         emu.load_rom(&rom).unwrap();
+        emu.powered_on = true; // Power on for test (without ON key side effects)
 
         // Run until HALT with interrupts disabled
         emu.run_cycles(100);
@@ -959,6 +1043,7 @@ mod tests {
         // ROM: DI (F3), HALT (76), NOP (00)
         let rom = vec![0xF3, 0x76, 0x00];
         emu.load_rom(&rom).unwrap();
+        emu.powered_on = true; // Power on for test (without triggering ON key wake)
 
         // Run until HALT
         emu.run_cycles(100);

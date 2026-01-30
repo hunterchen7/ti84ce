@@ -173,7 +173,48 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [ ] Android save/load state
 - [ ] State persistence verified
 
-## Milestone 7: Android Polish
+## Milestone 6: Android Display Integration ✓
+
+**Goal:** Display emulator screen on Android device.
+
+**Deliverables:**
+
+- [x] VRAM render_frame() FFI function exposed
+- [x] JNI bridge calls render_frame() after emu_run_cycles()
+- [x] Framebuffer correctly converted RGB565 → ARGB8888
+- [x] Android Bitmap displays boot screen
+- [x] ON key powers on calculator and wakes from HALT
+- [x] Screen shows "RAM Cleared" message after boot
+
+**Current Status:**
+- Android app displays the TI-84 CE boot screen correctly
+- ON key works to power on and wake from HALT
+- Regular keypad input still in progress (OS polling mechanism)
+
+### 6a: Keypad Integration (In Progress)
+- [x] ON key (row 2, col 0) raises ON_KEY interrupt and wakes CPU
+- [x] any_key_wake signal for regular keys to wake from HALT
+- [x] Keypad data registers return live key state when polled
+- [ ] Regular keys register in TI-OS after boot (polling works but OS not responding)
+
+**Key Findings:**
+- TI-OS polls keypad data registers (0xF50010-0xF5002F) rather than using interrupts
+- ON key uses dedicated ON_KEY interrupt (bit 0) which IS enabled
+- KEYPAD interrupt (bit 10) is NOT enabled by TI-OS
+- CPU wake from HALT is handled via signals, not interrupts for regular keys
+
+## Milestone 7: Persistence
+
+**Goal:** State survives app restarts.
+
+**Deliverables:**
+
+- [ ] Flash write/erase behavior
+- [ ] Save-state buffer APIs
+- [ ] Android save/load state
+- [ ] State persistence verified
+
+## Milestone 8: Android Polish
 
 **Goal:** Production-ready Android app.
 

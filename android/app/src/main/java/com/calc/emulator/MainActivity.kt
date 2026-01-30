@@ -12,6 +12,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -32,9 +33,13 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.size
@@ -46,13 +51,15 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity() {
     companion object {
         private const val TAG = "MainActivity"
-        const val CYCLES_PER_TICK = 10000
+        // 48MHz / 60 FPS = 800,000 cycles per frame for real-time
+        const val CYCLES_PER_TICK = 800_000
         const val FRAME_INTERVAL_MS = 16L // ~60 FPS
     }
 
@@ -86,12 +93,20 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun EmulatorScreen(emulator: EmulatorBridge) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     // Emulator state
     var isRunning by remember { mutableStateOf(false) }
     var romLoaded by remember { mutableStateOf(false) }
     var romName by remember { mutableStateOf<String?>(null) }
+    var romSize by remember { mutableIntStateOf(0) }
+    var loadError by remember { mutableStateOf<String?>(null) }
+
+    // Debug info
+    var totalCyclesExecuted by remember { mutableLongStateOf(0L) }
+    var frameCounter by remember { mutableIntStateOf(0) }
+    var showDebug by remember { mutableStateOf(true) }
+    var lastKeyPress by remember { mutableStateOf("None") }
+    val logLines = remember { mutableStateListOf<String>() }
 
     // Framebuffer bitmap
     val bitmap = remember {
@@ -101,7 +116,6 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
             Bitmap.Config.ARGB_8888
         )
     }
-    var frameCounter by remember { mutableIntStateOf(0) }
 
     // ROM picker launcher
     val romPicker = rememberLauncherForActivityResult(
@@ -112,16 +126,24 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                 val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
                 inputStream?.use { stream ->
                     val romBytes = stream.readBytes()
+                    romSize = romBytes.size
                     val result = emulator.loadRom(romBytes)
                     if (result == 0) {
                         romLoaded = true
                         romName = uri.lastPathSegment ?: "ROM"
+                        loadError = null
+                        totalCyclesExecuted = 0L
+                        frameCounter = 0
+                        logLines.clear()
+                        isRunning = true  // Auto-start to show boot process
                         Log.i("EmulatorScreen", "ROM loaded: ${romBytes.size} bytes")
                     } else {
+                        loadError = "Failed to load ROM (error: $result)"
                         Log.e("EmulatorScreen", "Failed to load ROM: $result")
                     }
                 }
             } catch (e: Exception) {
+                loadError = "Error: ${e.message}"
                 Log.e("EmulatorScreen", "Error loading ROM", e)
             }
         }
@@ -131,19 +153,159 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     LaunchedEffect(isRunning) {
         if (isRunning) {
             while (isRunning) {
-                withContext(Dispatchers.Default) {
+                val executed = withContext(Dispatchers.Default) {
                     emulator.runCycles(MainActivity.CYCLES_PER_TICK)
                 }
+                totalCyclesExecuted += executed
                 frameCounter++
                 delay(MainActivity.FRAME_INTERVAL_MS)
             }
         }
     }
 
-    // Update framebuffer on each frame
+    // Update framebuffer on each frame and drain logs
     LaunchedEffect(frameCounter) {
         emulator.copyFramebufferToBitmap(bitmap)
+        val newLogs = emulator.drainLogs()
+        if (newLogs.isNotEmpty()) {
+            logLines.addAll(newLogs)
+            val maxLogs = 200
+            if (logLines.size > maxLogs) {
+                repeat(logLines.size - maxLogs) { logLines.removeAt(0) }
+            }
+        }
     }
+
+    // Show ROM loading screen if no ROM loaded, otherwise show emulator
+    if (!romLoaded) {
+        RomLoadingScreen(
+            onLoadRom = { romPicker.launch(arrayOf("*/*")) },
+            loadError = loadError
+        )
+    } else {
+        EmulatorView(
+            emulator = emulator,
+            bitmap = bitmap,
+            romName = romName,
+            romSize = romSize,
+            isRunning = isRunning,
+            onToggleRunning = { isRunning = !isRunning },
+            onReset = {
+                emulator.reset()
+                totalCyclesExecuted = 0L
+                frameCounter = 0
+                logLines.clear()
+            },
+            onLoadNewRom = { romPicker.launch(arrayOf("*/*")) },
+            frameCounter = frameCounter,
+            totalCycles = totalCyclesExecuted,
+            showDebug = showDebug,
+            onToggleDebug = { showDebug = !showDebug },
+            lastKeyPress = lastKeyPress,
+            logs = logLines,
+            onKeyDown = { row, col ->
+                lastKeyPress = "($row,$col) DOWN"
+                Log.d("Keypad", "Key DOWN: row=$row col=$col")
+                emulator.setKey(row, col, true)
+                frameCounter++
+            },
+            onKeyUp = { row, col ->
+                lastKeyPress = "($row,$col) UP"
+                Log.d("Keypad", "Key UP: row=$row col=$col")
+                emulator.setKey(row, col, false)
+                frameCounter++
+            }
+        )
+    }
+}
+
+@Composable
+fun RomLoadingScreen(
+    onLoadRom: () -> Unit,
+    loadError: String?
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(32.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Text(
+            text = "TI-84 Plus CE",
+            fontSize = 28.sp,
+            fontWeight = FontWeight.Bold,
+            color = Color.White
+        )
+
+        Text(
+            text = "Emulator",
+            fontSize = 20.sp,
+            color = Color.Gray,
+            modifier = Modifier.padding(bottom = 48.dp)
+        )
+
+        Button(
+            onClick = onLoadRom,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF4CAF50)
+            )
+        ) {
+            Text("Import ROM", fontSize = 18.sp)
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        Text(
+            text = "Select a TI-84 Plus CE ROM file to begin",
+            fontSize = 14.sp,
+            color = Color.Gray
+        )
+
+        loadError?.let { error ->
+            Spacer(modifier = Modifier.height(24.dp))
+            Text(
+                text = error,
+                fontSize = 14.sp,
+                color = Color(0xFFFF5722)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(48.dp))
+
+        Text(
+            text = "You must provide your own legally obtained ROM file.",
+            fontSize = 12.sp,
+            color = Color.DarkGray
+        )
+    }
+}
+
+@Composable
+fun EmulatorView(
+    emulator: EmulatorBridge,
+    bitmap: Bitmap,
+    romName: String?,
+    romSize: Int,
+    isRunning: Boolean,
+    onToggleRunning: () -> Unit,
+    onReset: () -> Unit,
+    onLoadNewRom: () -> Unit,
+    frameCounter: Int,
+    totalCycles: Long,
+    showDebug: Boolean,
+    onToggleDebug: () -> Unit,
+    lastKeyPress: String,
+    logs: List<String>,
+    onKeyDown: (row: Int, col: Int) -> Unit,
+    onKeyUp: (row: Int, col: Int) -> Unit
+) {
+    var overlayOffset by remember { mutableStateOf(Offset(6f, 6f)) }
+    var overlaySize by remember { mutableStateOf(IntSize.Zero) }
+    val density = LocalDensity.current
 
     Column(
         modifier = Modifier
@@ -159,16 +321,16 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
             horizontalArrangement = Arrangement.SpaceEvenly
         ) {
             Button(
-                onClick = { romPicker.launch(arrayOf("*/*")) },
+                onClick = onLoadNewRom,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (romLoaded) Color(0xFF4CAF50) else MaterialTheme.colorScheme.primary
+                    containerColor = Color(0xFF2196F3)
                 )
             ) {
-                Text(if (romLoaded) "ROM Loaded" else "Import ROM")
+                Text("ROM")
             }
 
             Button(
-                onClick = { isRunning = !isRunning },
+                onClick = onToggleRunning,
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isRunning) Color(0xFFFF5722) else Color(0xFF4CAF50)
                 )
@@ -176,34 +338,30 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                 Text(if (isRunning) "Pause" else "Run")
             }
 
-            Button(
-                onClick = {
-                    emulator.reset()
-                    frameCounter++
-                }
-            ) {
+            Button(onClick = onReset) {
                 Text("Reset")
+            }
+
+            Button(
+                onClick = onToggleDebug,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (showDebug) Color(0xFF9C27B0) else Color.DarkGray
+                )
+            ) {
+                Text("Debug")
             }
         }
 
-        // ROM info
-        romName?.let {
-            Text(
-                text = "ROM: $it",
-                fontSize = 12.sp,
-                color = Color.Gray,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
-        }
-
         // Screen display
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(320f / 240f)
                 .background(Color.Black, RoundedCornerShape(4.dp))
                 .padding(4.dp)
         ) {
+            val maxWidthPx = with(density) { maxWidth.toPx() }
+            val maxHeightPx = with(density) { maxHeight.toPx() }
             Image(
                 bitmap = bitmap.asImageBitmap(),
                 contentDescription = "Emulator screen",
@@ -211,6 +369,78 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                 contentScale = ContentScale.Fit,
                 filterQuality = FilterQuality.None
             )
+            if (showDebug) {
+                Column(
+                    modifier = Modifier
+                        .offset { IntOffset(overlayOffset.x.roundToInt(), overlayOffset.y.roundToInt()) }
+                        .onSizeChanged { overlaySize = it }
+                        .pointerInput(maxWidthPx, maxHeightPx, overlaySize) {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                val newX = overlayOffset.x + dragAmount.x
+                                val newY = overlayOffset.y + dragAmount.y
+                                val maxX = (maxWidthPx - overlaySize.width).coerceAtLeast(0f)
+                                val maxY = (maxHeightPx - overlaySize.height).coerceAtLeast(0f)
+                                overlayOffset = Offset(
+                                    newX.coerceIn(0f, maxX),
+                                    newY.coerceIn(0f, maxY)
+                                )
+                            }
+                        }
+                        .background(Color(0xCC1A1A2E), RoundedCornerShape(4.dp))
+                        .padding(6.dp)
+                ) {
+                    Text(
+                        text = "ROM: ${romName ?: "Unknown"} (${romSize / 1024}KB)",
+                        fontSize = 10.sp,
+                        color = Color(0xFF4FC3F7),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Frames: $frameCounter | Cycles: ${formatCycles(totalCycles)}",
+                        fontSize = 10.sp,
+                        color = Color(0xFF81C784),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Speed: ${MainActivity.CYCLES_PER_TICK / 1000}K cycles/tick @ ${1000 / MainActivity.FRAME_INTERVAL_MS} FPS",
+                        fontSize = 10.sp,
+                        color = Color(0xFFFFB74D),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Status: ${if (isRunning) "RUNNING" else "PAUSED"}",
+                        fontSize = 10.sp,
+                        color = if (isRunning) Color(0xFF4CAF50) else Color(0xFFFF5722),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text(
+                        text = "Last Key: $lastKeyPress",
+                        fontSize = 10.sp,
+                        color = Color(0xFFE1BEE7),
+                        fontFamily = FontFamily.Monospace
+                    )
+                    val displayLogs = logs.takeLast(6)
+                    if (displayLogs.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(3.dp))
+                        Text(
+                            text = "Logs:",
+                            fontSize = 9.sp,
+                            color = Color(0xFFB0BEC5),
+                            fontFamily = FontFamily.Monospace
+                        )
+                        displayLogs.forEach { line ->
+                            Text(
+                                text = line,
+                                fontSize = 9.sp,
+                                color = Color(0xFFB0BEC5),
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -220,15 +450,18 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            onKeyDown = { row, col ->
-                emulator.setKey(row, col, true)
-                frameCounter++
-            },
-            onKeyUp = { row, col ->
-                emulator.setKey(row, col, false)
-                frameCounter++
-            }
+            onKeyDown = onKeyDown,
+            onKeyUp = onKeyUp
         )
+    }
+}
+
+private fun formatCycles(cycles: Long): String {
+    return when {
+        cycles >= 1_000_000_000 -> String.format("%.2fG", cycles / 1_000_000_000.0)
+        cycles >= 1_000_000 -> String.format("%.2fM", cycles / 1_000_000.0)
+        cycles >= 1_000 -> String.format("%.1fK", cycles / 1_000.0)
+        else -> cycles.toString()
     }
 }
 
@@ -269,13 +502,14 @@ fun Keypad(
         verticalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         // Row 1: Function keys (y=, window, zoom, trace, graph)
+        // CEmu matrix row 1: graph(0), trace(1), zoom(2), window(3), yequ(4), 2nd(5), mode(6), del(7)
         KeyRow(
             keys = listOf(
-                KeyDef("y=", 0, 0, KeyStyle.WHITE, secondLabel = "stat plot", alphaLabel = "f1"),
-                KeyDef("window", 0, 1, KeyStyle.WHITE, secondLabel = "tblset", alphaLabel = "f2"),
-                KeyDef("zoom", 0, 2, KeyStyle.WHITE, secondLabel = "format", alphaLabel = "f3"),
-                KeyDef("trace", 0, 3, KeyStyle.WHITE, secondLabel = "calc", alphaLabel = "f4"),
-                KeyDef("graph", 0, 4, KeyStyle.WHITE, secondLabel = "table", alphaLabel = "f5")
+                KeyDef("y=", 1, 4, KeyStyle.WHITE, secondLabel = "stat plot", alphaLabel = "f1"),
+                KeyDef("window", 1, 3, KeyStyle.WHITE, secondLabel = "tblset", alphaLabel = "f2"),
+                KeyDef("zoom", 1, 2, KeyStyle.WHITE, secondLabel = "format", alphaLabel = "f3"),
+                KeyDef("trace", 1, 1, KeyStyle.WHITE, secondLabel = "calc", alphaLabel = "f4"),
+                KeyDef("graph", 1, 0, KeyStyle.WHITE, secondLabel = "table", alphaLabel = "f5")
             ),
             modifier = Modifier.weight(1f),
             onKeyDown = onKeyDown,
@@ -295,51 +529,53 @@ fun Keypad(
                 verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 // Row 2: 2nd, mode, del
+                // CEmu: 2nd(1,5), mode(1,6), del(1,7)
                 Row(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     KeyButton(
-                        keyDef = KeyDef("2nd", 1, 0, KeyStyle.YELLOW),
+                        keyDef = KeyDef("2nd", 1, 5, KeyStyle.YELLOW),
                         modifier = Modifier.weight(1f),
-                        onDown = { onKeyDown(1, 0) },
-                        onUp = { onKeyUp(1, 0) }
+                        onDown = { onKeyDown(1, 5) },
+                        onUp = { onKeyUp(1, 5) }
                     )
                     KeyButton(
-                        keyDef = KeyDef("mode", 1, 1, secondLabel = "quit"),
+                        keyDef = KeyDef("mode", 1, 6, secondLabel = "quit"),
                         modifier = Modifier.weight(1f),
-                        onDown = { onKeyDown(1, 1) },
-                        onUp = { onKeyUp(1, 1) }
+                        onDown = { onKeyDown(1, 6) },
+                        onUp = { onKeyUp(1, 6) }
                     )
                     KeyButton(
-                        keyDef = KeyDef("del", 1, 2, secondLabel = "ins"),
+                        keyDef = KeyDef("del", 1, 7, secondLabel = "ins"),
                         modifier = Modifier.weight(1f),
-                        onDown = { onKeyDown(1, 2) },
-                        onUp = { onKeyUp(1, 2) }
+                        onDown = { onKeyDown(1, 7) },
+                        onUp = { onKeyUp(1, 7) }
                     )
                 }
                 // Row 3: alpha, x,t,θ,n, stat
+                // CEmu: alpha(2,7), xton(3,7), stat(4,7)
                 Row(
                     modifier = Modifier.weight(1f).fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
                     KeyButton(
-                        keyDef = KeyDef("alpha", 2, 0, KeyStyle.GREEN, secondLabel = "A-lock"),
+                        keyDef = KeyDef("alpha", 2, 7, KeyStyle.GREEN, secondLabel = "A-lock"),
                         modifier = Modifier.weight(1f),
-                        onDown = { onKeyDown(2, 0) },
-                        onUp = { onKeyUp(2, 0) }
+                        onDown = { onKeyDown(2, 7) },
+                        onUp = { onKeyUp(2, 7) }
                     )
                     KeyButton(
-                        keyDef = KeyDef("X,T,θ,n", 2, 1, secondLabel = "link"),
+                        keyDef = KeyDef("X,T,θ,n", 3, 7, secondLabel = "link"),
                         modifier = Modifier.weight(1f),
-                        onDown = { onKeyDown(2, 1) },
-                        onUp = { onKeyUp(2, 1) }
+                        onDown = { onKeyDown(3, 7) },
+                        onUp = { onKeyUp(3, 7) }
                     )
                     KeyButton(
-                        keyDef = KeyDef("stat", 2, 2, secondLabel = "list"),
+                        keyDef = KeyDef("stat", 4, 7, secondLabel = "list"),
                         modifier = Modifier.weight(1f),
-                        onDown = { onKeyDown(2, 2) },
-                        onUp = { onKeyUp(2, 2) }
+                        onDown = { onKeyDown(4, 7) },
+                        onUp = { onKeyUp(4, 7) }
                     )
                 }
             }
@@ -356,13 +592,14 @@ fun Keypad(
         }
 
         // Row 4: math, apps, prgm, vars, clear (separate row)
+        // CEmu: math(2,6), apps(3,6), prgm(4,6), vars(5,6), clear(6,6)
         KeyRow(
             keys = listOf(
-                KeyDef("math", 3, 0, secondLabel = "test", alphaLabel = "A"),
-                KeyDef("apps", 3, 1, secondLabel = "angle", alphaLabel = "B"),
-                KeyDef("prgm", 3, 2, secondLabel = "draw", alphaLabel = "C"),
-                KeyDef("vars", 3, 3, secondLabel = "distr", alphaLabel = "D"),
-                KeyDef("clear", 3, 5)
+                KeyDef("math", 2, 6, secondLabel = "test", alphaLabel = "A"),
+                KeyDef("apps", 3, 6, secondLabel = "angle", alphaLabel = "B"),
+                KeyDef("prgm", 4, 6, secondLabel = "draw", alphaLabel = "C"),
+                KeyDef("vars", 5, 6, secondLabel = "distr", alphaLabel = "D"),
+                KeyDef("clear", 6, 6)
             ),
             modifier = Modifier.weight(1f),
             onKeyDown = onKeyDown,
@@ -370,13 +607,14 @@ fun Keypad(
         )
 
         // Row 5: x⁻¹, sin, cos, tan, ^
+        // CEmu: inv(2,5), sin(3,5), cos(4,5), tan(5,5), pow(6,5)
         KeyRow(
             keys = listOf(
-                KeyDef("x⁻¹", 4, 0, secondLabel = "matrix"),
-                KeyDef("sin", 4, 1, secondLabel = "sin⁻¹", alphaLabel = "E"),
-                KeyDef("cos", 4, 2, secondLabel = "cos⁻¹", alphaLabel = "F"),
-                KeyDef("tan", 4, 3, secondLabel = "tan⁻¹", alphaLabel = "G"),
-                KeyDef("^", 4, 4, secondLabel = "π", alphaLabel = "H")
+                KeyDef("x⁻¹", 2, 5, secondLabel = "matrix"),
+                KeyDef("sin", 3, 5, secondLabel = "sin⁻¹", alphaLabel = "E"),
+                KeyDef("cos", 4, 5, secondLabel = "cos⁻¹", alphaLabel = "F"),
+                KeyDef("tan", 5, 5, secondLabel = "tan⁻¹", alphaLabel = "G"),
+                KeyDef("^", 6, 5, secondLabel = "π", alphaLabel = "H")
             ),
             modifier = Modifier.weight(1f),
             onKeyDown = onKeyDown,
@@ -384,13 +622,14 @@ fun Keypad(
         )
 
         // Row 6: x², ,, (, ), ÷
+        // CEmu: sq(2,4), comma(3,4), lpar(4,4), rpar(5,4), div(6,4)
         KeyRow(
             keys = listOf(
-                KeyDef("x²", 5, 0, secondLabel = "√"),
-                KeyDef(",", 5, 1, secondLabel = "EE", alphaLabel = "J"),
-                KeyDef("(", 5, 2, secondLabel = "{", alphaLabel = "K"),
-                KeyDef(")", 5, 3, secondLabel = "}", alphaLabel = "L"),
-                KeyDef("÷", 5, 4, KeyStyle.WHITE, secondLabel = "e", alphaLabel = "M")
+                KeyDef("x²", 2, 4, secondLabel = "√"),
+                KeyDef(",", 3, 4, secondLabel = "EE", alphaLabel = "J"),
+                KeyDef("(", 4, 4, secondLabel = "{", alphaLabel = "K"),
+                KeyDef(")", 5, 4, secondLabel = "}", alphaLabel = "L"),
+                KeyDef("÷", 6, 4, KeyStyle.WHITE, secondLabel = "e", alphaLabel = "M")
             ),
             modifier = Modifier.weight(1f),
             onKeyDown = onKeyDown,
@@ -423,6 +662,7 @@ fun NumericColumns(
         horizontalArrangement = Arrangement.spacedBy(5.dp)
     ) {
         // Column 1: log, ln, sto→, on
+        // CEmu: log(2,3), ln(2,2), sto(2,1), on(2,0)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -430,163 +670,167 @@ fun NumericColumns(
             verticalArrangement = Arrangement.spacedBy(keySpacing)
         ) {
             KeyButton(
-                keyDef = KeyDef("log", 6, 0, secondLabel = "10ˣ", alphaLabel = "N"),
+                keyDef = KeyDef("log", 2, 3, secondLabel = "10ˣ", alphaLabel = "N"),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(6, 0) },
-                onUp = { onKeyUp(6, 0) }
+                onDown = { onKeyDown(2, 3) },
+                onUp = { onKeyUp(2, 3) }
             )
             KeyButton(
-                keyDef = KeyDef("ln", 7, 0, secondLabel = "eˣ", alphaLabel = "S"),
+                keyDef = KeyDef("ln", 2, 2, secondLabel = "eˣ", alphaLabel = "S"),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(7, 0) },
-                onUp = { onKeyUp(7, 0) }
+                onDown = { onKeyDown(2, 2) },
+                onUp = { onKeyUp(2, 2) }
             )
             KeyButton(
-                keyDef = KeyDef("sto→", 8, 0, secondLabel = "rcl", alphaLabel = "X"),
+                keyDef = KeyDef("sto→", 2, 1, secondLabel = "rcl", alphaLabel = "X"),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(8, 0) },
-                onUp = { onKeyUp(8, 0) }
+                onDown = { onKeyDown(2, 1) },
+                onUp = { onKeyUp(2, 1) }
             )
             KeyButton(
-                keyDef = KeyDef("on", 9, 0, secondLabel = "off"),
+                keyDef = KeyDef("on", 2, 0, secondLabel = "off"),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(9, 0) },
-                onUp = { onKeyUp(9, 0) }
+                onDown = { onKeyDown(2, 0) },
+                onUp = { onKeyUp(2, 0) }
             )
         }
 
         // Column 2: 7, 4, 1, 0
+        // CEmu: 7(3,3), 4(3,2), 1(3,1), 0(3,0)
         Column(
             modifier = Modifier
                 .weight(1f),
             verticalArrangement = Arrangement.spacedBy(keySpacing)
         ) {
             KeyButton(
-                keyDef = KeyDef("7", 6, 1, KeyStyle.WHITE, secondLabel = "u", alphaLabel = "O"),
+                keyDef = KeyDef("7", 3, 3, KeyStyle.WHITE, secondLabel = "u", alphaLabel = "O"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(6, 1) },
-                onUp = { onKeyUp(6, 1) }
+                onDown = { onKeyDown(3, 3) },
+                onUp = { onKeyUp(3, 3) }
             )
             KeyButton(
-                keyDef = KeyDef("4", 7, 1, KeyStyle.WHITE, secondLabel = "L4", alphaLabel = "T"),
+                keyDef = KeyDef("4", 3, 2, KeyStyle.WHITE, secondLabel = "L4", alphaLabel = "T"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(7, 1) },
-                onUp = { onKeyUp(7, 1) }
+                onDown = { onKeyDown(3, 2) },
+                onUp = { onKeyUp(3, 2) }
             )
             KeyButton(
-                keyDef = KeyDef("1", 8, 1, KeyStyle.WHITE, secondLabel = "L1", alphaLabel = "Y"),
+                keyDef = KeyDef("1", 3, 1, KeyStyle.WHITE, secondLabel = "L1", alphaLabel = "Y"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(8, 1) },
-                onUp = { onKeyUp(8, 1) }
+                onDown = { onKeyDown(3, 1) },
+                onUp = { onKeyUp(3, 1) }
             )
             KeyButton(
-                keyDef = KeyDef("0", 9, 1, KeyStyle.WHITE, secondLabel = "catalog", alphaLabel = " "),
+                keyDef = KeyDef("0", 3, 0, KeyStyle.WHITE, secondLabel = "catalog", alphaLabel = " "),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(9, 1) },
-                onUp = { onKeyUp(9, 1) }
+                onDown = { onKeyDown(3, 0) },
+                onUp = { onKeyUp(3, 0) }
             )
         }
 
         // Column 3: 8, 5, 2, .
+        // CEmu: 8(4,3), 5(4,2), 2(4,1), dot(4,0)
         Column(
             modifier = Modifier
                 .weight(1f),
             verticalArrangement = Arrangement.spacedBy(keySpacing)
         ) {
             KeyButton(
-                keyDef = KeyDef("8", 6, 2, KeyStyle.WHITE, secondLabel = "v", alphaLabel = "P"),
+                keyDef = KeyDef("8", 4, 3, KeyStyle.WHITE, secondLabel = "v", alphaLabel = "P"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(6, 2) },
-                onUp = { onKeyUp(6, 2) }
+                onDown = { onKeyDown(4, 3) },
+                onUp = { onKeyUp(4, 3) }
             )
             KeyButton(
-                keyDef = KeyDef("5", 7, 2, KeyStyle.WHITE, secondLabel = "L5", alphaLabel = "U"),
+                keyDef = KeyDef("5", 4, 2, KeyStyle.WHITE, secondLabel = "L5", alphaLabel = "U"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(7, 2) },
-                onUp = { onKeyUp(7, 2) }
+                onDown = { onKeyDown(4, 2) },
+                onUp = { onKeyUp(4, 2) }
             )
             KeyButton(
-                keyDef = KeyDef("2", 8, 2, KeyStyle.WHITE, secondLabel = "L2", alphaLabel = "Z"),
+                keyDef = KeyDef("2", 4, 1, KeyStyle.WHITE, secondLabel = "L2", alphaLabel = "Z"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(8, 2) },
-                onUp = { onKeyUp(8, 2) }
+                onDown = { onKeyDown(4, 1) },
+                onUp = { onKeyUp(4, 1) }
             )
             KeyButton(
-                keyDef = KeyDef(".", 9, 2, KeyStyle.WHITE, secondLabel = "i", alphaLabel = ":"),
+                keyDef = KeyDef(".", 4, 0, KeyStyle.WHITE, secondLabel = "i", alphaLabel = ":"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(9, 2) },
-                onUp = { onKeyUp(9, 2) }
+                onDown = { onKeyDown(4, 0) },
+                onUp = { onKeyUp(4, 0) }
             )
         }
 
         // Column 4: 9, 6, 3, (−)
+        // CEmu: 9(5,3), 6(5,2), 3(5,1), neg(5,0)
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(keySpacing)
         ) {
             KeyButton(
-                keyDef = KeyDef("9", 6, 3, KeyStyle.WHITE, secondLabel = "w", alphaLabel = "Q"),
+                keyDef = KeyDef("9", 5, 3, KeyStyle.WHITE, secondLabel = "w", alphaLabel = "Q"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(6, 3) },
-                onUp = { onKeyUp(6, 3) }
+                onDown = { onKeyDown(5, 3) },
+                onUp = { onKeyUp(5, 3) }
             )
             KeyButton(
-                keyDef = KeyDef("6", 7, 3, KeyStyle.WHITE, secondLabel = "L6", alphaLabel = "V"),
+                keyDef = KeyDef("6", 5, 2, KeyStyle.WHITE, secondLabel = "L6", alphaLabel = "V"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(7, 3) },
-                onUp = { onKeyUp(7, 3) }
+                onDown = { onKeyDown(5, 2) },
+                onUp = { onKeyUp(5, 2) }
             )
             KeyButton(
-                keyDef = KeyDef("3", 8, 3, KeyStyle.WHITE, secondLabel = "L3", alphaLabel = "θ"),
+                keyDef = KeyDef("3", 5, 1, KeyStyle.WHITE, secondLabel = "L3", alphaLabel = "θ"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(8, 3) },
-                onUp = { onKeyUp(8, 3) }
+                onDown = { onKeyDown(5, 1) },
+                onUp = { onKeyUp(5, 1) }
             )
             KeyButton(
-                keyDef = KeyDef("(−)", 9, 3, KeyStyle.WHITE, secondLabel = "ans", alphaLabel = "?"),
+                keyDef = KeyDef("(−)", 5, 0, KeyStyle.WHITE, secondLabel = "ans", alphaLabel = "?"),
                 modifier = Modifier
                     .weight(numberKeyWeight)
                     .fillMaxWidth()
                     .padding(horizontal = numberKeyPad),
-                onDown = { onKeyDown(9, 3) },
-                onUp = { onKeyUp(9, 3) }
+                onDown = { onKeyDown(5, 0) },
+                onUp = { onKeyUp(5, 0) }
             )
         }
 
         // Column 5: ×, −, +, enter
+        // CEmu: mul(6,3), sub(6,2), add(6,1), enter(6,0)
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -594,28 +838,28 @@ fun NumericColumns(
             verticalArrangement = Arrangement.spacedBy(keySpacing)
         ) {
             KeyButton(
-                keyDef = KeyDef("×", 6, 4, KeyStyle.WHITE, secondLabel = "[", alphaLabel = "R"),
+                keyDef = KeyDef("×", 6, 3, KeyStyle.WHITE, secondLabel = "[", alphaLabel = "R"),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(6, 4) },
-                onUp = { onKeyUp(6, 4) }
+                onDown = { onKeyDown(6, 3) },
+                onUp = { onKeyUp(6, 3) }
             )
             KeyButton(
-                keyDef = KeyDef("−", 7, 4, KeyStyle.WHITE, secondLabel = "]", alphaLabel = "W"),
+                keyDef = KeyDef("−", 6, 2, KeyStyle.WHITE, secondLabel = "]", alphaLabel = "W"),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(7, 4) },
-                onUp = { onKeyUp(7, 4) }
+                onDown = { onKeyDown(6, 2) },
+                onUp = { onKeyUp(6, 2) }
             )
             KeyButton(
-                keyDef = KeyDef("+", 8, 4, KeyStyle.WHITE, secondLabel = "mem", alphaLabel = "\""),
+                keyDef = KeyDef("+", 6, 1, KeyStyle.WHITE, secondLabel = "mem", alphaLabel = "\""),
                 modifier = Modifier.weight(darkKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(8, 4) },
-                onUp = { onKeyUp(8, 4) }
+                onDown = { onKeyDown(6, 1) },
+                onUp = { onKeyUp(6, 1) }
             )
             KeyButton(
-                keyDef = KeyDef("enter", 9, 4, KeyStyle.BLUE, secondLabel = "entry", alphaLabel = "solve"),
+                keyDef = KeyDef("enter", 6, 0, KeyStyle.BLUE, secondLabel = "entry", alphaLabel = "solve"),
                 modifier = Modifier.weight(enterKeyWeight).fillMaxWidth(),
-                onDown = { onKeyDown(9, 4) },
-                onUp = { onKeyUp(9, 4) }
+                onDown = { onKeyDown(6, 0) },
+                onUp = { onKeyUp(6, 0) }
             )
         }
     }
@@ -659,20 +903,21 @@ fun DPad(
                         return@detectTapGestures
                     }
                     pressedDir = hit
+                    // CEmu: down(7,0), left(7,1), right(7,2), up(7,3)
                     when (hit) {
-                        DPadDirection.UP -> onKeyDown(1, 3)
-                        DPadDirection.LEFT -> onKeyDown(2, 3)
-                        DPadDirection.RIGHT -> onKeyDown(2, 4)
-                        DPadDirection.DOWN -> onKeyDown(3, 4)
+                        DPadDirection.UP -> onKeyDown(7, 3)
+                        DPadDirection.LEFT -> onKeyDown(7, 1)
+                        DPadDirection.RIGHT -> onKeyDown(7, 2)
+                        DPadDirection.DOWN -> onKeyDown(7, 0)
                     }
                     try {
                         awaitRelease()
                     } finally {
                         when (hit) {
-                            DPadDirection.UP -> onKeyUp(1, 3)
-                            DPadDirection.LEFT -> onKeyUp(2, 3)
-                            DPadDirection.RIGHT -> onKeyUp(2, 4)
-                            DPadDirection.DOWN -> onKeyUp(3, 4)
+                            DPadDirection.UP -> onKeyUp(7, 3)
+                            DPadDirection.LEFT -> onKeyUp(7, 1)
+                            DPadDirection.RIGHT -> onKeyUp(7, 2)
+                            DPadDirection.DOWN -> onKeyUp(7, 0)
                         }
                         pressedDir = null
                     }

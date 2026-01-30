@@ -24,6 +24,11 @@ endif()
 # Path to Rust static library
 set(RUST_LIB_DIR "${RUST_CORE_DIR}/target/${RUST_TARGET}/release")
 set(RUST_LIB "${RUST_LIB_DIR}/libemu_core.a")
+file(GLOB_RECURSE RUST_SOURCES
+    "${RUST_CORE_DIR}/src/*.rs"
+    "${RUST_CORE_DIR}/Cargo.toml"
+    "${RUST_CORE_DIR}/Cargo.lock"
+)
 
 # Custom command to build Rust library
 add_custom_command(
@@ -43,6 +48,7 @@ add_custom_command(
         AR_i686_linux_android=${ANDROID_TOOLCHAIN_ROOT}/bin/llvm-ar
         cargo build --manifest-path ${RUST_CORE_DIR}/Cargo.toml --target ${RUST_TARGET} --release
     WORKING_DIRECTORY ${RUST_CORE_DIR}
+    DEPENDS ${RUST_SOURCES}
     COMMENT "Building Rust core for ${RUST_TARGET}"
     VERBATIM
 )

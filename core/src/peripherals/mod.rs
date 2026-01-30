@@ -123,9 +123,25 @@ impl Peripherals {
     }
 
     /// Update keypad state from emulator
+    /// Also does an immediate keypad check to update status bits
+    /// Similar to CEmu's keypad_any_check() behavior
     pub fn set_key(&mut self, row: usize, col: usize, pressed: bool) {
         if row < KEYPAD_ROWS && col < KEYPAD_COLS {
             self.key_state[row][col] = pressed;
+
+            // Do immediate keypad check (like CEmu's keypad_any_check)
+            // This updates the data registers and status bits
+            // Note: We don't raise KEYPAD interrupt here because TI-OS doesn't enable it
+            // TI-OS uses polling to read keypad data registers
+            // CPU wake from HALT is handled by the any_key_wake signal in Emu::set_key()
+            let _should_interrupt = self.keypad.any_key_check(&self.key_state);
+
+            if pressed {
+                crate::log_event(&format!(
+                    "KEYPAD set_key: row={}, col={}, key_state updated",
+                    row, col
+                ));
+            }
         }
     }
 
@@ -317,7 +333,12 @@ impl Peripherals {
             self.interrupt.raise(sources::LCD);
         }
 
-        // Check keypad using internal key_state
+        // Tick keypad scan timing and raise interrupt if scan/status indicates it
+        if self.keypad.tick(cycles, &self.key_state) {
+            self.interrupt.raise(sources::KEYPAD);
+        }
+
+        // Check keypad using internal key_state (any-key interrupt in continuous mode)
         if self.keypad.check_interrupt(&self.key_state) {
             self.interrupt.raise(sources::KEYPAD);
         }
@@ -495,17 +516,14 @@ mod tests {
     fn test_keypad_routing() {
         let mut p = Peripherals::new();
         let mut keys = empty_keys();
-        let scan_cycles = 5000;
 
-        // All keys released
-        p.write_test(KEYPAD_BASE, 0x02); // enable continuous scan
-        p.keypad.tick(scan_cycles, &keys);
-        assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 0xFF);
+        // All keys released - should read 0x00 (active-high: no bits set)
+        assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 0x00);
 
         // Press a key
         keys[0][3] = true;
-        p.keypad.tick(scan_cycles, &keys);
-        assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 0xFF ^ (1 << 3));
+        // Now reading should show bit 3 set (active-high: 1 = pressed)
+        assert_eq!(p.read_test(KEYPAD_BASE + 0x10, &keys), 1 << 3);
     }
 
     #[test]

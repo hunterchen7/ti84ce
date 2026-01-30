@@ -503,6 +503,80 @@ The ROM uses multiple DI + HALT sequences during boot, expecting the ON key to w
 
 Without the ON key wake mechanism (separate from regular interrupts), boot stalls at the first HALT since IFF1=0.
 
+## Keypad Controller
+
+### ON Key vs Regular Keys - Different Mechanisms
+
+The TI-84 CE uses **different mechanisms** for the ON key versus regular keys:
+
+**ON Key (row 2, col 0):**
+- Has dedicated hardware interrupt line (INT_ON, bit 0)
+- TI-OS enables this interrupt in the interrupt controller
+- Raises interrupt when pressed → interrupt handler runs
+- Also has special wake capability (can wake from HALT even with DI)
+
+**Regular Keys:**
+- Do NOT use interrupt-based input
+- TI-OS **polls** the keypad data registers (0xF50010-0xF5002F)
+- KEYPAD interrupt (bit 10) exists but TI-OS does NOT enable it
+- Keys wake CPU from HALT via a signal (any_key_wake), not an interrupt
+
+**CEmu Implementation:**
+```c
+// In emu_keypad_event():
+if (row == 2 && col == 0) {
+    // ON key - set special signal and interrupt
+    cpu_set_signal(CPU_SIGNAL_ON_KEY);
+    // keypad_on_check() later raises INT_ON
+} else {
+    // Regular key - just set signal for polling
+    cpu_set_signal(CPU_SIGNAL_ANY_KEY);
+    // keypad_any_check() updates data registers, status bits
+}
+```
+
+**Source**: CEmu's `keypad.c`, `keypad_on_check()`, `keypad_any_check()`
+
+### Keypad Data Registers Return Live State
+
+When the OS reads keypad data registers, they return the **current** key state, not a latched/scanned value:
+
+| Offset | Register | Content |
+|--------|----------|---------|
+| 0x10-0x11 | Row 0 data | Live bitmask of columns (1=pressed) |
+| 0x12-0x13 | Row 1 data | Live bitmask of columns |
+| ... | ... | ... |
+| 0x1E-0x1F | Row 7 data | Live bitmask of columns |
+
+Each row is 16 bits (though only 8 columns used), little-endian.
+
+**Polling Flow:**
+1. TI-OS runs main loop
+2. When idle, executes HALT to save power
+3. Key press → any_key_wake signal → CPU wakes from HALT
+4. OS continues, reads keypad data registers to see which key
+5. If no key found, goes back to HALT
+
+**Impact**: Raising KEYPAD interrupt for regular keys doesn't help because TI-OS doesn't have it enabled. The OS expects to poll.
+
+### Keypad Scan Modes
+
+The keypad controller has four modes (control register bits 0-1):
+
+| Mode | Name | Behavior |
+|------|------|----------|
+| 0 | IDLE | No scanning |
+| 1 | SINGLE | Single scan, any-key detection |
+| 2 | CONTINUOUS | Continuous scanning with interrupts |
+| 3 | MULTI_GROUP | Multi-group scanning |
+
+TI-OS typically sets mode 1 (SINGLE) after boot. In this mode:
+- `keypad_any_check()` runs when keys change
+- Status bit 2 (ANY_KEY) is set if any key pressed
+- Data registers contain key state for each row
+
+**Source**: CEmu's `keypad.c`, mode definitions and `keypad_any_check()`
+
 ---
 
-_Last updated: 2026-01-29 - Boot complete! OS reaches home screen with "RAM Cleared" message_
+_Last updated: 2026-01-30 - Added keypad findings, Android display working_

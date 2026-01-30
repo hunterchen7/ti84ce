@@ -7,10 +7,12 @@ extern "C" {
 #endif
 
 typedef struct Emu Emu;
+typedef void (*emu_log_cb_t)(const char* message);
 
 // lifecycle
 Emu* emu_create(void);
 void emu_destroy(Emu*);
+void emu_set_log_callback(emu_log_cb_t cb);
 
 // ROM loading (bytes only)
 int  emu_load_rom(Emu*, const uint8_t* data, size_t len); // 0 ok, else error code

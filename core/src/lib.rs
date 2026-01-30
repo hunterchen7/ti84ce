@@ -28,10 +28,14 @@ pub mod peripherals;
 pub mod scheduler;
 mod emu;
 
+#[cfg(test)]
+mod keypad_integration_test;
+
+use std::os::raw::c_char;
 use std::ptr;
 use std::slice;
 
-pub use emu::{Emu, LcdSnapshot, TimerSnapshot};
+pub use emu::{Emu, LcdSnapshot, TimerSnapshot, log_event};
 
 /// Create a new emulator instance.
 /// Returns null on allocation failure.
@@ -50,6 +54,13 @@ pub extern "C" fn emu_destroy(emu: *mut Emu) {
             drop(Box::from_raw(emu));
         }
     }
+}
+
+/// Set an optional log callback for emulator events.
+/// The callback is called with a null-terminated C string.
+#[no_mangle]
+pub extern "C" fn emu_set_log_callback(cb: Option<extern "C" fn(*const c_char)>) {
+    emu::set_log_callback(cb);
 }
 
 /// Load ROM data into the emulator.
@@ -82,6 +93,7 @@ pub extern "C" fn emu_reset(emu: *mut Emu) {
 
 /// Run the emulator for the specified number of cycles.
 /// Returns the number of cycles actually executed.
+/// Also updates the framebuffer with current VRAM contents.
 #[no_mangle]
 pub extern "C" fn emu_run_cycles(emu: *mut Emu, cycles: i32) -> i32 {
     if emu.is_null() || cycles <= 0 {
@@ -89,7 +101,9 @@ pub extern "C" fn emu_run_cycles(emu: *mut Emu, cycles: i32) -> i32 {
     }
 
     let emu = unsafe { &mut *emu };
-    emu.run_cycles(cycles as u32) as i32
+    let executed = emu.run_cycles(cycles as u32) as i32;
+    emu.render_frame();
+    executed
 }
 
 /// Get a pointer to the framebuffer.
@@ -123,6 +137,11 @@ pub extern "C" fn emu_set_key(emu: *mut Emu, row: i32, col: i32, down: i32) {
     if emu.is_null() {
         return;
     }
+
+    log_event(&format!(
+        "KEY row={} col={} down={}",
+        row, col, down != 0
+    ));
 
     let emu = unsafe { &mut *emu };
     emu.set_key(row as usize, col as usize, down != 0);

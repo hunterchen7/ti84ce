@@ -26,12 +26,54 @@ cd core
 cargo build --release
 ```
 
+### Core for Android
+
+The Android app links against the Rust core compiled for Android targets. The Gradle build will compile Rust automatically via CMake, but you can also build manually:
+
+**One-time setup** - Install Android targets:
+
+```bash
+rustup target add aarch64-linux-android    # ARM64 (most devices)
+rustup target add armv7-linux-androideabi  # ARM32 (older devices)
+rustup target add x86_64-linux-android     # x86_64 emulator
+rustup target add i686-linux-android       # x86 emulator
+```
+
+**Manual build** (useful when iterating on Rust code):
+
+```bash
+cd core
+cargo build --target aarch64-linux-android --release
+```
+
+The compiled library goes to `core/target/<target>/release/libemu_core.a`.
+
+**Note**: After changing Rust code, you must rebuild for Android before the changes appear in the app. The Gradle build caches the native library, so either:
+- Run `./gradlew clean` before building, or
+- Manually rebuild the Rust target as shown above
+
 ### Android
 
 ```bash
 cd android
 ./gradlew assembleDebug
 ```
+
+### Development Workflow
+
+For rapid iteration on Android:
+
+```bash
+# Terminal 1: Watch for Kotlin changes and auto-deploy
+cd android
+./watch.sh
+
+# When changing Rust code, rebuild for Android first:
+cd core && cargo build --target aarch64-linux-android --release
+# Then touch a Kotlin file or run ./gradlew installDebug
+```
+
+The `watch.sh` script requires `fswatch` (`brew install fswatch`).
 
 ## Testing
 
