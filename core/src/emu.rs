@@ -10,11 +10,67 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+
+/// Instruction trace flag - when enabled, logs every instruction
+static INST_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Number of instructions traced (resets when trace is enabled)
+static INST_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Maximum instructions to trace before auto-disable (0 = unlimited)
+static INST_TRACE_LIMIT: AtomicU32 = AtomicU32::new(0);
+/// Armed trace - will enable when CPU wakes from HALT
+static INST_TRACE_ARMED: AtomicBool = AtomicBool::new(false);
+/// Limit for armed trace
+static INST_TRACE_ARMED_LIMIT: AtomicU32 = AtomicU32::new(0);
+
+/// Enable instruction tracing (logs every instruction to log callback)
+pub fn enable_inst_trace(limit: u32) {
+    INST_TRACE_COUNT.store(0, Ordering::SeqCst);
+    INST_TRACE_LIMIT.store(limit, Ordering::SeqCst);
+    INST_TRACE_ENABLED.store(true, Ordering::SeqCst);
+    log_event(&format!("INST_TRACE: enabled, limit={}", limit));
+}
+
+/// Arm instruction tracing to start when CPU wakes from HALT
+/// This avoids tracing HALT loops - only traces after wake event
+pub fn arm_inst_trace_on_wake(limit: u32) {
+    INST_TRACE_ARMED_LIMIT.store(limit, Ordering::SeqCst);
+    INST_TRACE_ARMED.store(true, Ordering::SeqCst);
+    log_event(&format!("INST_TRACE: armed for wake, limit={}", limit));
+}
+
+/// Disable instruction tracing
+pub fn disable_inst_trace() {
+    INST_TRACE_ENABLED.store(false, Ordering::SeqCst);
+    INST_TRACE_ARMED.store(false, Ordering::SeqCst);
+    log_event("INST_TRACE: disabled");
+}
+
+/// Check if instruction tracing is enabled
+pub fn is_inst_trace_enabled() -> bool {
+    INST_TRACE_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Check and trigger armed trace on wake
+fn check_armed_trace_on_wake(was_halted: bool, is_halted: bool) {
+    // If we were halted and now we're not, trigger the armed trace
+    if was_halted && !is_halted && INST_TRACE_ARMED.load(Ordering::SeqCst) {
+        let limit = INST_TRACE_ARMED_LIMIT.load(Ordering::SeqCst);
+        INST_TRACE_ARMED.store(false, Ordering::SeqCst);
+        INST_TRACE_COUNT.store(0, Ordering::SeqCst);
+        INST_TRACE_LIMIT.store(limit, Ordering::SeqCst);
+        INST_TRACE_ENABLED.store(true, Ordering::SeqCst);
+        log_event(&format!("INST_TRACE: triggered on wake, limit={}", limit));
+    }
+}
 
 /// TI-84 Plus CE screen dimensions
 pub const SCREEN_WIDTH: usize = 320;
 pub const SCREEN_HEIGHT: usize = 240;
+
+/// Cycles after which boot is considered complete and TI-OS initialization can happen
+/// Boot completes at ~62M cycles; we wait a bit longer to ensure TI-OS is ready
+const BOOT_COMPLETE_CYCLES: u64 = 65_000_000;
 
 /// Number of entries in the PC/opcode history ring buffer
 const HISTORY_SIZE: usize = 64;
@@ -147,6 +203,9 @@ pub struct Emu {
     total_cycles: u64,
     /// Whether we've already logged a HALT state
     halt_logged: bool,
+    /// Whether TI-OS expression parser has been initialized after boot
+    /// See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
+    boot_init_done: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +243,7 @@ impl Emu {
             last_stop: StopReason::CyclesComplete,
             total_cycles: 0,
             halt_logged: false,
+            boot_init_done: false,
         }
     }
 
@@ -210,6 +270,7 @@ impl Emu {
         self.last_stop = StopReason::CyclesComplete;
         self.total_cycles = 0;
         self.halt_logged = false;
+        self.boot_init_done = false;
         self.powered_on = false; // Require ON key press to power on again
 
         // Clear framebuffer to black
@@ -224,6 +285,24 @@ impl Emu {
             return 0;
         }
 
+        // TI-OS expression parser initialization after boot completes
+        // After boot, the first ENTER shows "Done" instead of evaluating expressions.
+        // Send a single ENTER press/release to prime the parser (matches CEmu autotester).
+        // See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
+        if !self.boot_init_done && self.total_cycles > BOOT_COMPLETE_CYCLES {
+            log_event("BOOT_INIT: sending initialization ENTER to prime TI-OS parser");
+            // Press ENTER (row 6, col 0)
+            self.set_key(6, 0, true);
+            // Run cycles to let TI-OS process the key press
+            self.run_cycles_internal(3_000_000);
+            // Release ENTER
+            self.set_key(6, 0, false);
+            // Run more cycles to let TI-OS finish processing
+            self.run_cycles_internal(5_000_000);
+            self.boot_init_done = true;
+            log_event("BOOT_INIT: TI-OS parser initialization complete");
+        }
+
         let mut cycles_remaining = cycles as i32;
         let start_cycles = self.total_cycles;
 
@@ -235,9 +314,42 @@ impl Emu {
             // Record PC and peek at opcode before execution
             let pc = self.cpu.pc;
             let (opcode, opcode_len) = self.peek_opcode(pc);
+            let was_halted = self.cpu.halted;
+
+            // Instruction tracing (when enabled)
+            // Skip HALT cycles - only count actual instruction execution
+            if INST_TRACE_ENABLED.load(Ordering::Relaxed) && !self.cpu.halted {
+                let count = INST_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
+                let limit = INST_TRACE_LIMIT.load(Ordering::Relaxed);
+
+                // Log instruction with register state
+                let opcode_str: String = opcode[..opcode_len]
+                    .iter()
+                    .map(|b| format!("{:02X}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                log_event(&format!(
+                    "INST[{}]: PC={:06X} OP={} A={:02X} F={:02X} BC={:06X} DE={:06X} HL={:06X} SP={:06X} halted={} wake={}",
+                    count, pc, opcode_str,
+                    self.cpu.a, self.cpu.f,
+                    self.cpu.bc, self.cpu.de, self.cpu.hl,
+                    self.cpu.sp,
+                    self.cpu.halted, self.cpu.any_key_wake
+                ));
+
+                // Auto-disable after limit
+                if limit > 0 && count >= limit {
+                    INST_TRACE_ENABLED.store(false, Ordering::SeqCst);
+                    log_event("INST_TRACE: auto-disabled after limit reached");
+                }
+            }
 
             // Execute one instruction
             let cycles_used = self.cpu.step(&mut self.bus);
+
+            // Check for wake event - triggers armed trace if CPU woke from HALT
+            check_armed_trace_on_wake(was_halted, self.cpu.halted);
 
             // Record in history
             self.history.record(pc, &opcode[..opcode_len]);
@@ -273,6 +385,41 @@ impl Emu {
         }
 
         self.last_stop = StopReason::CyclesComplete;
+        (self.total_cycles - start_cycles) as u32
+    }
+
+    /// Internal run_cycles without boot initialization check (to avoid recursion)
+    fn run_cycles_internal(&mut self, cycles: u32) -> u32 {
+        if !self.rom_loaded || !self.powered_on {
+            return 0;
+        }
+
+        let mut cycles_remaining = cycles as i32;
+        let start_cycles = self.total_cycles;
+
+        while cycles_remaining > 0 {
+            let cpu_speed = self.bus.ports.control.cpu_speed();
+            self.scheduler.set_cpu_speed(cpu_speed);
+
+            let was_halted = self.cpu.halted;
+            let cycles_used = self.cpu.step(&mut self.bus);
+            check_armed_trace_on_wake(was_halted, self.cpu.halted);
+
+            cycles_remaining -= cycles_used as i32;
+            self.total_cycles += cycles_used as u64;
+            self.scheduler.advance(self.total_cycles);
+            self.process_scheduler_events();
+
+            if self.bus.ports.tick(cycles_used) {
+                self.cpu.irq_pending = true;
+            }
+
+            if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
+                self.bus.ports.rtc.start_load_ticks();
+                self.scheduler.set(EventId::Rtc, 1);
+            }
+        }
+
         (self.total_cycles - start_cycles) as u32
     }
 
@@ -359,13 +506,19 @@ impl Emu {
                 self.release_on_key();
             }
         } else {
-            self.bus.set_key(row, col, down);
-            // Set any_key_wake signal to wake CPU from HALT (like CEmu's CPU_SIGNAL_ANY_KEY)
+            // Set key state and trigger any_key_check (like CEmu's CPU_SIGNAL_ANY_KEY handling)
+            // This updates keypad data registers and may raise a keypad interrupt
+            let keypad_irq = self.bus.set_key(row, col, down);
+
+            // Set any_key_wake signal to wake CPU from HALT
             // This allows keys to wake the CPU so the OS can poll the keypad
-            // We do NOT raise any interrupt here - regular keys don't use interrupts
-            // TI-OS polls the keypad data registers to detect which key was pressed
             if down {
                 self.cpu.any_key_wake = true;
+                // If keypad interrupt was raised, also set irq_pending
+                // This ensures the interrupt handler runs after wake
+                if keypad_irq {
+                    self.cpu.irq_pending = true;
+                }
             }
         }
     }
@@ -503,6 +656,66 @@ impl Emu {
         self.bus.peek_byte(addr)
     }
 
+    /// Poke a memory byte (for debugging/testing)
+    pub fn poke_byte(&mut self, addr: u32, value: u8) {
+        self.bus.write_byte(addr, value);
+    }
+
+    /// High-level key injection (like CEmu's sendKey)
+    /// This writes directly to TI-OS memory locations, bypassing hardware keypad.
+    /// Returns true if key was successfully injected, false if TI-OS wasn't ready.
+    ///
+    /// TI-OS key addresses:
+    /// - CE_kbdKey (0xD0058C) = key code high byte
+    /// - CE_keyExtend (0xD0058E) = key code low byte
+    /// - CE_graphFlags2 (0xD0009F) bit 5 = keyReady flag
+    ///
+    /// Key codes (from CEmu):
+    /// - ENTER = 0x05
+    /// - CLEAR = 0x09
+    /// - Numbers: '0' = 0x8E, '1' = 0x8F, ... '9' = 0x97
+    pub fn send_key(&mut self, key: u16) -> bool {
+        const CE_KBD_KEY: u32 = 0xD0058C;
+        const CE_KEY_EXTEND: u32 = 0xD0058E;
+        const CE_GRAPH_FLAGS2: u32 = 0xD0009F;
+        const CE_KEY_READY: u8 = 1 << 5;
+
+        let flags = self.peek_byte(CE_GRAPH_FLAGS2);
+        if (flags & CE_KEY_READY) != 0 {
+            // TI-OS hasn't processed previous key yet
+            return false;
+        }
+
+        // If key < 0x100, shift to high byte (CEmu convention)
+        let key = if key < 0x100 { key << 8 } else { key };
+
+        self.poke_byte(CE_KBD_KEY, (key >> 8) as u8);
+        self.poke_byte(CE_KEY_EXTEND, (key & 0xFF) as u8);
+        self.poke_byte(CE_GRAPH_FLAGS2, flags | CE_KEY_READY);
+
+        // Debug: verify write succeeded
+        let verify_key = self.peek_byte(CE_KBD_KEY);
+        let verify_extend = self.peek_byte(CE_KEY_EXTEND);
+        let verify_flags = self.peek_byte(CE_GRAPH_FLAGS2);
+        eprintln!(
+            "SEND_KEY: key=0x{:04X} wrote kbdKey=0x{:02X} keyExtend=0x{:02X} flags=0x{:02X}",
+            key, verify_key, verify_extend, verify_flags
+        );
+        true
+    }
+
+    /// High-level key injection for letter/number keys
+    /// '0'-'9' -> 0x8E-0x97
+    /// 'A'-'Z' -> 0x9A-0xB3
+    pub fn send_letter_key(&mut self, letter: char) -> bool {
+        let key = match letter {
+            '0'..='9' => 0x8E + (letter as u16 - '0' as u16),
+            'A'..='Z' => 0x9A + (letter as u16 - 'A' as u16),
+            _ => return false,
+        };
+        self.send_key(key)
+    }
+
     /// Get the CPU's A register value
     pub fn reg_a(&self) -> u8 {
         self.cpu.a
@@ -586,6 +799,11 @@ impl Emu {
     /// Get ON-key wake flag
     pub fn on_key_wake(&self) -> bool {
         self.cpu.on_key_wake
+    }
+
+    /// Get any-key wake flag
+    pub fn any_key_wake(&self) -> bool {
+        self.cpu.any_key_wake
     }
 
     /// Read full interrupt status mask

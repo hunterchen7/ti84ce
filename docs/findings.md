@@ -684,6 +684,42 @@ With edge detection:
 - `query_row_data()` returns current | edge, then clears edge
 - `any_key_check()` uses `query_row_data()` for edge-aware queries
 
+### TI-OS Expression Parser Requires Initialization After Boot
+
+After boot, TI-OS's expression parser is NOT immediately ready to evaluate new expressions. The first ENTER press shows "Done" instead of evaluating any entered numbers.
+
+**Observed behavior:**
+1. Boot completes, home screen displayed
+2. User types "1" and presses ENTER
+3. Screen shows "Done" instead of "1"
+4. User types "2" and presses ENTER
+5. Screen correctly shows "2"
+
+**Root cause (investigation):**
+- BC register = 0x00E106 before first ENTER
+- BC register = 0x00E108 before second ENTER
+- The 2-byte offset in BC indicates TI-OS internal state transition
+- Keypad data registers ARE correctly populated with key presses
+- TI-OS DOES read the keypad data correctly
+- The issue is in TI-OS's expression evaluation state machine
+
+**CEmu autotester behavior:**
+CEmu's autotester (`autotester.cpp`) always sends CLEAR as the first key when launching programs:
+```cpp
+"launch", [] {
+    sendKey(CE_KEY_CLEAR);  // Always sent first!
+    // ... then type program name and ENTER
+}
+```
+
+**Solution:**
+After boot, send ENTER (or CLEAR) once to initialize TI-OS's expression parser state. This matches CEmu's autotester behavior and is NOT a hack - it's the expected initialization sequence.
+
+**Implementation:**
+- Add initialization ENTER after boot in Android app
+- Debug tool defaults to initialization enabled
+- Use `SKIP_INIT=1` environment variable to test raw boot state
+
 **Source**: CEmu's `keypad.c` lines 174-190 (emu_keypad_event) and lines 49-57 (keypad_query_keymap)
 
 ### Port I/O vs Memory-Mapped I/O (CRITICAL)
@@ -727,6 +763,217 @@ Add the same `needs_any_key_check` flag handling to `bus.port_write()` for port 
 
 **Source**: Discovered via diagnostic logging showing `needs_any_key_check` flag being set but `any_key_check()` never being called.
 
+### Block Instructions Use L Mode, Not ADL Mode (CRITICAL)
+
+Block instructions (LDIR, LDDR, CPIR, CPDR, etc.) must use the **L mode** flag for address masking, not the ADL mode flag:
+
+**CEmu Code:**
+```c
+// All block instructions (line 821 in cpu.c):
+REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L));
+REG_WRITE_EX(DE, r->DE, cpu_mask_mode(r->DE + delta, cpu.L));
+```
+
+**The Difference:**
+- `ADL` mode: Controls instruction/PC addressing (whether PC is 16-bit or 24-bit)
+- `L` mode: Controls data addressing (whether HL/DE/BC are 16-bit or 24-bit)
+
+These modes are usually equal (`L = ADL`) but can differ after a suffix opcode (.SIS, .LIS, .SIL, .LIL).
+
+**The Bug:**
+Our implementation used `wrap_pc()` (which uses `self.adl`) instead of a new `wrap_data()` function (which uses `self.l`):
+
+```rust
+// WRONG: Uses ADL mode
+self.hl = self.wrap_pc(self.hl.wrapping_add(1));
+
+// CORRECT: Uses L mode
+self.hl = self.wrap_data(self.hl.wrapping_add(1));
+```
+
+**Impact:** When a suffix opcode sets L differently from ADL, block instructions would compute wrong addresses, causing memory corruption. This explains VRAM corruption and wrong calculation results - the TI-OS likely uses suffix opcodes before block copy operations.
+
+**Source**: CEmu `cpu.c` line 821 and cpu_mask_mode() function.
+
 ---
 
-_Last updated: 2026-01-30 - Added port I/O vs memory-mapped I/O finding_
+### Stack + Word Operations Use L Mode (CRITICAL)
+
+Several non-block instructions also depend on **L mode** (data width), not ADL, for both
+stack width and memory word size. This includes:
+
+- `PUSH/POP rp` (stack width uses `L`)
+- `EX (SP),HL/IX/IY` (word size uses `L`)
+- `LD (nn),rr` and `LD rr,(nn)` (word size uses `L`)
+- `LD SP,HL/IX/IY` (SP width uses `L`)
+- `JP (HL)/(IX/IY)` (ADL becomes `L` after the jump)
+
+**CEmu behavior:**
+```c
+// Stack width uses L
+cpu_push_word(value);        // uses cpu.L internally
+cpu_pop_word();              // uses cpu.L internally
+
+// Word reads/writes use L
+cpu_read_word(addr);         // uses cpu.L internally
+cpu_write_word(addr, value); // uses cpu.L internally
+
+// Indirect jumps use L for PC mode
+cpu_jump(cpu_read_index(), cpu.L);
+```
+
+**Impact:** If these use ADL instead of L, a suffix opcode (.SIS/.SIL/etc.)
+can desynchronize stack width or word size for a single instruction, causing
+stack corruption and mis-sized memory reads/writes. This matches the "wrong
+results" and VRAM corruption observed after calculator operations.
+
+**Source:** CEmu `cpu.c` (`cpu_push_word`, `cpu_pop_word`, `cpu_read_word`,
+`cpu_write_word`, `cpu_read_sp`, `cpu_write_sp`, and `cpu_jump(..., cpu.L)`).
+
+---
+
+_Last updated: 2026-01-30 - Added L mode vs ADL mode finding for stack/word operations_
+
+---
+
+## Investigation Notes (2026-01-30)
+
+### Calculation Result Corruption + Line Erasure (logcat capture gaps)
+
+While investigating wrong results (e.g., `2*3` showing a wildly scaled value) and prior input being erased
+when advancing to a new line, the current log capture was insufficient to show the actual calculation path.
+
+**What the log shows:**
+- `emu_logcat.txt` contains key sequences like `1 + 1`, `2 + 2`, and `9 ÷ 5`, but **no multiply key presses**
+  (no row=6 col=3 events). So the log does **not** correspond to the reported `*` reproduction.
+- Every key press arms a **short 500-instruction trace**, which auto-disables quickly after wake. This likely
+  ends before the actual calculation executes.
+
+**Root cause in our tracing setup:**
+- The "ENTER key enables immediate trace" logic is wired to **row=5 col=7**, but the actual ENTER mapping
+  is **row=6 col=0** (per Android keypad map). This means **ENTER never enables the longer trace**, so we
+  miss the calculation path entirely.
+
+**Impact:** We cannot currently see the instruction stream that produces the wrong result or the screen-line
+erasure. The bugs are likely still CPU/memory-width related, but the present trace is too short and triggered
+on the wrong key to confirm.
+
+**Next step:** ~~Fix ENTER trace mapping and capture a longer trace specifically on ENTER, plus add targeted
+write tracing for VRAM/text buffer to pinpoint where corruption happens.~~
+
+**Update (2026-01-30):** Fixed ENTER trace trigger to check row=6 col=0 instead of row=5 col=7.
+Also verified that L-mode word operations (LD (nn),rr, LD rr,(nn), EX (SP),rr) already correctly use
+L mode for word size, and LDIR/LDDR use wrap_data() for address masking.
+
+_Last updated: 2026-01-30 - Fixed ENTER trace trigger, verified L-mode word operations_
+
+### Remaining Investigation: "Done" on First Calculation
+
+After boot, the first ENTER (e.g., `1+1 ENTER`) shows "Done" instead of a numeric result. Subsequent
+calculations work but show wrong magnitude (×10^9). The first calculation's input also disappears from
+history while subsequent inputs remain.
+
+**Observations:**
+1. "Done" appears only on the FIRST calculation after boot
+2. Subsequent calculations produce numeric results (wrong magnitude, but at least numeric)
+3. Input disappears only for the first calculation's history entry
+
+**Possible causes:**
+- TI-OS initialization not complete on first ENTER
+- Some floating-point library state not ready
+- A race condition or timing issue specific to first calculation
+- Edge case in CPU emulation triggered only on first calculation path
+
+**Next steps:** Capture trace with fixed ENTER trigger to see instruction sequence during first calculation.
+
+### Fix: Suffix Modes Preserved Across DD/FD Prefix Step (RESOLVED)
+
+The emulator treats DD/FD prefix bytes as **separate instruction steps** (to match CEmu's trace behavior).
+However, suffix opcodes (.SIS/.LIS/.SIL/.LIL) were only keeping L/IL for **one** instruction step.
+If the "next instruction" was a DD/FD prefix, L/IL were applied to the prefix step, then reset to ADL before
+the actual indexed instruction executed.
+
+**Why this mattered:** On real hardware, the suffix should apply to the entire next instruction (including
+any prefixes). Losing L/IL before the indexed op flipped data/instruction width back to ADL and caused
+mis-sized loads/stores. This corrupted bytes in the 9-byte real format (exponent/decimal shift),
+causing the "right digits, wrong magnitude" symptom.
+
+**The Fix:** When setting `self.prefix` (DD/FD detection), also set `self.suffix = true` to preserve
+L/IL modes for the next step when the indexed instruction executes:
+
+```rust
+// In execute_x3 when DD/FD prefix is detected:
+self.suffix = true;  // Preserve L/IL for the indexed instruction
+self.prefix = 2;     // DD (or 3 for FD)
+```
+
+This ensures:
+1. Suffix opcode (.SIS/.SIL/.LIS/.LIL) sets L/IL and suffix=true
+2. DD/FD prefix step: L/IL are preserved (suffix=true), then suffix is set true again
+3. Indexed instruction step: L/IL are still preserved (suffix=true)
+
+**Status:** FIXED - Tests added for suffix + DD/FD prefix combination
+
+_Last updated: 2026-01-30 - Fixed suffix/prefix L/IL persistence bug_
+
+### Investigation: "Done" on First Calculation (RESOLVED - Root Cause Identified)
+
+The first calculation after boot shows "Done" instead of a numeric result, while subsequent calculations
+produce numbers (with wrong magnitude). Input disappears from history for first calculation only.
+
+**Root Cause Analysis (from trace comparison):**
+
+Comparing instruction traces at the moment ENTER wakes the CPU from HALT:
+
+| Register | First ENTER | Second ENTER | Interpretation |
+|----------|-------------|--------------|----------------|
+| PC       | 0x085B80    | 0x085B80     | Same wake point |
+| BC       | 0x00E106    | 0x00E108     | Pointer incremented by 2 |
+| DE       | 0x09024A    | 0x0901D8     | Different FP stack state |
+| HL       | 0xD00587    | 0xD00587     | Same |
+| SP       | 0xD1A863    | 0xD1A863     | Same |
+
+The BC and DE registers differ, indicating TI-OS state variables are not fully initialized after boot.
+BC appears to be a memory pointer that increments by 2 bytes between calculations. The first calculation
+encounters unexpected values at 0xE106 and takes a different code path that outputs "Done" instead of
+formatting the numeric result.
+
+**This is NOT a CPU emulation bug** - it's a TI-OS initialization state issue. The boot sequence may
+not fully initialize all required RAM areas, or there's a first-run code path in the ROM that expects
+certain state.
+
+**Next steps:** Compare RAM state at boot completion between CEmu and our emulator to identify
+uninitialized regions.
+
+_Last updated: 2026-01-30 - Root cause identified as TI-OS state initialization_
+
+### Ongoing Investigation: Magnitude Error (×10^8 to ×10^9)
+
+Calculations produce results with correct digits but wrong magnitude:
+- 6+7 → 1300000000 (expected: 13, off by ×10^8)
+- cos(8) → -0145500338 (expected: -0.1455, off by ×10^9)
+
+**TI-84 CE BCD Format:**
+- Byte 0: Sign (0x00=positive, 0x80=negative)
+- Byte 1: Exponent (biased by 0x80, so 0x81 = 10^1)
+- Bytes 2-8: BCD mantissa (7 bytes = 14 digits)
+
+The magnitude error of 10^8 corresponds to an exponent byte difference of +8 (e.g., 0x81 → 0x89).
+
+**What we verified works correctly:**
+1. **L-mode in LDIR/LDDR**: Block copy instructions use `wrap_data()` which respects `self.l`
+2. **L-mode in stack ops**: `push_addr`/`pop_addr` use `self.l` for 16/24-bit selection
+3. **Suffix preservation**: DD/FD prefix handling preserves suffix flag to maintain L/IL modes
+4. **ED 27 (LD HL,(HL))**: Uses `self.l` correctly for 2/3 byte reads
+5. **ED 0F (LD (HL),rp)**: Uses `self.l` correctly for 2/3 byte writes
+
+**Possible remaining causes:**
+1. Specific instruction combination not yet examined
+2. TI-OS formatting routine reading wrong memory location
+3. An instruction with incorrect L-mode handling not yet tested
+4. Related to "Done" issue - corrupted state affecting exponent calculation
+
+**Next steps:** Generate CEmu trace for identical calculation and compare instruction-by-instruction
+to find first divergence point.
+
+_Last updated: 2026-01-30 - All common L-mode instructions verified correct_

@@ -281,7 +281,10 @@ impl Cpu {
 
     /// Exchange DE and HL
     pub fn ex_de_hl(&mut self) {
-        std::mem::swap(&mut self.de, &mut self.hl);
+        let de = self.wrap_data(self.de);
+        let hl = self.wrap_data(self.hl);
+        self.de = hl;
+        self.hl = de;
     }
 
     // ========== Address Masking ==========
@@ -316,6 +319,18 @@ impl Cpu {
             addr & 0xFFFFFF // 24-bit in ADL mode
         } else {
             addr & 0xFFFF // 16-bit in Z80 mode (no MBASE)
+        }
+    }
+
+    /// Wrap data register (HL, DE) to stay within address width based on L mode
+    /// Use for data register modifications in block instructions (LDI, LDIR, etc.)
+    /// CEmu: cpu_mask_mode(r->HL + delta, cpu.L)
+    #[inline]
+    pub fn wrap_data(&self, addr: u32) -> u32 {
+        if self.l {
+            addr & 0xFFFFFF // 24-bit in L mode
+        } else {
+            addr & 0xFFFF // 16-bit in Z80 data mode (no MBASE)
         }
     }
 
@@ -373,19 +388,24 @@ impl Cpu {
     }
 
     // ========== Stack Operations ==========
+    // NOTE: CEmu uses cpu.L mode for stack operations, selecting between
+    // SPS (16-bit) and SPL (24-bit) stack pointers. We use a single SP
+    // but apply L mode masking to match CEmu behavior.
 
     /// Push a byte onto the stack
+    /// CEmu: cpu_push_byte_mode(value, cpu.L) uses L mode for SP masking
     #[inline]
     pub fn push_byte(&mut self, bus: &mut Bus, val: u8) {
-        self.sp = self.wrap_pc(self.sp.wrapping_sub(1));
+        self.sp = self.wrap_data(self.sp.wrapping_sub(1));
         bus.write_byte(self.mask_addr(self.sp), val);
     }
 
     /// Pop a byte from the stack
+    /// CEmu: cpu_pop_byte_mode(cpu.L) uses L mode for SP masking
     #[inline]
     pub fn pop_byte(&mut self, bus: &mut Bus) -> u8 {
         let val = bus.read_byte(self.mask_addr(self.sp));
-        self.sp = self.wrap_pc(self.sp.wrapping_add(1));
+        self.sp = self.wrap_data(self.sp.wrapping_add(1));
         val
     }
 

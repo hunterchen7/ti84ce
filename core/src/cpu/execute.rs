@@ -104,12 +104,12 @@ impl Cpu {
                         // LD (nn),HL
                         let addr = self.fetch_addr(bus);
                         let nn = self.mask_addr(addr);
-                        bus.write_byte(nn, self.l());
-                        bus.write_byte(nn.wrapping_add(1), self.h());
-                        if self.adl {
-                            bus.write_byte(nn.wrapping_add(2), (self.hl >> 16) as u8);
+                        let hl = self.get_rp(2);
+                        if self.l {
+                            bus.write_addr24(nn, hl);
                             20
                         } else {
+                            bus.write_word(nn, hl as u16);
                             16
                         }
                     }
@@ -136,17 +136,13 @@ impl Cpu {
                         // LD HL,(nn)
                         let addr = self.fetch_addr(bus);
                         let nn = self.mask_addr(addr);
-                        let l = bus.read_byte(nn);
-                        let h = bus.read_byte(nn.wrapping_add(1));
-                        self.set_l(l);
-                        self.set_h(h);
-                        if self.adl {
-                            let u = bus.read_byte(nn.wrapping_add(2));
-                            self.hl = (self.hl & 0xFFFF) | ((u as u32) << 16);
-                            20
+                        let val = if self.l {
+                            bus.read_addr24(nn)
                         } else {
-                            16
-                        }
+                            bus.read_word(nn) as u32
+                        };
+                        self.set_rp(2, val);
+                        if self.l { 20 } else { 16 }
                     }
                     (3, 1) => {
                         // LD A,(nn)
@@ -350,28 +346,14 @@ impl Cpu {
             }
             1 => {
                 if q == 0 {
-                    // POP rp2 - all registers are 24-bit in ADL mode (CEmu behavior)
+                    // POP rp2 - stack width uses L mode (CEmu behavior)
+                    let val = self.pop_addr(bus);
                     if p == 3 {
-                        // AF - CEmu pops 3 bytes in ADL mode (upper byte discarded)
-                        let val = if self.adl {
-                            self.pop_addr(bus)
-                        } else {
-                            self.pop_word(bus) as u32
-                        };
+                        // AF - upper byte discarded in 24-bit mode
                         self.a = (val >> 8) as u8;
                         self.f = val as u8;
-                    } else if self.adl {
-                        // BC/DE/HL are 24-bit in ADL mode (matches CEmu cpu_push_word)
-                        let val = self.pop_addr(bus);
-                        match p {
-                            0 => self.bc = val,
-                            1 => self.de = val,
-                            2 => self.hl = val,
-                            _ => {}
-                        }
                     } else {
-                        let val = self.pop_word(bus);
-                        self.set_rp2(p, val);
+                        self.set_rp(p, val);
                     }
                     10
                 } else {
@@ -390,12 +372,13 @@ impl Cpu {
                         }
                         2 => {
                             // JP (HL)
+                            self.adl = self.l;
                             self.pc = self.wrap_pc(self.hl);
                             4
                         }
                         3 => {
                             // LD SP,HL
-                            self.sp = self.wrap_pc(self.hl);
+                            self.sp = self.wrap_data(self.hl);
                             6
                         }
                         _ => 4,
@@ -442,12 +425,12 @@ impl Cpu {
                     4 => {
                         // EX (SP),HL
                         let sp_addr = self.mask_addr(self.sp);
-                        let sp_val = if self.adl {
+                        let sp_val = if self.l {
                             bus.read_addr24(sp_addr)
                         } else {
                             bus.read_word(sp_addr) as u32
                         };
-                        if self.adl {
+                        if self.l {
                             bus.write_addr24(sp_addr, self.hl);
                         } else {
                             bus.write_word(sp_addr, self.hl as u16);
@@ -503,28 +486,14 @@ impl Cpu {
             }
             5 => {
                 if q == 0 {
-                    // PUSH rp2 - all registers are 24-bit in ADL mode (CEmu behavior)
-                    if p == 3 {
-                        // AF - CEmu pushes 3 bytes in ADL mode (upper byte is 0)
-                        let val = ((self.a as u32) << 8) | (self.f as u32);
-                        if self.adl {
-                            self.push_addr(bus, val);
-                        } else {
-                            self.push_word(bus, val as u16);
-                        }
-                    } else if self.adl {
-                        // BC/DE/HL are 24-bit in ADL mode (matches CEmu cpu_push_word)
-                        let val = match p {
-                            0 => self.bc,
-                            1 => self.de,
-                            2 => self.hl,
-                            _ => 0,
-                        };
-                        self.push_addr(bus, val);
+                    // PUSH rp2 - stack width uses L mode (CEmu behavior)
+                    let val = if p == 3 {
+                        // AF - upper byte is 0 in 24-bit mode
+                        ((self.a as u32) << 8) | (self.f as u32)
                     } else {
-                        let val = self.get_rp2(p);
-                        self.push_word(bus, val);
-                    }
+                        self.get_rp(p)
+                    };
+                    self.push_addr(bus, val);
                     11
                 } else {
                     match p {
@@ -583,6 +552,7 @@ impl Cpu {
             7 => {
                 // RST y*8
                 self.push_addr(bus, self.pc);
+                self.adl = self.l;
                 self.pc = (y as u32) * 8;
                 11
             }
@@ -770,13 +740,14 @@ impl Cpu {
             1 => {
                 if y == 6 {
                     // LD IY,(HL) - load IY from (HL)
+                    // LD IY,(HL) - CEmu uses cpu_mask_mode(value, cpu.L)
                     let addr = self.mask_addr(self.hl);
                     let val = if self.l {
                         bus.read_addr24(addr)
                     } else {
                         bus.read_word(addr) as u32
                     };
-                    self.iy = self.wrap_pc(val);
+                    self.iy = self.wrap_data(val);
                     8
                 } else {
                     // OUT0 (n),r - write to port address 0xFF00nn (eZ80 mapped I/O)
@@ -843,16 +814,17 @@ impl Cpu {
                 let addr = self.mask_addr(self.hl);
                 if q == 0 {
                     // LD rp3[p],(HL) - load register pair from (HL)
+                    // CEmu: cpu_write_rp3 applies cpu_mask_mode(value, cpu.L)
                     let val = if self.l {
                         bus.read_addr24(addr)
                     } else {
                         bus.read_word(addr) as u32
                     };
                     match p {
-                        0 => self.bc = self.wrap_pc(val),
-                        1 => self.de = self.wrap_pc(val),
-                        2 => self.hl = self.wrap_pc(val),
-                        3 => self.iy = self.wrap_pc(val), // IY in rp3 context
+                        0 => self.bc = self.wrap_data(val),
+                        1 => self.de = self.wrap_data(val),
+                        2 => self.hl = self.wrap_data(val),
+                        3 => self.iy = self.wrap_data(val), // IY in rp3 context
                         _ => {}
                     }
                 } else {
@@ -980,7 +952,7 @@ impl Cpu {
                 if q == 0 {
                     // LD (nn),rp
                     let rp = self.get_rp(p);
-                    if self.adl {
+                    if self.l {
                         bus.write_addr24(nn, rp);
                         23
                     } else {
@@ -989,13 +961,13 @@ impl Cpu {
                     }
                 } else {
                     // LD rp,(nn)
-                    let val = if self.adl {
+                    let val = if self.l {
                         bus.read_addr24(nn)
                     } else {
                         bus.read_word(nn) as u32
                     };
                     self.set_rp(p, val);
-                    if self.adl {
+                    if self.l {
                         23
                     } else {
                         20
@@ -1021,9 +993,10 @@ impl Cpu {
                         }
                         1 => {
                             // LEA IX,IY+d (ED 54)
+                            // CEmu: cpu_index_address() applies cpu_mask_mode(value, cpu.L)
                             let d = self.fetch_byte(bus) as i8;
                             let addr = (self.iy as i32 + d as i32) as u32;
-                            self.ix = self.wrap_pc(addr);
+                            self.ix = self.wrap_data(addr);
                             8
                         }
                         2 => {
@@ -1059,6 +1032,7 @@ impl Cpu {
                     let high = ((rp >> 8) & 0xFF) as u16;
                     let low = (rp & 0xFF) as u16;
                     let result = (high * low) as u32;
+                    // CEmu writes the 16-bit result and masks via cpu_mask_mode (upper byte cleared in L mode)
                     self.set_rp(p, result);
                     8 // CEmu adds 4 cycles but base is 4, total 8
                 }
@@ -1088,7 +1062,8 @@ impl Cpu {
                         // PEA IX+d - push IX + signed offset
                         let d = self.fetch_byte(bus) as i8;
                         let ea = (self.ix as i32 + d as i32) as u32;
-                        self.push_word(bus, ea as u16);
+                        let masked = if self.l { ea & 0xFFFFFF } else { ea & 0xFFFF };
+                        self.push_addr(bus, masked);
                         16
                     }
                     5 => {
@@ -1134,7 +1109,8 @@ impl Cpu {
                         // PEA IY+d - push IY + signed offset
                         let d = self.fetch_byte(bus) as i8;
                         let ea = (self.iy as i32 + d as i32) as u32;
-                        self.push_word(bus, ea as u16);
+                        let masked = if self.l { ea & 0xFFFFFF } else { ea & 0xFFFF };
+                        self.push_addr(bus, masked);
                         return 16;
                     }
                     5 => {
@@ -1225,13 +1201,14 @@ impl Cpu {
         match (y, z) {
             // LDI - Load and increment
             // CEmu preserves F3/F5 flags (doesn't compute from val+A)
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (4, 0) => {
                 let val = bus.read_byte(self.mask_addr(self.hl));
                 bus.write_byte(self.mask_addr(self.de), val);
-                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
-                self.de = self.wrap_pc(self.de.wrapping_add(1));
-                // BC is a counter, not an address - don't use mask_addr
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                self.hl = self.wrap_data(self.hl.wrapping_add(1));
+                self.de = self.wrap_data(self.de.wrapping_add(1));
+                // BC is a counter - use L mode for masking (CEmu: cpu_dec_bc_partial_mode)
+                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -1241,13 +1218,14 @@ impl Cpu {
             }
             // LDD - Load and decrement
             // CEmu preserves F3/F5 flags
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (5, 0) => {
                 let val = bus.read_byte(self.mask_addr(self.hl));
                 bus.write_byte(self.mask_addr(self.de), val);
-                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
-                self.de = self.wrap_pc(self.de.wrapping_sub(1));
-                // BC is a counter, not an address - don't use mask_addr
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                self.hl = self.wrap_data(self.hl.wrapping_sub(1));
+                self.de = self.wrap_data(self.de.wrapping_sub(1));
+                // BC is a counter - use L mode for masking (CEmu: cpu_dec_bc_partial_mode)
+                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -1258,14 +1236,15 @@ impl Cpu {
             // LDIR - Load, increment, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // CEmu preserves F3/F5 flags
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (6, 0) => {
                 let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     bus.write_byte(self.mask_addr(self.de), val);
-                    self.hl = self.wrap_pc(self.hl.wrapping_add(1));
-                    self.de = self.wrap_pc(self.de.wrapping_add(1));
-                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                    self.hl = self.wrap_data(self.hl.wrapping_add(1));
+                    self.de = self.wrap_data(self.de.wrapping_add(1));
+                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                     self.set_flag_h(false);
                     self.set_flag_n(false);
@@ -1285,14 +1264,15 @@ impl Cpu {
             // LDDR - Load, decrement, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // CEmu preserves F3/F5 flags
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (7, 0) => {
                 let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     bus.write_byte(self.mask_addr(self.de), val);
-                    self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
-                    self.de = self.wrap_pc(self.de.wrapping_sub(1));
-                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                    self.hl = self.wrap_data(self.hl.wrapping_sub(1));
+                    self.de = self.wrap_data(self.de.wrapping_sub(1));
+                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                     self.set_flag_h(false);
                     self.set_flag_n(false);
@@ -1310,12 +1290,13 @@ impl Cpu {
                 cycles
             }
             // CPI - Compare and increment
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (4, 1) => {
                 let val = bus.read_byte(self.mask_addr(self.hl));
                 let result = self.a.wrapping_sub(val);
-                self.hl = self.wrap_pc(self.hl.wrapping_add(1));
-                // BC is a counter, not an address
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                self.hl = self.wrap_data(self.hl.wrapping_add(1));
+                // BC is a counter - use L mode for masking
+                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1327,12 +1308,13 @@ impl Cpu {
                 16
             }
             // CPD - Compare and decrement
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (5, 1) => {
                 let val = bus.read_byte(self.mask_addr(self.hl));
                 let result = self.a.wrapping_sub(val);
-                self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
-                // BC is a counter, not an address
-                self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                self.hl = self.wrap_data(self.hl.wrapping_sub(1));
+                // BC is a counter - use L mode for masking
+                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1345,14 +1327,15 @@ impl Cpu {
             // CPIR - Compare, increment, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // Stops when BC=0 or when A matches the memory byte (result=0)
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (6, 1) => {
                 let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     let result = self.a.wrapping_sub(val);
-                    self.hl = self.wrap_pc(self.hl.wrapping_add(1));
-                    // BC is a counter, not an address
-                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                    self.hl = self.wrap_data(self.hl.wrapping_add(1));
+                    // BC is a counter - use L mode for masking
+                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                     self.set_sz_flags(result);
                     self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1374,14 +1357,15 @@ impl Cpu {
             // CPDR - Compare, decrement, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // Stops when BC=0 or when A matches the memory byte (result=0)
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (7, 1) => {
                 let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     let result = self.a.wrapping_sub(val);
-                    self.hl = self.wrap_pc(self.hl.wrapping_sub(1));
-                    // BC is a counter, not an address
-                    self.bc = self.bc.wrapping_sub(1) & if self.adl { 0xFFFFFF } else { 0xFFFF };
+                    self.hl = self.wrap_data(self.hl.wrapping_sub(1));
+                    // BC is a counter - use L mode for masking
+                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
 
                     self.set_sz_flags(result);
                     self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1423,6 +1407,7 @@ impl Cpu {
         match (z, p, q) {
             // z=2: Input instructions (INIM, INDM, INIMR, INDMR)
             // These read from port C, write to (HL), modify BC, and HL
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (2, 0, _) | (2, 1, _) => {
                 let mut cycles = 0u32;
                 loop {
@@ -1430,7 +1415,7 @@ impl Cpu {
                     // Read from port - blocked on TI-84 CE, returns 0xFF
                     let val = 0xFF;
                     bus.write_byte(self.mask_addr(self.hl), val);
-                    self.hl = self.wrap_pc((self.hl as i32 + delta) as u32);
+                    self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
                     // Update C by delta
                     let c = (self.c() as i32 + delta) as u8;
                     self.set_c(c);
@@ -1456,6 +1441,7 @@ impl Cpu {
             }
             // z=3: Output instructions (OTIM, OTDM, OTIMR, OTDMR)
             // These read from (HL), write to port C, modify BC, and HL
+            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
             (3, 0, _) | (3, 1, _) => {
                 let mut cycles = 0u32;
                 loop {
@@ -1463,7 +1449,7 @@ impl Cpu {
                     // Read from memory
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     // Output to port - blocked on TI-84 CE, ignored
-                    self.hl = self.wrap_pc((self.hl as i32 + delta) as u32);
+                    self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
                     // Update C by delta
                     let c = (self.c() as i32 + delta) as u8;
                     self.set_c(c);
@@ -1725,10 +1711,11 @@ impl Cpu {
                         let half = ((index_reg & 0xFFF) + (rp & 0xFFF)) > 0xFFF;
                         self.set_flag_h(half);
                         self.set_flag_n(false);
-                        self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
+                        self.set_flag_c(result > if self.l { 0xFFFFFF } else { 0xFFFF });
                         // S, Z, PV, F3, F5 preserved from previous F (CEmu behavior)
 
-                        let wrapped = self.wrap_pc(result);
+                        // CEmu: cpu_write_index applies cpu_mask_mode(value, cpu.L)
+                        let wrapped = self.wrap_data(result);
                         if use_ix {
                             self.ix = wrapped;
                         } else {
@@ -1744,10 +1731,11 @@ impl Cpu {
                         let half = ((index_reg & 0xFFF) + (rp & 0xFFF)) > 0xFFF;
                         self.set_flag_h(half);
                         self.set_flag_n(false);
-                        self.set_flag_c(result > if self.adl { 0xFFFFFF } else { 0xFFFF });
+                        self.set_flag_c(result > if self.l { 0xFFFFFF } else { 0xFFFF });
                         // S, Z, PV, F3, F5 preserved from previous F (CEmu behavior)
 
-                        let wrapped = self.wrap_pc(result);
+                        // CEmu: cpu_write_index applies cpu_mask_mode(value, cpu.L)
+                        let wrapped = self.wrap_data(result);
                         if use_ix {
                             self.ix = wrapped;
                         } else {
@@ -1764,7 +1752,7 @@ impl Cpu {
                         let addr = self.fetch_addr(bus);
                         let nn = self.mask_addr(addr);
                         let index_reg = if use_ix { self.ix } else { self.iy };
-                        if self.adl {
+                        if self.l {
                             bus.write_addr24(nn, index_reg);
                             20
                         } else {
@@ -1776,7 +1764,7 @@ impl Cpu {
                         // LD IX/IY,(nn)
                         let addr = self.fetch_addr(bus);
                         let nn = self.mask_addr(addr);
-                        let val = if self.adl {
+                        let val = if self.l {
                             bus.read_addr24(nn)
                         } else {
                             bus.read_word(nn) as u32
@@ -1786,7 +1774,7 @@ impl Cpu {
                         } else {
                             self.iy = val;
                         }
-                        if self.adl {
+                        if self.l {
                             20
                         } else {
                             16
@@ -1801,19 +1789,19 @@ impl Cpu {
             3 => {
                 if p == 2 {
                     if q == 0 {
-                        // INC IX/IY
+                        // INC IX/IY - CEmu uses cpu_mask_mode with L mode
                         if use_ix {
-                            self.ix = self.wrap_pc(self.ix.wrapping_add(1));
+                            self.ix = self.wrap_data(self.ix.wrapping_add(1));
                         } else {
-                            self.iy = self.wrap_pc(self.iy.wrapping_add(1));
+                            self.iy = self.wrap_data(self.iy.wrapping_add(1));
                         }
                         10
                     } else {
-                        // DEC IX/IY
+                        // DEC IX/IY - CEmu uses cpu_mask_mode with L mode
                         if use_ix {
-                            self.ix = self.wrap_pc(self.ix.wrapping_sub(1));
+                            self.ix = self.wrap_data(self.ix.wrapping_sub(1));
                         } else {
-                            self.iy = self.wrap_pc(self.iy.wrapping_sub(1));
+                            self.iy = self.wrap_data(self.iy.wrapping_sub(1));
                         }
                         10
                     }
@@ -2007,6 +1995,7 @@ impl Cpu {
                 // RET cc - not affected
                 if self.check_cc(y) {
                     self.pc = self.pop_addr(bus);
+                    self.adl = self.l;
                     if self.adl {
                         12
                     } else {
@@ -2021,11 +2010,7 @@ impl Cpu {
                     // POP rp2
                     if p == 2 {
                         // POP IX/IY
-                        let val = if self.adl {
-                            self.pop_addr(bus)
-                        } else {
-                            self.pop_word(bus) as u32
-                        };
+                        let val = self.pop_addr(bus);
                         if use_ix {
                             self.ix = val;
                         } else {
@@ -2034,26 +2019,13 @@ impl Cpu {
                         14
                     } else if p == 3 {
                         // AF - CEmu pops 3 bytes in ADL mode (upper byte discarded)
-                        let val = if self.adl {
-                            self.pop_addr(bus)
-                        } else {
-                            self.pop_word(bus) as u32
-                        };
+                        let val = self.pop_addr(bus);
                         self.a = (val >> 8) as u8;
                         self.f = val as u8;
                         10
-                    } else if self.adl {
-                        // BC/DE are 24-bit in ADL mode
-                        let val = self.pop_addr(bus);
-                        match p {
-                            0 => self.bc = val,
-                            1 => self.de = val,
-                            _ => {}
-                        }
-                        10
                     } else {
-                        let val = self.pop_word(bus);
-                        self.set_rp2(p, val);
+                        let val = self.pop_addr(bus);
+                        self.set_rp(p, val);
                         10
                     }
                 } else {
@@ -2061,6 +2033,7 @@ impl Cpu {
                         0 => {
                             // RET
                             self.pc = self.pop_addr(bus);
+                            self.adl = self.l;
                             10
                         }
                         1 => {
@@ -2071,13 +2044,14 @@ impl Cpu {
                         2 => {
                             // JP (IX)/(IY)
                             let index_reg = if use_ix { self.ix } else { self.iy };
+                            self.adl = self.l;
                             self.pc = self.wrap_pc(index_reg);
                             8
                         }
                         3 => {
                             // LD SP,IX/IY
                             let index_reg = if use_ix { self.ix } else { self.iy };
-                            self.sp = self.wrap_pc(index_reg);
+                            self.sp = self.wrap_data(index_reg);
                             10
                         }
                         _ => 4,
@@ -2089,6 +2063,7 @@ impl Cpu {
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
                     self.pc = nn;
+                    self.adl = self.il;
                 }
                 10
             }
@@ -2097,6 +2072,7 @@ impl Cpu {
                     0 => {
                         // JP nn - not affected
                         self.pc = self.fetch_addr(bus);
+                        self.adl = self.il;
                         10
                     }
                     1 => {
@@ -2106,13 +2082,13 @@ impl Cpu {
                     4 => {
                         // EX (SP),IX/IY
                         let sp_addr = self.mask_addr(self.sp);
-                        let sp_val = if self.adl {
+                        let sp_val = if self.l {
                             bus.read_addr24(sp_addr)
                         } else {
                             bus.read_word(sp_addr) as u32
                         };
                         let index_reg = if use_ix { self.ix } else { self.iy };
-                        if self.adl {
+                        if self.l {
                             bus.write_addr24(sp_addr, index_reg);
                         } else {
                             bus.write_word(sp_addr, index_reg as u16);
@@ -2136,6 +2112,7 @@ impl Cpu {
                 if self.check_cc(y) {
                     self.push_addr(bus, self.pc);
                     self.pc = nn;
+                    self.adl = self.il;
                     if self.adl {
                         20
                     } else {
@@ -2155,33 +2132,16 @@ impl Cpu {
                     if p == 2 {
                         // PUSH IX/IY
                         let index_reg = if use_ix { self.ix } else { self.iy };
-                        if self.adl {
-                            self.push_addr(bus, index_reg);
-                        } else {
-                            self.push_word(bus, index_reg as u16);
-                        }
+                        self.push_addr(bus, index_reg);
                         15
                     } else if p == 3 {
                         // AF - CEmu pushes 3 bytes in ADL mode (upper byte is 0)
                         let val = ((self.a as u32) << 8) | (self.f as u32);
-                        if self.adl {
-                            self.push_addr(bus, val);
-                        } else {
-                            self.push_word(bus, val as u16);
-                        }
-                        11
-                    } else if self.adl {
-                        // BC/DE are 24-bit in ADL mode
-                        let val = match p {
-                            0 => self.bc,
-                            1 => self.de,
-                            _ => 0,
-                        };
                         self.push_addr(bus, val);
                         11
                     } else {
-                        let val = self.get_rp2(p);
-                        self.push_word(bus, val);
+                        let val = self.get_rp(p);
+                        self.push_addr(bus, val);
                         11
                     }
                 } else {
@@ -2191,6 +2151,7 @@ impl Cpu {
                             let nn = self.fetch_addr(bus);
                             self.push_addr(bus, self.pc);
                             self.pc = nn;
+                            self.adl = self.il;
                             if self.adl {
                                 20
                             } else {
@@ -2218,6 +2179,7 @@ impl Cpu {
             7 => {
                 // RST - not affected
                 self.push_addr(bus, self.pc);
+                self.adl = self.l;
                 self.pc = (y as u32) * 8;
                 11
             }
