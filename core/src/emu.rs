@@ -548,9 +548,10 @@ impl Emu {
     ///
     /// **Behavior:**
     /// 1. On boot, TI-OS displays "TI-84 Plus CE", OS version, and "RAM Cleared"
-    /// 2. User's first key press is detected (any key, any time after boot)
+    /// 2. User's first key press is detected (any key except ON, any time after boot)
     /// 3. If first key is ENTER: just process it (dismisses boot screen + inits parser)
-    /// 4. If first key is NOT ENTER: inject ENTER first, then process user's key
+    /// 4. If first key is ON: ignore it (keep waiting for a normal key)
+    /// 5. If first key is any other key: inject ENTER first, then process user's key
     ///
     /// **Why this is needed:**
     /// After boot, TI-OS expression parser is in an uninitialized state. The first ENTER
@@ -563,7 +564,8 @@ impl Emu {
     /// See docs/findings.md "TI-OS Expression Parser Requires Initialization After Boot"
     pub fn set_key(&mut self, row: usize, col: usize, down: bool) {
         // Auto-initialize TI-OS parser on first key press after boot
-        if down && !self.boot_init_done && self.total_cycles > BOOT_COMPLETE_CYCLES {
+        // Skip ON key (row 2, col 0) - it's for power management, not normal input
+        if down && !self.boot_init_done && self.total_cycles > BOOT_COMPLETE_CYCLES && !(row == 2 && col == 0) {
             // If user's first key IS ENTER, just let it through (don't inject another ENTER)
             // Otherwise, inject ENTER before processing their key
             if row == 6 && col == 0 {
