@@ -31,6 +31,9 @@ mod emu;
 #[cfg(test)]
 mod keypad_integration_test;
 
+#[cfg(test)]
+mod calc_integration_test;
+
 use std::os::raw::c_char;
 use std::ptr;
 use std::slice;

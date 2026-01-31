@@ -524,7 +524,7 @@ impl KeypadController {
                 self.control = value;
                 let new_mode = self.mode();
 
-                // Only log when mode actually changes (not 1->1 spam)
+                // Log mode changes only
                 if old_mode != new_mode {
                     crate::emu::log_event(&format!("KEYPAD_MODE: changed {} -> {}", old_mode, new_mode));
                 }
@@ -601,14 +601,6 @@ impl KeypadController {
         // CEmu: if (keypad.mode != 1) return;
         // Only run in mode 1 (any-key detection mode)
         if current_mode != mode::SINGLE {
-            // Log only occasionally to avoid spam
-            static mut SKIP_COUNT: u32 = 0;
-            unsafe {
-                SKIP_COUNT += 1;
-                if SKIP_COUNT % 10000 == 1 {
-                    crate::emu::log_event(&format!("KEYPAD_CHECK: skipped (mode={}), count={}", current_mode, SKIP_COUNT));
-                }
-            }
             return false;
         }
 
@@ -630,10 +622,10 @@ impl KeypadController {
         let data_mask: u16 = (1 << col_limit) - 1;
         any &= data_mask;
 
-        // Log when we actually detect keys
-        if any != 0 {
-            crate::emu::log_event(&format!("KEYPAD_CHECK: detected keys! any=0x{:04X}", any));
-        }
+        // Log when we actually detect keys (debug only)
+        // if any != 0 {
+        //     crate::emu::log_event(&format!("KEYPAD_CHECK: detected keys! any=0x{:04X}", any));
+        // }
 
         // CEmu: Store combined 'any' in ALL rows that are in the mask
         // This is the critical behavior for TI-OS key detection!
