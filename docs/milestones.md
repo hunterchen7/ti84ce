@@ -202,7 +202,7 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - ON key works to power on and wake from HALT
 - Regular keypad input still in progress (OS polling mechanism)
 
-### 6a: Keypad Integration (In Progress)
+### 6a: Keypad Integration ✓
 
 - [x] ON key (row 2, col 0) raises ON_KEY interrupt and wakes CPU
 - [x] any_key_wake signal for regular keys to wake from HALT
@@ -210,7 +210,9 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [x] Regular keys register in TI-OS (keys display on screen)
 - [x] Edge detection mechanism for fast key presses
 - [x] Port I/O path (via IN/OUT instructions) properly triggers any_key_check
-- [ ] Key mappings are correct (currently displaying wrong values)
+- [x] TI-OS expression parser initialization on first key press
+- [x] Boot screen visible with OS version info before first interaction
+- [x] Integration tests for basic calculations (5, 6+7, 6*7, 1/2, etc.)
 
 **Key Findings:**
 
@@ -219,6 +221,7 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - KEYPAD interrupt (bit 10) is NOT enabled by TI-OS
 - CPU wake from HALT is handled via signals, not interrupts for regular keys
 - **CRITICAL**: TI-OS uses port I/O (port 0xA via IN/OUT) not memory-mapped writes, requiring both I/O paths to call any_key_check
+- **Expression parser initialization**: First key press after boot auto-injects ENTER to dismiss boot screen and initialize TI-OS parser state (see findings.md)
 
 ## Milestone 7: Persistence
 
