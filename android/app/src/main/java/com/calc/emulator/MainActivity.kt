@@ -104,7 +104,7 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     // Debug info
     var totalCyclesExecuted by remember { mutableLongStateOf(0L) }
     var frameCounter by remember { mutableIntStateOf(0) }
-    var showDebug by remember { mutableStateOf(true) }
+    var showDebug by remember { mutableStateOf(false) }
     var lastKeyPress by remember { mutableStateOf("None") }
     val logLines = remember { mutableStateListOf<String>() }
 
