@@ -695,6 +695,51 @@ impl Emu {
         self.cpu.pc
     }
 
+    /// Get C register value
+    pub fn c_register(&self) -> u8 {
+        self.cpu.c()
+    }
+
+    /// Get A register value
+    pub fn a_register(&self) -> u8 {
+        self.cpu.a
+    }
+
+    /// Get DE register value
+    pub fn de_register(&self) -> u32 {
+        self.cpu.de
+    }
+
+    /// Get B register value
+    pub fn b_register(&self) -> u8 {
+        self.cpu.b()
+    }
+
+    /// Get BC register value
+    pub fn bc_register(&self) -> u32 {
+        self.cpu.bc
+    }
+
+    /// Get HL register value
+    pub fn hl_register(&self) -> u32 {
+        self.cpu.hl
+    }
+
+    /// Get IY register value
+    pub fn iy_register(&self) -> u32 {
+        self.cpu.iy
+    }
+
+    /// Get IX register value
+    pub fn ix_register(&self) -> u32 {
+        self.cpu.ix
+    }
+
+    /// Get F (flags) register value
+    pub fn f_register(&self) -> u8 {
+        self.cpu.f
+    }
+
     /// Check if CPU is halted
     pub fn is_halted(&self) -> bool {
         self.cpu.halted
@@ -1094,6 +1139,14 @@ impl Emu {
     /// Clear write trace filter (trace all RAM writes)
     pub fn clear_write_trace_filter(&mut self) {
         self.bus.write_tracer.clear_filter_range();
+    }
+
+    /// Get detailed write log (Vec of (addr, value, cycle))
+    pub fn get_write_log(&self) -> Vec<(u32, u8, u64)> {
+        self.bus.write_tracer.detailed_log()
+            .iter()
+            .map(|rec| (rec.addr, rec.value, rec.cycle))
+            .collect()
     }
 
     /// Get CPU register dump for debugging

@@ -1524,16 +1524,30 @@ impl Cpu {
                     // HALT - not affected by prefix
                     self.halted = true;
                     4
+                } else if y == 6 {
+                    // LD (IX+d), r - write register to indexed memory
+                    // IMPORTANT: Source register r is NOT substituted (use original H/L)
+                    let src = self.get_reg8(z, bus);
+                    let d = self.fetch_byte(bus) as i8;
+                    let index_reg = if use_ix { self.ix } else { self.iy };
+                    let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
+                    bus.write_byte(addr, src);
+                    19
+                } else if z == 6 {
+                    // LD r, (IX+d) - read indexed memory into register
+                    // IMPORTANT: Destination register r is NOT substituted (use original H/L)
+                    let d = self.fetch_byte(bus) as i8;
+                    let index_reg = if use_ix { self.ix } else { self.iy };
+                    let addr = self.mask_addr((index_reg as i32 + d as i32) as u32);
+                    let val = bus.read_byte(addr);
+                    self.set_reg8(y, val, bus);
+                    19
                 } else {
-                    // LD r,r' with index register modifications
-                    // If either y or z is 4, 5, or 6, we use indexed addressing
+                    // LD r,r' with H/L -> IXH/IXL substitution
+                    // (no memory operand, so H/L are substituted)
                     let src = self.get_index_reg8(z, bus, use_ix);
                     self.set_index_reg8(y, src, bus, use_ix);
-                    if y == 6 || z == 6 {
-                        19
-                    } else {
-                        8
-                    }
+                    8
                 }
             }
             2 => {

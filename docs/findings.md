@@ -947,34 +947,67 @@ uninitialized regions.
 
 _Last updated: 2026-01-30 - Root cause identified as TI-OS state initialization_
 
-### Ongoing Investigation: Magnitude Error (×10^8 to ×10^9)
+### FIXED: Magnitude Error - LD (IX+d), r Register Substitution Bug (2026-01-31)
 
-Calculations produce results with correct digits but wrong magnitude:
-- 6+7 → 1300000000 (expected: 13, off by ×10^8)
-- cos(8) → -0145500338 (expected: -0.1455, off by ×10^9)
+**Problem:** Calculations produced results with correct digits but wrong magnitude:
+- 5 → 5000000000 (expected: 5, displayed as 5×10^9)
+- 6+7 → 1300000000 (expected: 13, displayed as 1.3×10^9)
 
-**TI-84 CE BCD Format:**
-- Byte 0: Sign (0x00=positive, 0x80=negative)
-- Byte 1: Exponent (biased by 0x80, so 0x81 = 10^1)
-- Bytes 2-8: BCD mantissa (7 bytes = 14 digits)
+**Root Cause:** Bug in `LD (IX+d), r` and `LD r, (IX+d)` instruction handling.
 
-The magnitude error of 10^8 corresponds to an exponent byte difference of +8 (e.g., 0x81 → 0x89).
+When DD/FD prefix is active, we incorrectly substituted H→IXH and L→IXL for ALL register operands.
+But for memory operations `LD (IX+d), r` and `LD r, (IX+d)`, the r register should NOT be substituted!
 
-**What we verified works correctly:**
-1. **L-mode in LDIR/LDDR**: Block copy instructions use `wrap_data()` which respects `self.l`
-2. **L-mode in stack ops**: `push_addr`/`pop_addr` use `self.l` for 16/24-bit selection
-3. **Suffix preservation**: DD/FD prefix handling preserves suffix flag to maintain L/IL modes
-4. **ED 27 (LD HL,(HL))**: Uses `self.l` correctly for 2/3 byte reads
-5. **ED 0F (LD (HL),rp)**: Uses `self.l` correctly for 2/3 byte writes
+**The Bug in Detail:**
+TI-OS format routine at ROM 0x084AA0 uses `DD 75 FB` = `LD (IX-5), L` to store the decimal
+point position counter. With the bug:
+- L = 0x01 (correct decimal position for 5.0)
+- IXL = 0x1D = 29 (low byte of IX register)
+- We were writing IXL (29) instead of L (1) to the decimal position storage
 
-**Possible remaining causes:**
-1. Specific instruction combination not yet examined
-2. TI-OS formatting routine reading wrong memory location
-3. An instruction with incorrect L-mode handling not yet tested
-4. Related to "Done" issue - corrupted state affecting exponent calculation
+This caused the decimal point counter C to be initialized to 29 instead of 1. Since C counts
+down and decimal is only written when C=0, with C starting at 29 the decimal point was never
+written during the 10-digit output loop.
 
-**Next steps:** Generate CEmu trace for identical calculation and compare instruction-by-instruction
-to find first divergence point.
+**Z80/eZ80 Substitution Rules:**
+1. `LD r, r'` (both registers) - H/L ARE substituted to IXH/IXL
+2. `LD (IX+d), r` (memory write) - r is NOT substituted, uses original H/L
+3. `LD r, (IX+d)` (memory read) - r is NOT substituted, uses original H/L
+
+**The Fix:** In `execute_index` for x=1 (LD r,r' group), check if either operand is idx=6 (memory).
+If so, use `get_reg8`/`set_reg8` for the register operand instead of `get_index_reg8`/`set_index_reg8`.
+
+```rust
+// Before (WRONG):
+let src = self.get_index_reg8(z, bus, use_ix);  // Always substitutes L→IXL
+self.set_index_reg8(y, src, bus, use_ix);
+
+// After (CORRECT):
+if y == 6 {
+    // LD (IX+d), r - source register is NOT substituted
+    let src = self.get_reg8(z, bus);  // Use original L, not IXL
+    // ... write to (IX+d) ...
+} else if z == 6 {
+    // LD r, (IX+d) - destination register is NOT substituted
+    // ... read from (IX+d) ...
+    self.set_reg8(y, val, bus);  // Write to original L, not IXL
+} else {
+    // LD r, r' - both operands ARE substituted
+    let src = self.get_index_reg8(z, bus, use_ix);
+    self.set_index_reg8(y, src, bus, use_ix);
+}
+```
+
+**Verification:**
+- All 393 unit tests pass
+- All 7 integration tests pass (test_simple_number, test_multiplication, etc.)
+- Screen output shows correct values (5, 42, etc. instead of 5000000000)
+
+**Files Changed:**
+- `core/src/cpu/execute.rs`: Fixed x=1 branch in `execute_index`
+- `core/src/cpu/tests/instructions.rs`: Added tests for LD (IX+d), L and LD L, (IX+d)
+
+_Fixed: 2026-01-31_
 
 ### New Finding: OS Timer Toggle Order (Fixed)
 

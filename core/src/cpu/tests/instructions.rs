@@ -496,6 +496,74 @@ fn test_call_ret() {
 }
 
 #[test]
+fn test_ret_nz_conditional() {
+    // Test RET NZ (0xC0) - return if Z flag is NOT set
+    // This is used in format routines for decimal point logic
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    cpu.adl = true;
+
+    // Setup: call a subroutine first to put return address on stack
+    cpu.sp = 0xD00100;
+    bus.poke_byte(0, 0xCD);      // CALL 0x001000
+    bus.poke_byte(1, 0x00);
+    bus.poke_byte(2, 0x10);
+    bus.poke_byte(3, 0x00);
+    cpu.step(&mut bus);
+    assert_eq!(cpu.pc, 0x001000, "Should be at subroutine");
+
+    // Test 1: RET NZ when Z is SET (should NOT return)
+    cpu.f = flags::Z;            // Z flag SET
+    bus.poke_byte(0x001000, 0xC0); // RET NZ
+    bus.poke_byte(0x001001, 0x00); // NOP (next instruction)
+    cpu.step(&mut bus);
+    assert_eq!(cpu.pc, 0x001001, "RET NZ should NOT return when Z is set");
+
+    // Test 2: RET NZ when Z is CLEAR (should return)
+    // First, call again
+    cpu.pc = 0;
+    cpu.sp = 0xD00100;
+    cpu.step(&mut bus);          // CALL 0x001000
+    assert_eq!(cpu.pc, 0x001000);
+
+    cpu.f = 0;                   // Z flag CLEAR
+    cpu.step(&mut bus);          // RET NZ
+    assert_eq!(cpu.pc, 4, "RET NZ should return when Z is clear");
+}
+
+#[test]
+fn test_ret_z_conditional() {
+    // Test RET Z (0xC8) - return if Z flag IS set
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    cpu.adl = true;
+
+    // Setup: call a subroutine
+    cpu.sp = 0xD00100;
+    bus.poke_byte(0, 0xCD);      // CALL 0x001000
+    bus.poke_byte(1, 0x00);
+    bus.poke_byte(2, 0x10);
+    bus.poke_byte(3, 0x00);
+    cpu.step(&mut bus);
+
+    // Test 1: RET Z when Z is CLEAR (should NOT return)
+    cpu.f = 0;                   // Z flag CLEAR
+    bus.poke_byte(0x001000, 0xC8); // RET Z
+    bus.poke_byte(0x001001, 0x00); // NOP
+    cpu.step(&mut bus);
+    assert_eq!(cpu.pc, 0x001001, "RET Z should NOT return when Z is clear");
+
+    // Test 2: RET Z when Z is SET (should return)
+    cpu.pc = 0;
+    cpu.sp = 0xD00100;
+    cpu.step(&mut bus);          // CALL 0x001000
+
+    cpu.f = flags::Z;            // Z flag SET
+    cpu.step(&mut bus);          // RET Z
+    assert_eq!(cpu.pc, 4, "RET Z should return when Z is set");
+}
+
+#[test]
 fn test_push_pop() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
@@ -1152,6 +1220,28 @@ fn test_ld_iy_imm() {
 }
 
 #[test]
+fn test_ld_c_ix_negative_displacement() {
+    // Test LD C, (IX-5) with negative displacement
+    // This is used in TI-OS format routine at 0x84B6B: DD 4E FB
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    cpu.adl = true;
+
+    cpu.ix = 0xD00100;  // IX points to some address
+    bus.poke_byte(0xD000FB, 0x42);  // Value at IX-5 (0xD00100 - 5 = 0xD000FB)
+
+    // LD C, (IX-5) (DD 4E FB) where FB is -5 in signed byte
+    bus.poke_byte(0, 0xDD);
+    bus.poke_byte(1, 0x4E);  // LD C, (IX+d)
+    bus.poke_byte(2, 0xFB);  // d = -5 (0xFB = 251 unsigned, or -5 signed)
+
+    step_full(&mut cpu, &mut bus);  // Use step_full for DD-prefixed instructions
+
+    assert_eq!(cpu.c(), 0x42,
+        "LD C, (IX-5) should load from IX-5 = 0xD000FB");
+}
+
+#[test]
 fn test_ld_indexed_mem() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
@@ -1383,6 +1473,30 @@ fn test_indexed_cb_set() {
 
     step_full(&mut cpu, &mut bus);
     assert_eq!(bus.peek_byte(0xD00105), 0x80);
+}
+
+#[test]
+fn test_set_1_iy_indexed_format_flag() {
+    // Test SET 1, (IY+0x0C) - used by TI-OS format routine at 0x84BE9
+    // This sets the "decimal point written" flag
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    cpu.adl = true;
+
+    cpu.iy = 0xD00080;  // IY points to TI-OS flags area
+    bus.poke_byte(0xD0008C, 0x20);  // Initial value: 0x20 (bit 1 clear)
+
+    // SET 1, (IY+0x0C) (FD CB 0C CE)
+    bus.poke_byte(0, 0xFD);
+    bus.poke_byte(1, 0xCB);
+    bus.poke_byte(2, 0x0C);
+    bus.poke_byte(3, 0xCE);
+
+    step_full(&mut cpu, &mut bus);
+
+    // After SET 1, bit 1 should be set: 0x20 | 0x02 = 0x22
+    assert_eq!(bus.peek_byte(0xD0008C), 0x22,
+        "SET 1, (IY+0x0C) should set bit 1, changing 0x20 to 0x22");
 }
 
 #[test]
@@ -2278,6 +2392,126 @@ fn test_or_flags() {
 }
 
 #[test]
+fn test_decimal_point_sequence() {
+    // Test the exact sequence from TI-OS format routine at ROM 0x84bd8:
+    // LD A, C (79); DEC C (0D); OR A (B7); RET NZ (C0); LD A, 0x2E (3E 2E); LD (DE), A (12)
+    // When C=0, the decimal point should be written to (DE)
+    // When C!=0, the routine should return without writing
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    cpu.adl = true;
+
+    // Setup: create a subroutine call so we can test RET NZ
+    cpu.sp = 0xD00100;
+
+    // First, CALL the test subroutine
+    bus.poke_byte(0, 0xCD);       // CALL 0x001000
+    bus.poke_byte(1, 0x00);
+    bus.poke_byte(2, 0x10);
+    bus.poke_byte(3, 0x00);
+
+    // The test subroutine at 0x001000:
+    // 79 = LD A, C
+    // 0D = DEC C
+    // B7 = OR A
+    // C0 = RET NZ
+    // 3E 2E = LD A, 0x2E
+    // 12 = LD (DE), A
+    // C9 = RET
+    bus.poke_byte(0x001000, 0x79); // LD A, C
+    bus.poke_byte(0x001001, 0x0D); // DEC C
+    bus.poke_byte(0x001002, 0xB7); // OR A
+    bus.poke_byte(0x001003, 0xC0); // RET NZ
+    bus.poke_byte(0x001004, 0x3E); // LD A, 0x2E
+    bus.poke_byte(0x001005, 0x2E);
+    bus.poke_byte(0x001006, 0x12); // LD (DE), A
+    bus.poke_byte(0x001007, 0xC9); // RET
+
+    // Test Case 1: C = 0 should write decimal point
+    cpu.set_c(0);
+    cpu.de = 0xD01234;
+    bus.poke_byte(0xD01234, 0x00); // Clear target
+    cpu.step(&mut bus);  // CALL 0x001000
+    assert_eq!(cpu.pc, 0x001000);
+
+    // Execute the subroutine
+    cpu.step(&mut bus);  // LD A, C (A = 0)
+    assert_eq!(cpu.a, 0, "A should be 0 after LD A, C with C=0");
+
+    cpu.step(&mut bus);  // DEC C (C = 0xFF because of wrap)
+    assert_eq!(cpu.c(), 0xFF, "C should wrap to 0xFF after DEC C from 0");
+
+    cpu.step(&mut bus);  // OR A (Z flag should be SET because A=0)
+    assert!(cpu.flag_z(), "Z flag should be SET after OR A with A=0");
+
+    cpu.step(&mut bus);  // RET NZ - should NOT return because Z is SET
+    assert_eq!(cpu.pc, 0x001004, "RET NZ should NOT return when Z is set; PC should be 0x001004");
+
+    cpu.step(&mut bus);  // LD A, 0x2E
+    assert_eq!(cpu.a, 0x2E, "A should be 0x2E (decimal point)");
+
+    cpu.step(&mut bus);  // LD (DE), A
+    assert_eq!(bus.peek_byte(0xD01234), 0x2E, "Decimal point should be written to (DE)");
+
+    // Test Case 2: C = 1 should NOT write decimal point (returns early)
+    cpu.pc = 0;
+    cpu.sp = 0xD00100;
+    cpu.set_c(1);
+    cpu.de = 0xD01235;
+    bus.poke_byte(0xD01235, 0x00); // Clear target
+    cpu.step(&mut bus);  // CALL 0x001000
+
+    cpu.step(&mut bus);  // LD A, C (A = 1)
+    assert_eq!(cpu.a, 1);
+
+    cpu.step(&mut bus);  // DEC C (C = 0)
+    assert_eq!(cpu.c(), 0);
+
+    cpu.step(&mut bus);  // OR A (Z flag should be CLEAR because A=1)
+    assert!(!cpu.flag_z(), "Z flag should be CLEAR after OR A with A=1");
+
+    cpu.step(&mut bus);  // RET NZ - should return because Z is CLEAR
+    assert_eq!(cpu.pc, 4, "RET NZ should return when Z is clear; PC should be 4");
+    assert_eq!(bus.peek_byte(0xD01235), 0x00, "Decimal point should NOT be written when C!=0");
+}
+
+#[test]
+fn test_or_a_self_zero_flag() {
+    // OR A (0xB7) with A=0 should set Z flag
+    // This is commonly used in format routines: OR A; JR Z, skip_zero
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    // Test 1: OR A when A=0 should set Z
+    cpu.a = 0x00;
+    cpu.f = 0; // Clear all flags
+    bus.poke_byte(0, 0xB7); // OR A
+    cpu.pc = 0;
+    cpu.step(&mut bus);
+    assert_eq!(cpu.a, 0x00, "OR A: A should remain 0");
+    assert!(cpu.flag_z(), "OR A with A=0: Z flag MUST be set");
+    assert!(!cpu.flag_c(), "OR A: C should be clear");
+    assert!(!cpu.flag_n(), "OR A: N should be clear");
+    assert!(!cpu.flag_h(), "OR A: H should be clear");
+
+    // Test 2: OR A when A=0x30 ('0' in ASCII) should NOT set Z
+    cpu.a = 0x30;
+    cpu.f = flags::Z; // Pre-set Z to verify it gets cleared
+    bus.poke_byte(1, 0xB7); // OR A
+    cpu.step(&mut bus);
+    assert_eq!(cpu.a, 0x30, "OR A: A should remain 0x30");
+    assert!(!cpu.flag_z(), "OR A with A=0x30: Z flag must NOT be set");
+
+    // Test 3: OR A when A=1 should NOT set Z
+    cpu.a = 0x01;
+    cpu.f = flags::Z;
+    bus.poke_byte(2, 0xB7); // OR A
+    cpu.step(&mut bus);
+    assert_eq!(cpu.a, 0x01);
+    assert!(!cpu.flag_z(), "OR A with A=1: Z flag must NOT be set");
+}
+
+#[test]
 fn test_xor_flags() {
     // XOR always clears H, N, and C
     let mut cpu = Cpu::new();
@@ -2799,4 +3033,85 @@ fn test_suffix_sil_add_hl_bc_uses_16bit() {
     // With 16-bit arithmetic: 0xFFFF + 2 = 0x0001 (with carry)
     assert_eq!(cpu.hl & 0xFFFF, 0x0001, "ADD HL,BC should wrap at 16-bit");
     assert!(cpu.flag_c(), "Carry should be set from 16-bit overflow");
+}
+
+#[test]
+fn test_ld_ix_d_l_uses_l_not_ixl() {
+    // Test that LD (IX+d), L writes the L register, NOT IXL
+    // This is a common bug: DD prefix should NOT substitute L->IXL for memory operations
+    // Bug discovery: TI-OS format routine at 0x084AA0 uses DD 75 FB = LD (IX-5), L
+    // With the bug, it was writing IXL (0x1D=29) instead of L (0x01)
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.adl = true;
+    cpu.ix = 0xD00100;  // IX = 0xD00100, so IXL = 0x00
+    cpu.hl = 0xD00042;  // HL = 0xD00042, so L = 0x42
+
+    // Verify IXL and L are different
+    assert_eq!(cpu.ixl(), 0x00, "IXL should be 0x00");
+    assert_eq!(cpu.l(), 0x42, "L should be 0x42");
+
+    // Set up DD 75 FB = LD (IX-5), L at address 0
+    bus.poke_byte(0, 0xDD);       // IX prefix
+    bus.poke_byte(1, 0x75);       // LD (IX+d), L opcode
+    bus.poke_byte(2, 0xFB);       // d = -5 (signed)
+
+    // Execute with step_full to handle DD prefix properly
+    step_full(&mut cpu, &mut bus);
+
+    // The value at IX-5 (0xD000FB) should be L (0x42), not IXL (0x00)
+    let written_value = bus.read_byte(0xD000FB);
+    assert_eq!(written_value, 0x42,
+        "LD (IX-5), L should write L (0x42), not IXL (0x00). Got: 0x{:02X}",
+        written_value);
+}
+
+#[test]
+fn test_ld_r_ix_d_uses_original_register() {
+    // Test that LD L, (IX+d) writes to the L register, NOT IXL
+    // The DD prefix should NOT substitute L->IXL for memory operations
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.adl = true;
+    cpu.ix = 0xD00100;
+    cpu.hl = 0xD00000;  // L = 0x00 initially
+
+    // Put test value at IX+5
+    bus.poke_byte(0xD00105, 0x99);
+
+    // Set up DD 6E 05 = LD L, (IX+5)
+    bus.poke_byte(0, 0xDD);       // IX prefix
+    bus.poke_byte(1, 0x6E);       // LD L, (IX+d) opcode
+    bus.poke_byte(2, 0x05);       // d = +5
+
+    step_full(&mut cpu, &mut bus);
+
+    // L should now be 0x99, and IXL should be unchanged
+    assert_eq!(cpu.l(), 0x99, "LD L, (IX+5) should load into L register");
+    assert_eq!(cpu.ixl(), 0x00, "IXL should be unchanged (still 0x00)");
+}
+
+#[test]
+fn test_ld_ixl_r_does_substitute() {
+    // Test that LD IXL, B does use IXL (NOT L) - substitution IS correct here
+    // because neither operand is a memory reference
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.adl = true;
+    cpu.ix = 0xD00100;  // IXL = 0x00
+    cpu.hl = 0xD00099;  // L = 0x99
+    cpu.set_b(0x42);
+
+    // Set up DD 68 = LD IXL, B
+    bus.poke_byte(0, 0xDD);       // IX prefix
+    bus.poke_byte(1, 0x68);       // LD L, B -> becomes LD IXL, B with DD prefix
+
+    step_full(&mut cpu, &mut bus);
+
+    // IXL should be 0x42, L should be unchanged
+    assert_eq!(cpu.ixl(), 0x42, "LD IXL, B should write to IXL");
+    assert_eq!(cpu.l(), 0x99, "L should be unchanged");
 }
