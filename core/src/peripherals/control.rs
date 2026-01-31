@@ -170,7 +170,18 @@ impl ControlPorts {
             regs::POWER => {
                 // Bit 4 is read-only (power stable indicator)
                 // Only bits 0, 1, 7 are writable (0x83 mask)
+                let old = self.power;
                 self.power = value & 0x83;
+                // Log power register changes to detect APO (Auto Power Off)
+                if old != self.power {
+                    crate::emu::log_event(&format!(
+                        "POWER register: 0x{:02X} -> 0x{:02X} (bit0={} bit1={} bit7={})",
+                        old, self.power,
+                        self.power & 1,
+                        (self.power >> 1) & 1,
+                        (self.power >> 7) & 1
+                    ));
+                }
             }
             regs::CPU_SPEED => self.cpu_speed = value & 0x03,
             regs::BATTERY_STATUS => {} // Read-only
