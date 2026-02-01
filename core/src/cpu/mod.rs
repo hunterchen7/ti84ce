@@ -343,57 +343,66 @@ impl Cpu {
             return self.execute_index(bus, use_ix);
         }
 
-        let opcode = self.fetch_byte(bus);
+        // Opcode fetch loop - handles suffix opcodes that modify the following instruction
+        // eZ80 suffix opcodes (.SIS, .LIS, .SIL, .LIL) are NOT separate instructions;
+        // they modify the L/IL modes for the immediately following instruction.
+        // CEmu executes the suffix + following instruction as a single step.
+        loop {
+            let opcode = self.fetch_byte(bus);
 
-        // Decode using x-y-z-p-q decomposition
-        let x = (opcode >> 6) & 0x03;
-        let y = (opcode >> 3) & 0x07;
-        let z = opcode & 0x07;
-        let p = (y >> 1) & 0x03;
-        let q = y & 0x01;
+            // Decode using x-y-z-p-q decomposition
+            let x = (opcode >> 6) & 0x03;
+            let y = (opcode >> 3) & 0x07;
+            let z = opcode & 0x07;
+            let p = (y >> 1) & 0x03;
+            let q = y & 0x01;
 
-        // eZ80 suffix opcodes: .SIS (0x40), .LIS (0x49), .SIL (0x52), .LIL (0x5B)
-        // These are encoded as LD r,r where y==z and z<4.
-        // They set L and IL for the NEXT instruction.
-        // - Bit 0 (s): Sets L (data addressing mode)
-        // - Bit 1 (r): Sets IL (instruction/index addressing mode)
-        // CEmu: cpu.L = context.s, cpu.IL = context.r
-        // Note: CEmu loops and fetches the next instruction immediately, but we
-        // return here and let the caller call step() again. This matches CEmu's
-        // trace behavior where the suffix is counted as a separate instruction.
-        if x == 1 && y == z && z < 4 {
-            let s = (opcode & 0x01) != 0; // L mode (bit 0)
-            let r = (opcode & 0x02) != 0; // IL mode (bit 1)
-            self.l = s;
-            self.il = r;
-            self.suffix = true;
-            // Return - the next step() call will execute with the suffix modes
-            // The suffix flag prevents L/IL from being reset to ADL
-            // Note: The opcode fetch already added cycles
-            return (bus.cycles() - start_cycles) as u32;
-        }
+            // eZ80 suffix opcodes: .SIS (0x40), .LIS (0x49), .SIL (0x52), .LIL (0x5B)
+            // These are encoded as LD r,r where y==z and z<4.
+            // They set L and IL for the NEXT instruction and continue execution.
+            // - Bit 0 (s): Sets L (data addressing mode)
+            // - Bit 1 (r): Sets IL (instruction/index addressing mode)
+            // CEmu: cpu.L = context.s, cpu.IL = context.r
+            //
+            // Note: We do NOT set suffix=true here because we're handling the suffix
+            // atomically in this loop. The suffix only affects THIS loop iteration.
+            // If the next instruction is a DD/FD prefix (which sets self.prefix),
+            // the suffix modes should NOT persist to the execute_index call in the
+            // next step() - that would be incorrect behavior.
+            if x == 1 && y == z && z < 4 {
+                let s = (opcode & 0x01) != 0; // L mode (bit 0)
+                let r = (opcode & 0x02) != 0; // IL mode (bit 1)
+                self.l = s;
+                self.il = r;
+                // Continue to fetch and execute the next instruction with modified modes
+                // This matches CEmu's behavior where suffix + instruction are atomic
+                continue;
+            }
 
-        // Execute instruction - the return values are legacy and ignored
-        // since we now track cycles via bus.cycles()
-        match x {
-            0 => { self.execute_x0(bus, y, z, p, q); }
-            1 => {
-                if y == 6 && z == 6 {
-                    // HALT
-                    self.halted = true;
-                } else {
-                    // LD r,r'
-                    let val = self.get_reg8(z, bus);
-                    self.set_reg8(y, val, bus);
+            // Execute instruction - the return values are legacy and ignored
+            // since we now track cycles via bus.cycles()
+            match x {
+                0 => { self.execute_x0(bus, y, z, p, q); }
+                1 => {
+                    if y == 6 && z == 6 {
+                        // HALT
+                        self.halted = true;
+                    } else {
+                        // LD r,r'
+                        let val = self.get_reg8(z, bus);
+                        self.set_reg8(y, val, bus);
+                    }
                 }
+                2 => {
+                    // ALU A,r
+                    let val = self.get_reg8(z, bus);
+                    self.execute_alu(y, val);
+                }
+                3 => { self.execute_x3(bus, y, z, p, q); }
+                _ => {}
             }
-            2 => {
-                // ALU A,r
-                let val = self.get_reg8(z, bus);
-                self.execute_alu(y, val);
-            }
-            3 => { self.execute_x3(bus, y, z, p, q); }
-            _ => {}
+
+            break;
         }
 
         (bus.cycles() - start_cycles) as u32

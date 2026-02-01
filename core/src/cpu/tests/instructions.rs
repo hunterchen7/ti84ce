@@ -1868,8 +1868,7 @@ fn test_push_bc_uses_l_mode_with_suffix() {
     bus.poke_byte(0, 0x40);
     bus.poke_byte(1, 0xC5);
 
-    cpu.step(&mut bus); // execute suffix
-    cpu.step(&mut bus); // execute PUSH BC with L=0
+    cpu.step(&mut bus); // execute suffix + PUSH BC atomically (L=0 from suffix)
 
     // SP should decrease by 2 (16-bit stack) and only low 16 bits should be pushed.
     assert_eq!(cpu.sp & 0xFFFF, 0x01FE, "SP low 16 bits should decrease by 2");
@@ -1900,8 +1899,7 @@ fn test_ld_hl_nn_uses_l_mode_with_suffix() {
     bus.poke_byte(2, 0x00);
     bus.poke_byte(3, 0x02);
 
-    cpu.step(&mut bus); // suffix
-    cpu.step(&mut bus); // LD HL,(nn)
+    cpu.step(&mut bus); // execute suffix + LD HL,(nn) atomically
 
     assert_eq!(cpu.hl, 0x00001234, "HL should load 16-bit value and clear upper byte");
 }
