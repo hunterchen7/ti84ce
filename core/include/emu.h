@@ -28,6 +28,12 @@ const uint32_t* emu_framebuffer(const Emu*, int* w, int* h);
 // input
 void emu_set_key(Emu*, int row, int col, int down);
 
+// backlight
+uint8_t emu_get_backlight(const Emu*); // 0-255, 0 = off (screen black)
+
+// LCD state - 1 if LCD is on (show content), 0 if LCD is off (show black)
+int emu_is_lcd_on(const Emu*);
+
 // optional save state (buffer-based)
 size_t emu_save_state_size(const Emu*);
 int    emu_save_state(const Emu*, uint8_t* out, size_t cap); // bytes written or <0

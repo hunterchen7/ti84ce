@@ -1,6 +1,6 @@
 # TI-84 CE Emulator Build Commands
 
-.PHONY: android android-fast android-install test clean
+.PHONY: android android-fast android-install log-android test clean
 
 # Build Android APK (all ABIs)
 android:
@@ -13,6 +13,13 @@ android-fast:
 # Build all ABIs and install
 android-install:
 	./scripts/build-android.sh --install
+
+# Capture Android emulator logs to file
+log-android:
+	@echo "Capturing Android emulator logs..."
+	@echo "Press Ctrl+C to stop logging"
+	@adb logcat -c
+	@adb logcat EmuCore:V EmuJNI:V MainActivity:D *:S | tee emulator_logs.txt
 
 # Run Rust tests
 test:
@@ -29,5 +36,6 @@ help:
 	@echo "  make android        - Build APK for all Android ABIs"
 	@echo "  make android-fast   - Build arm64 only + install (fastest)"
 	@echo "  make android-install- Build all ABIs + install"
+	@echo "  make log-android    - Capture emulator logs to emulator_logs.txt"
 	@echo "  make test           - Run Rust tests"
 	@echo "  make clean          - Clean all build artifacts"

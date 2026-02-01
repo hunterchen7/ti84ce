@@ -290,17 +290,19 @@ impl Cpu {
         // so the interrupt is taken on the next step() call.
         if self.on_key_wake {
             self.on_key_wake = false;
+            // ON key can wake from HALT or from powered-off loop (running with interrupts disabled)
+            // In both cases, if there's a pending interrupt, enable interrupts so it gets taken
+            if self.irq_pending {
+                self.iff1 = true;
+                self.iff2 = true;
+            }
             if self.halted {
                 self.halted = false;
-                // If there's a pending interrupt, enable interrupts so it gets taken
-                // This matches TI-84 CE behavior where ON key wake triggers the interrupt
-                if self.irq_pending {
-                    self.iff1 = true;
-                    self.iff2 = true;
-                }
                 bus.add_cycles(4); // Wake from halt cycle cost
                 return (bus.cycles() - start_cycles) as u32;
             }
+            // If not halted, CPU is running in powered-off loop - interrupts now enabled,
+            // so ON_KEY interrupt will fire on next iteration
         }
 
         // Check for any key wake - wakes CPU from HALT like CEmu's CPU_SIGNAL_ANY_KEY

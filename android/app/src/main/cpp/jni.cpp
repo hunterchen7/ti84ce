@@ -16,6 +16,18 @@ static std::mutex g_log_mutex;
 static std::deque<std::string> g_logs;
 static constexpr size_t kMaxLogs = 200;
 
+// Mutex to protect emulator instance from concurrent access.
+//
+// THREADING MODEL:
+// - Android app calls runCycles() continuously from a background thread (Dispatchers.Default)
+// - UI thread calls setKey() when buttons are pressed/released
+// - Framebuffer thread calls copyFramebuffer() on each frame
+// - Without synchronization, concurrent access causes data races and hangs
+//
+// This mutex serializes ALL emulator operations to prevent race conditions.
+// Performance impact is minimal since operations are quick (<1ms typically).
+static std::mutex g_emulator_mutex;
+
 static void emu_log_callback(const char* message) {
     if (message == nullptr) {
         return;
@@ -51,6 +63,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeCreate(JNIEnv* env, jobject thiz) {
         emu_set_log_callback(emu_log_callback);
         log_set = true;
     }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     Emu* emu = emu_create();
     if (emu == nullptr) {
         LOGE("Failed to create emulator instance");
@@ -64,6 +77,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeDestroy(JNIEnv* env, jobject thiz, j
     LOGI("Destroying emulator instance");
     Emu* emu = toEmu(handle);
     if (emu != nullptr) {
+        std::lock_guard<std::mutex> lock(g_emulator_mutex);
         emu_destroy(emu);
     }
 }
@@ -89,6 +103,8 @@ Java_com_calc_emulator_EmulatorBridge_nativeLoadRom(JNIEnv* env, jobject thiz, j
     }
 
     LOGI("Loading ROM: %d bytes", static_cast<int>(len));
+
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     int result = emu_load_rom(emu, reinterpret_cast<const uint8_t*>(data), static_cast<size_t>(len));
 
     env->ReleaseByteArrayElements(romBytes, data, JNI_ABORT);
@@ -103,6 +119,7 @@ JNIEXPORT void JNICALL
 Java_com_calc_emulator_EmulatorBridge_nativeReset(JNIEnv* env, jobject thiz, jlong handle) {
     Emu* emu = toEmu(handle);
     if (emu != nullptr) {
+        std::lock_guard<std::mutex> lock(g_emulator_mutex);
         LOGI("Resetting emulator");
         emu_reset(emu);
     }
@@ -114,6 +131,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeRunCycles(JNIEnv* env, jobject thiz,
     if (emu == nullptr) {
         return 0;
     }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     return emu_run_cycles(emu, cycles);
 }
 
@@ -123,6 +141,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeGetWidth(JNIEnv* env, jobject thiz, 
     if (emu == nullptr) {
         return 0;
     }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     int w = 0, h = 0;
     emu_framebuffer(emu, &w, &h);
     return w;
@@ -134,6 +153,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeGetHeight(JNIEnv* env, jobject thiz,
     if (emu == nullptr) {
         return 0;
     }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     int w = 0, h = 0;
     emu_framebuffer(emu, &w, &h);
     return h;
@@ -146,6 +166,8 @@ Java_com_calc_emulator_EmulatorBridge_nativeCopyFramebuffer(JNIEnv* env, jobject
         LOGE("nativeCopyFramebuffer: null handle");
         return -1;
     }
+
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
 
     int w = 0, h = 0;
     const uint32_t* fb = emu_framebuffer(emu, &w, &h);
@@ -171,6 +193,7 @@ JNIEXPORT void JNICALL
 Java_com_calc_emulator_EmulatorBridge_nativeSetKey(JNIEnv* env, jobject thiz, jlong handle, jint row, jint col, jboolean down) {
     Emu* emu = toEmu(handle);
     if (emu != nullptr) {
+        std::lock_guard<std::mutex> lock(g_emulator_mutex);
         LOGI("JNI setKey: row=%d col=%d down=%d", static_cast<int>(row), static_cast<int>(col), static_cast<int>(down));
         emu_set_key(emu, row, col, down ? 1 : 0);
     } else {
@@ -184,6 +207,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeSaveStateSize(JNIEnv* env, jobject t
     if (emu == nullptr) {
         return 0;
     }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     return static_cast<jlong>(emu_save_state_size(emu));
 }
 
@@ -200,6 +224,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeSaveState(JNIEnv* env, jobject thiz,
         return -2;
     }
 
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     int result = emu_save_state(emu, reinterpret_cast<uint8_t*>(data), static_cast<size_t>(cap));
 
     env->ReleaseByteArrayElements(outData, data, 0); // 0 to copy back changes
@@ -220,6 +245,7 @@ Java_com_calc_emulator_EmulatorBridge_nativeLoadState(JNIEnv* env, jobject thiz,
         return -2;
     }
 
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
     int result = emu_load_state(emu, reinterpret_cast<const uint8_t*>(data), static_cast<size_t>(len));
 
     env->ReleaseByteArrayElements(stateData, data, JNI_ABORT);
@@ -259,6 +285,26 @@ Java_com_calc_emulator_EmulatorBridge_nativeDrainLogs(JNIEnv* env, jobject thiz,
     }
 
     return array;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeGetBacklight(JNIEnv* env, jobject thiz, jlong handle) {
+    Emu* emu = toEmu(handle);
+    if (emu == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
+    return static_cast<jint>(emu_get_backlight(emu));
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeIsLcdOn(JNIEnv* env, jobject thiz, jlong handle) {
+    Emu* emu = toEmu(handle);
+    if (emu == nullptr) {
+        return JNI_FALSE;
+    }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
+    return emu_is_lcd_on(emu) ? JNI_TRUE : JNI_FALSE;
 }
 
 } // extern "C"

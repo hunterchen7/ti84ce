@@ -8,7 +8,9 @@
 //! - LCD Controller (0xE30000)
 //! - Keypad Controller (0xF50000)
 //! - Watchdog Timer (0xF60000)
+//! - Backlight Controller (0xFB0000)
 
+pub mod backlight;
 pub mod control;
 pub mod flash;
 pub mod interrupt;
@@ -20,6 +22,7 @@ pub mod spi;
 pub mod timer;
 pub mod watchdog;
 
+pub use backlight::Backlight;
 pub use control::ControlPorts;
 pub use flash::FlashController;
 pub use interrupt::InterruptController;
@@ -54,6 +57,8 @@ const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
 const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
 const RTC_END: u32 = 0x180100;
+const BACKLIGHT_BASE: u32 = 0x1B0000; // 0xFB0000
+const BACKLIGHT_END: u32 = 0x1B0100;
 
 /// Peripheral subsystem containing all hardware controllers
 #[derive(Debug, Clone)]
@@ -80,6 +85,8 @@ pub struct Peripherals {
     pub rtc: RtcController,
     /// SHA256 accelerator
     pub sha256: Sha256Controller,
+    /// Backlight controller
+    pub backlight: Backlight,
     /// Fallback register storage for unmapped ports
     fallback: Vec<u8>,
     /// Keypad state (updated by Emu)
@@ -115,6 +122,7 @@ impl Peripherals {
             watchdog: WatchdogController::new(),
             rtc: RtcController::new(),
             sha256: Sha256Controller::new(),
+            backlight: Backlight::new(),
             fallback: vec![0x00; Self::FALLBACK_SIZE],
             key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
             os_timer_state: false,

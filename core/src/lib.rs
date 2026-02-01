@@ -171,6 +171,33 @@ pub extern "C" fn emu_set_key(emu: *mut SyncEmu, row: i32, col: i32, down: i32) 
     emu.set_key(row as usize, col as usize, down != 0);
 }
 
+/// Get the backlight brightness level (0-255).
+/// Returns 0 if emulator pointer is null.
+#[no_mangle]
+pub extern "C" fn emu_get_backlight(emu: *const SyncEmu) -> u8 {
+    if emu.is_null() {
+        return 0;
+    }
+
+    let sync_emu = unsafe { &*emu };
+    let emu = sync_emu.inner.lock().unwrap();
+    emu.get_backlight()
+}
+
+/// Check if LCD is on (should display content).
+/// Returns 1 if LCD is on, 0 if LCD is off.
+/// LCD is off when either control port 0x05 bit 4 is clear OR lcd.control bit 11 is clear.
+#[no_mangle]
+pub extern "C" fn emu_is_lcd_on(emu: *const SyncEmu) -> i32 {
+    if emu.is_null() {
+        return 0;
+    }
+
+    let sync_emu = unsafe { &*emu };
+    let emu = sync_emu.inner.lock().unwrap();
+    if emu.is_lcd_on() { 1 } else { 0 }
+}
+
 /// Get the size needed for a save state buffer.
 #[no_mangle]
 pub extern "C" fn emu_save_state_size(emu: *const SyncEmu) -> usize {
