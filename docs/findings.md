@@ -1321,3 +1321,58 @@ This single-steps through boot and reports the exact PC when 0xD000C4's value ch
 **Related:** The cursor being at row 6 after boot is correct for Classic mode - it's where the "RAM Cleared" message positions the cursor.
 
 _Investigation update: 2026-01-31 - Watchpoint analysis shows no MathPrint flag changes during boot_
+
+**Further Investigation (2026-01-31): Raw Trace Comparison**
+
+Added `rawtrace` command and setter methods to match CEmu's trace_gen initialization:
+- `set_powered_on(bool)` - Set power state without raising interrupts
+- `set_on_key_wake(bool)` - Set ON key signal without interrupt
+- `set_any_key_wake(bool)` - Set any-key signal without interrupt
+
+**CEmu trace_gen analysis:**
+- CEmu's trace_gen (cemu-ref/test/trace_gen.c) appears to have a bug
+- It runs 1 base tick at a time but misses many instruction boundaries
+- CEmu step 2→3 shows PC jumping from 0x000E59 to 0x00136D in ~160 cycles
+- This is impossible - there are hundreds of instructions between those addresses
+
+**Key observation:**
+- CEmu trace shows BC=0x012BD3 at the LDIR instruction
+- Our trace shows BC=0x013FD7 at the same PC (matches ROM encoding!)
+- ROM at 0x1367 contains `01 D7 3F 01` = `LD BC, 0x013FD7`
+- This confirms our emulator executes the correct values from ROM
+- CEmu's trace_gen is capturing incorrect/stale register state
+
+**Conclusion:** The MathPrint vs Classic mode difference may not exist in actual CEmu execution. The trace_gen tool appears to have timing issues that make direct comparison unreliable. The emulator boots correctly in Classic mode, which is the default when RAM is zeroed.
+
+### RTC Load Timing Critical for Boot Flow
+
+The RTC (Real-Time Clock) load operation timing affects boot flow significantly. When the ROM reads RTC offset 0x40 (load status), the returned value determines whether polling loops continue or exit.
+
+**Discovery:** The ROM at PC=0x0072FA contains a polling loop that reads from two ports:
+- BC=0x00F840: Control port offset 0x40 (returns 0)
+- BC=0x008040: RTC offset 0x40 (load status)
+
+The RTC load status returns:
+- `0x00` when load is complete (`load_ticks_processed >= 51`)
+- Non-zero bits (0xF8, 0x08, etc.) when load is in progress
+
+**Bug:** Our initial implementation set `load_ticks_processed = LOAD_TOTAL_TICKS (51)` on startup, meaning "load complete". When the ROM read RTC 0x40 without triggering a load first, we returned 0x00 immediately, causing the poll loop to exit after only 1 iteration.
+
+**Fix:** Implemented `update_load()` to calculate elapsed RTC ticks based on CPU cycles:
+```rust
+fn update_load(&mut self, current_cycles: u64, cpu_speed: u8) {
+    // Calculate elapsed RTC ticks since load started
+    // RTC runs at 32.768 kHz, CPU varies by speed
+    let cycles_per_rtc_tick: u64 = match cpu_speed {
+        0 => 183,   // 6 MHz
+        1 => 366,   // 12 MHz
+        2 => 732,   // 24 MHz
+        _ => 1465,  // 48 MHz
+    };
+    // Update load_ticks_processed based on elapsed time
+}
+```
+
+**Result:** After the fix, the poll loop correctly runs 432 iterations (vs 1 before), matching CEmu's behavior more closely. Boot still completes successfully.
+
+**Source:** CEmu's realclock.c uses `rtc_update_load()` which calculates elapsed ticks from `sched_ticks_remaining(SCHED_RTC)` during every port read.

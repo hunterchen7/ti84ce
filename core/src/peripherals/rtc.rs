@@ -145,17 +145,52 @@ impl RtcController {
         }
     }
 
-    /// Simulate load progress
+    /// Simulate load progress based on elapsed CPU cycles
     ///
-    /// CEmu uses a complex scheduler-based timing system that would require full
-    /// scheduler implementation to replicate exactly. For now, we keep the load
-    /// pending indefinitely, which achieves 3.2M+ instruction parity with CEmu.
-    /// The ROM code handles the pending state correctly by polling and waiting.
+    /// CEmu uses a scheduler-based system with sched_ticks_remaining() to track
+    /// load progress. We calculate elapsed RTC ticks from CPU cycles instead.
     ///
-    /// TODO: Implement proper scheduler timing for full parity beyond 3.2M steps
-    fn update_load(&mut self, _current_cycles: u64, _cpu_speed: u8) {
-        // Keep load pending - ROM handles this correctly by polling
-        // This matches CEmu behavior during early boot (3.2M+ instruction parity)
+    /// RTC runs at 32.768 kHz. CPU cycles per RTC tick varies by CPU speed:
+    /// - 6 MHz (speed 0): 6,000,000 / 32,768 = ~183 cycles
+    /// - 12 MHz (speed 1): 12,000,000 / 32,768 = ~366 cycles
+    /// - 24 MHz (speed 2): 24,000,000 / 32,768 = ~732 cycles
+    /// - 48 MHz (speed 3): 48,000,000 / 32,768 = ~1465 cycles
+    fn update_load(&mut self, current_cycles: u64, cpu_speed: u8) {
+        // If load is complete, nothing to do
+        if self.load_ticks_processed >= LOAD_TOTAL_TICKS {
+            return;
+        }
+
+        // Calculate elapsed RTC ticks since load started
+        if let Some(start_cycle) = self.load_start_cycle {
+            // CPU cycles per RTC tick based on speed
+            let cycles_per_rtc_tick: u64 = match cpu_speed {
+                0 => 183,   // 6 MHz
+                1 => 366,   // 12 MHz
+                2 => 732,   // 24 MHz
+                _ => 1465,  // 48 MHz (default)
+            };
+
+            let elapsed_cycles = current_cycles.saturating_sub(start_cycle);
+            let elapsed_rtc_ticks = elapsed_cycles / cycles_per_rtc_tick;
+
+            // Update load progress (capped at LOAD_TOTAL_TICKS)
+            let new_ticks = elapsed_rtc_ticks.min(LOAD_TOTAL_TICKS as u64) as u8;
+
+            // Handle transition from LOAD_PENDING (255) to actual tick count
+            // LOAD_PENDING as i8 is -1, so any non-negative elapsed ticks is an advancement
+            if self.load_ticks_processed == LOAD_PENDING {
+                // Transition from pending to counting
+                self.load_ticks_processed = new_ticks;
+            } else if new_ticks > self.load_ticks_processed {
+                self.load_ticks_processed = new_ticks;
+            }
+
+            // Clear load bit when complete
+            if self.load_ticks_processed >= LOAD_TOTAL_TICKS {
+                self.control &= !0x40;
+            }
+        }
     }
 
     /// Write a register byte
