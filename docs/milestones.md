@@ -151,6 +151,14 @@
 - CPU reaches OS idle loop at 0x085B7F after 3.6M steps
 - VRAM filled with actual UI content (not just white pixels)
 
+### 5g: Trace Parity Improvements (In Progress)
+
+- [x] Fixed suffix opcode handling (0x40, 0x49, 0x52, 0x5B) to execute atomically with following instruction
+  - Suffix + instruction now count as single step, matching CEmu trace behavior
+  - Reduced boot step count from 4.2M to 4.19M (8,856 fewer steps)
+- [ ] Investigate early boot trace divergence at PC=0x000E50 (OUT0 instruction)
+  - CEmu trace generator may have issues with fine-grained emu_run(1) tick stepping
+
 **Debug Tool:**
 
 ```bash
