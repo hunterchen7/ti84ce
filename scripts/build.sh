@@ -218,9 +218,11 @@ project(cemu_adapter C)
 set(CMAKE_C_STANDARD 11)
 set(CEMU_CORE_DIR "${CMAKE_SOURCE_DIR}/../../cemu-ref/core")
 file(GLOB CEMU_SOURCES "${CEMU_CORE_DIR}/*.c" "${CEMU_CORE_DIR}/usb/*.c")
+# Add os-linux.c for fopen_utf8 (works on macOS/iOS too)
+list(APPEND CEMU_SOURCES "${CEMU_CORE_DIR}/os/os-linux.c")
 set(ADAPTER_SOURCE "${CMAKE_SOURCE_DIR}/../../android/app/src/main/cpp/cemu/cemu_adapter.c")
 add_library(cemu_adapter STATIC ${CEMU_SOURCES} ${ADAPTER_SOURCE})
-target_include_directories(cemu_adapter PRIVATE ${CEMU_CORE_DIR} ${CEMU_CORE_DIR}/usb)
+target_include_directories(cemu_adapter PRIVATE ${CEMU_CORE_DIR} ${CEMU_CORE_DIR}/usb ${CEMU_CORE_DIR}/os)
 target_compile_definitions(cemu_adapter PRIVATE MULTITHREAD=0 CEMU_NO_UI=1)
 target_compile_options(cemu_adapter PRIVATE -w)
 EOF
@@ -241,8 +243,16 @@ EOF
 
         cmake --build . --config "$BUILD_CONFIG"
 
-        LIBRARY_PATH="$(pwd)/$BUILD_CONFIG-$PLATFORM_SUFFIX"
-        OTHER_LDFLAGS="-lcemu_adapter"
+        # Copy library to where Xcode expects it (same location as Rust)
+        CEMU_LIB="$(pwd)/$BUILD_CONFIG-$PLATFORM_SUFFIX/libcemu_adapter.a"
+        DEST_DIR="$PROJECT_ROOT/core/target/$RUST_TARGET/release"
+        mkdir -p "$DEST_DIR"
+        rm -f "$DEST_DIR/libemu_core.a"
+        cp "$CEMU_LIB" "$DEST_DIR/libemu_core.a"
+        echo "==> Copied CEmu library to $DEST_DIR/libemu_core.a"
+
+        LIBRARY_PATH="$DEST_DIR"
+        OTHER_LDFLAGS="-lemu_core"
 
         cd "$PROJECT_ROOT"
     else
@@ -264,30 +274,12 @@ EOF
         cd "$PROJECT_ROOT"
     fi
 
-    echo "==> Building iOS app..."
-    cd ios
-
-    xcodebuild -project Calc.xcodeproj \
-        -scheme Calc \
-        -configuration "$BUILD_CONFIG" \
-        -destination "$XCODE_DEST" \
-        LIBRARY_SEARCH_PATHS="$LIBRARY_PATH" \
-        OTHER_LDFLAGS="$OTHER_LDFLAGS" \
-        -quiet \
-        build
-
     echo ""
-    echo "==> Build complete!"
-
-    if [ "$OPEN_XCODE" = true ]; then
-        echo "==> Opening Xcode..."
-        open Calc.xcodeproj
-    fi
-
-    if [ "$TARGET" = "device" ]; then
-        echo ""
-        echo "To run on device, open Xcode and select your device."
-    fi
+    echo "==> Backend build complete!"
+    echo "    Library: $LIBRARY_PATH"
+    echo "    Linker flags: $OTHER_LDFLAGS"
+    echo ""
+    echo "Open ios/Calc.xcodeproj in Xcode to build and run the app."
 }
 
 # Run the appropriate build
