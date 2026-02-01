@@ -19,12 +19,18 @@ mod regs {
     pub const CONTROL_FLAGS: u32 = 0x05;
     /// Protected ports unlock
     pub const UNLOCK_STATUS: u32 = 0x06;
-    /// Battery configuration
+    /// Battery configuration (starts battery probe)
     pub const BATTERY_CONFIG: u32 = 0x07;
     /// Fixed value register (returns 0x7F)
     pub const FIXED_7F: u32 = 0x08;
     /// Battery/panel control
     pub const PANEL_CONTROL: u32 = 0x09;
+    /// Battery check (advances FSM)
+    pub const BATTERY_CHECK: u32 = 0x0A;
+    /// Battery charging status
+    pub const BATTERY_CHARGING: u32 = 0x0B;
+    /// Battery reset (resets FSM)
+    pub const BATTERY_RESET: u32 = 0x0C;
     /// LCD enable
     pub const LCD_ENABLE: u32 = 0x0D;
     /// USB/general control
@@ -46,6 +52,17 @@ mod speed {
     pub const MHZ_48: u8 = 0x03;
 }
 
+/// Battery status levels (CEmu control.h)
+#[allow(dead_code)]
+mod battery {
+    pub const DISCHARGED: u8 = 0;
+    pub const LEVEL_0: u8 = 1;
+    pub const LEVEL_1: u8 = 2;
+    pub const LEVEL_2: u8 = 3;
+    pub const LEVEL_3: u8 = 4;
+    pub const LEVEL_4: u8 = 5; // Full battery
+}
+
 /// Control Port Controller
 #[derive(Debug, Clone)]
 pub struct ControlPorts {
@@ -53,18 +70,22 @@ pub struct ControlPorts {
     power: u8,
     /// CPU speed setting
     cpu_speed: u8,
-    /// Battery status
-    battery_status: u8,
     /// Device type flags
     device_type: u8,
     /// Control flags
     control_flags: u8,
     /// Unlock status
     unlock_status: u8,
-    /// Battery configuration
+    /// Battery configuration (port 0x07)
     battery_config: u8,
-    /// Panel control
+    /// Panel control (port 0x09)
     panel_control: u8,
+    /// Battery check port (port 0x0A)
+    battery_check: u8,
+    /// Battery charging port (port 0x0B)
+    battery_charging_port: u8,
+    /// Battery reset port (port 0x0C)
+    battery_reset: u8,
     /// LCD enable
     lcd_enable: u8,
     /// USB control
@@ -82,6 +103,13 @@ pub struct ControlPorts {
     protected_end: u32,
     /// Stack limit (3 bytes)
     stack_limit: u32,
+    /// Battery FSM: current read status (returned on port 0x02 reads)
+    /// Values: 0, 1, 3, 5, 7, 9, 11 indicate different FSM states
+    read_battery_status: u8,
+    /// Battery FSM: actual battery level (DISCHARGED through LEVEL_4)
+    set_battery_status: u8,
+    /// Battery charging flag
+    battery_charging: bool,
 }
 
 impl ControlPorts {
@@ -91,12 +119,14 @@ impl ControlPorts {
         Self {
             power: 0x00,
             cpu_speed: speed::MHZ_6,  // CEmu starts at 6 MHz, ROM sets speed later
-            battery_status: 0x00,     // CEmu: memset clears to 0 (readBatteryStatus = 0)
             device_type: 0x00,        // Standard device
             control_flags: 0x00,
             unlock_status: 0x00,
             battery_config: 0x00,
             panel_control: 0x00,
+            battery_check: 0x00,
+            battery_charging_port: 0x00,
+            battery_reset: 0x00,
             lcd_enable: 0x00,
             usb_control: 0x02,        // CEmu explicitly sets ports[0x0F] = 0x02
             flash_unlock: 0x00,       // Initially 0 (matches CEmu)
@@ -107,6 +137,10 @@ impl ControlPorts {
             protected_start: 0xD1887C,
             protected_end: 0xD1887C,
             stack_limit: 0,
+            // Battery FSM: CEmu sets setBatteryStatus = BATTERY_4, readBatteryStatus = 0
+            read_battery_status: 0,
+            set_battery_status: battery::LEVEL_4, // Full battery
+            battery_charging: false,
         }
     }
 
@@ -124,16 +158,30 @@ impl ControlPorts {
                 self.power
             }
             regs::CPU_SPEED => self.cpu_speed,
-            regs::BATTERY_STATUS => self.battery_status,
+            regs::BATTERY_STATUS => {
+                // For now, always return 0 which indicates battery probe complete
+                // The FSM is complex and our implementation might not match CEmu exactly
+                // TODO: Implement proper battery FSM if needed for specific ROM behavior
+                0
+            }
             regs::DEVICE_TYPE => self.device_type,
             regs::CONTROL_FLAGS => self.control_flags,
             regs::UNLOCK_STATUS => self.unlock_status,
             regs::BATTERY_CONFIG => self.battery_config,
             regs::FIXED_7F => 0x7F, // Always returns 0x7F
             regs::PANEL_CONTROL => self.panel_control,
+            regs::BATTERY_CHECK => self.battery_check,
+            regs::BATTERY_CHARGING => {
+                // CEmu: control.ports[index] | control.batteryCharging << 1
+                self.battery_charging_port | ((self.battery_charging as u8) << 1)
+            }
+            regs::BATTERY_RESET => self.battery_reset,
             regs::LCD_ENABLE => self.lcd_enable,
             regs::USB_CONTROL => {
-                // CEmu ORs usb_status() into port 0x0F, which returns 0xC0 at reset.
+                // CEmu ORs usb_status() into port 0x0F
+                // Note: CEmu's usb_status() returns 0x40 at reset (ROLE_D bit set in otgcsr)
+                // but the ROM seems to expect 0xC0 for boot to complete. Using 0xC0 for now.
+                // TODO: Investigate why 0x40 causes infinite loop at PC=0x0013B3
                 self.usb_control | 0xC0
             },
             regs::FIXED_80 => 0x80, // Always returns 0x80
@@ -169,9 +217,9 @@ impl ControlPorts {
         match addr {
             regs::POWER => {
                 // Bit 4 is read-only (power stable indicator)
-                // Only bits 0, 1, 7 are writable (0x83 mask)
+                // Only bits 0, 1, 7 are writable (0x93 mask per CEmu)
                 let old = self.power;
-                self.power = value & 0x83;
+                self.power = value & 0x93;
                 // Log power register changes to detect APO (Auto Power Off)
                 if old != self.power {
                     crate::emu::log_event(&format!(
@@ -182,6 +230,8 @@ impl ControlPorts {
                         (self.power >> 7) & 1
                     ));
                 }
+                // Battery FSM transitions would go here if implemented
+                // For now we skip the FSM to ensure boot completes
             }
             regs::CPU_SPEED => self.cpu_speed = value & 0x03,
             regs::BATTERY_STATUS => {} // Read-only
@@ -198,13 +248,41 @@ impl ControlPorts {
                     self.flash_unlock &= !(1 << 3);
                 }
             }
-            regs::BATTERY_CONFIG => self.battery_config = value,
+            regs::BATTERY_CONFIG => {
+                // CEmu: writing bit 4 or 7 starts battery probe
+                // Skip FSM for now - just store value
+                self.battery_config = value;
+            }
             regs::FIXED_7F => {} // Read-only
-            regs::PANEL_CONTROL => self.panel_control = value,
+            regs::PANEL_CONTROL => {
+                // Skip battery FSM - just store value
+                self.panel_control = value;
+            }
+            regs::BATTERY_CHECK => {
+                // Skip battery FSM - just store value
+                self.battery_check = value;
+            }
+            regs::BATTERY_CHARGING => {
+                self.battery_charging_port = value;
+            }
+            regs::BATTERY_RESET => {
+                // Skip battery FSM - just store value
+                self.battery_reset = value;
+            }
             regs::LCD_ENABLE => {
                 // CEmu: control.ports[index] = (byte & 0xF) << 4 | (byte & 0xF)
                 // Duplicates the low nibble into both nibbles
+                let old = self.lcd_enable;
                 self.lcd_enable = (value & 0x0F) << 4 | (value & 0x0F);
+                // Log LCD enable/disable (bit 3 controls LCD on/off)
+                if old != self.lcd_enable {
+                    let lcd_enabled = (self.lcd_enable & (1 << 3)) != 0;
+                    crate::emu::log_event(&format!(
+                        "LCD_ENABLE: 0x{:02X} -> 0x{:02X} (LCD {})",
+                        old, self.lcd_enable,
+                        if lcd_enabled { "ON" } else { "OFF" }
+                    ));
+                }
             }
             regs::USB_CONTROL => {
                 // CEmu: control.ports[index] = byte & 3
@@ -247,9 +325,15 @@ impl ControlPorts {
         self.cpu_speed
     }
 
-    /// Check if LCD is enabled via control port
+    /// Check if LCD is enabled via control port 0x0D
     pub fn lcd_enabled(&self) -> bool {
         self.lcd_enable != 0
+    }
+
+    /// Check if LCD enable bit is set in control flags (port 0x05 bit 4)
+    /// This is one of two conditions CEmu checks for "LCD OFF"
+    pub fn lcd_flag_enabled(&self) -> bool {
+        self.control_flags & (1 << 4) != 0
     }
 
     /// Check if protected ports are unlocked (bit 2 of unlock_status)
@@ -310,6 +394,43 @@ impl ControlPorts {
     pub fn is_unprivileged(&self, pc: u32) -> bool {
         pc > self.privileged && (pc < self.protected_start || pc > self.protected_end)
     }
+
+    /// Dump all control port values for debugging/comparison with CEmu
+    /// Returns a formatted string showing all port values
+    pub fn dump(&self) -> String {
+        let mut s = String::new();
+        s.push_str("=== Control Ports (0xE000xx / 0xFF00xx) ===\n");
+        s.push_str(&format!("0x00 POWER:          0x{:02X}\n", self.power));
+        s.push_str(&format!("0x01 CPU_SPEED:      0x{:02X} ({}MHz)\n",
+            self.cpu_speed,
+            match self.cpu_speed { 0 => 6, 1 => 12, 2 => 24, 3 => 48, _ => 0 }));
+        s.push_str(&format!("0x02 BATTERY_STATUS: 0x{:02X} (FSM state, setBattery={})\n",
+            self.read_battery_status, self.set_battery_status));
+        s.push_str(&format!("0x03 DEVICE_TYPE:    0x{:02X}\n", self.device_type));
+        s.push_str(&format!("0x05 CONTROL_FLAGS:  0x{:02X}\n", self.control_flags));
+        s.push_str(&format!("0x06 UNLOCK_STATUS:  0x{:02X} (protected_unlocked={})\n",
+            self.unlock_status, self.protected_ports_unlocked()));
+        s.push_str(&format!("0x07 BATTERY_CONFIG: 0x{:02X}\n", self.battery_config));
+        s.push_str(&format!("0x08 FIXED_7F:       0x7F (always)\n"));
+        s.push_str(&format!("0x09 PANEL_CONTROL:  0x{:02X}\n", self.panel_control));
+        s.push_str(&format!("0x0A BATTERY_CHECK:  0x{:02X}\n", self.battery_check));
+        s.push_str(&format!("0x0B BATTERY_CHARG:  0x{:02X} (charging={})\n",
+            self.battery_charging_port, self.battery_charging));
+        s.push_str(&format!("0x0C BATTERY_RESET:  0x{:02X}\n", self.battery_reset));
+        s.push_str(&format!("0x0D LCD_ENABLE:     0x{:02X} (lcd_enabled={})\n",
+            self.lcd_enable, self.lcd_enabled()));
+        s.push_str(&format!("0x0F USB_CONTROL:    0x{:02X} (stored) -> 0x{:02X} (read with USB status)\n",
+            self.usb_control, self.usb_control | 0xC0));
+        s.push_str(&format!("0x1C FIXED_80:       0x80 (always)\n"));
+        s.push_str(&format!("0x1D-1F PRIVILEGED:  0x{:06X}\n", self.privileged));
+        s.push_str(&format!("0x20-22 PROT_START:  0x{:06X}\n", self.protected_start));
+        s.push_str(&format!("0x23-25 PROT_END:    0x{:06X}\n", self.protected_end));
+        s.push_str(&format!("0x28 FLASH_UNLOCK:   0x{:02X} (flash_unlocked={})\n",
+            self.flash_unlock, self.flash_unlocked()));
+        s.push_str(&format!("0x29 GENERAL:        0x{:02X}\n", self.general));
+        s.push_str(&format!("0x3A-3C STACK_LIMIT: 0x{:06X}\n", self.stack_limit));
+        s
+    }
 }
 
 impl Default for ControlPorts {
@@ -329,8 +450,8 @@ mod tests {
         assert_eq!(ctrl.cpu_speed(), speed::MHZ_6);
         assert!(!ctrl.lcd_enabled());
         assert!(!ctrl.protected_ports_unlocked());
-        // Battery status defaults to 0 (CEmu memset clears to 0)
-        assert_eq!(ctrl.battery_status, 0x00);
+        // Battery FSM read status defaults to 0 (probe complete)
+        assert_eq!(ctrl.read_battery_status, 0);
         // Privileged boundary defaults to 0xFFFFFF (all code is privileged)
         assert_eq!(ctrl.privileged, 0xFFFFFF);
         // Protected memory defaults to 0xD1887C (start=end)
@@ -355,8 +476,8 @@ mod tests {
         assert_eq!(ctrl.privileged, 0xFFFFFF);
         // CEmu sets protected_start to 0xD1887C
         assert_eq!(ctrl.protected_start, 0xD1887C);
-        // Battery status is 0
-        assert_eq!(ctrl.battery_status, 0x00);
+        // Battery FSM read status is 0
+        assert_eq!(ctrl.read_battery_status, 0);
     }
 
     #[test]
@@ -466,7 +587,8 @@ mod tests {
     #[test]
     fn test_usb_control_masked() {
         let mut ctrl = ControlPorts::new();
-        // Initial value is 0x02, but read ORs in 0xC0 (usb_status)
+        // Initial value is 0x02, read ORs in 0xC0 (usb_status)
+        // Note: CEmu's usb_status() returns 0x40 at reset, but we use 0xC0 for boot compatibility
         assert_eq!(ctrl.read(regs::USB_CONTROL), 0xC2);
 
         // Writing 0xFF should be masked to 0x03, read shows 0xC3 (with USB status)

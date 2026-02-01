@@ -608,6 +608,21 @@ impl Emu {
         }
     }
 
+    /// Get the backlight brightness level (0-255).
+    /// Returns 0 when backlight is off (screen should appear black).
+    pub fn get_backlight(&self) -> u8 {
+        self.bus.ports.backlight.brightness()
+    }
+
+    /// Check if LCD is on (should display content).
+    /// Returns true when both conditions are met:
+    /// 1. Control port 0x05 bit 4 is set (lcd_flag_enabled)
+    /// 2. LCD controller bit 11 is set (lcd powered)
+    /// This matches CEmu's lcdwidget.cpp check for "LCD OFF" display.
+    pub fn is_lcd_on(&self) -> bool {
+        self.bus.ports.control.lcd_flag_enabled() && self.bus.ports.lcd.is_powered()
+    }
+
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
     /// Also raises the ON_KEY and WAKE interrupts for normal interrupt handling
     pub fn press_on_key(&mut self) {
@@ -1022,6 +1037,11 @@ impl Emu {
             ctrl.flash_ready(),
             ctrl.privileged_boundary()
         )
+    }
+
+    /// Dump control port values for comparison with CEmu
+    pub fn dump_control_ports(&self) -> String {
+        self.bus.ports.control.dump()
     }
 
     /// Dump execution history for debugging

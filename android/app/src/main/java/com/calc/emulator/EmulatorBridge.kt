@@ -172,6 +172,25 @@ class EmulatorBridge {
         return nativeDrainLogs(handle)?.toList().orEmpty()
     }
 
+    /**
+     * Get the backlight brightness level (0-255).
+     * Returns 0 when backlight is off (screen should be black).
+     */
+    fun getBacklight(): Int {
+        if (handle == 0L) return 0
+        return nativeGetBacklight(handle)
+    }
+
+    /**
+     * Check if LCD is on (should display content).
+     * Returns true when LCD should show content, false when LCD is off (show black).
+     * This matches CEmu's "LCD OFF" detection.
+     */
+    fun isLcdOn(): Boolean {
+        if (handle == 0L) return false
+        return nativeIsLcdOn(handle)
+    }
+
     // Native methods
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
@@ -183,6 +202,8 @@ class EmulatorBridge {
     private external fun nativeCopyFramebuffer(handle: Long, outArgb: IntArray): Int
     private external fun nativeSetKey(handle: Long, row: Int, col: Int, down: Boolean)
     private external fun nativeDrainLogs(handle: Long): Array<String>?
+    private external fun nativeGetBacklight(handle: Long): Int
+    private external fun nativeIsLcdOn(handle: Long): Boolean
     private external fun nativeSaveStateSize(handle: Long): Long
     private external fun nativeSaveState(handle: Long, outData: ByteArray): Int
     private external fun nativeLoadState(handle: Long, stateData: ByteArray): Int

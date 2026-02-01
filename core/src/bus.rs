@@ -753,6 +753,11 @@ impl Bus {
                 let offset = (port & 0x7F) as u32;
                 self.ports.keypad.read(offset, &keys)
             }
+            0xB => {
+                // Backlight - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.backlight.read(offset)
+            }
             0xD => {
                 // SPI - mask with 0x7F (CEmu port_mirrors)
                 let offset = (port & 0x7F) as u32;
@@ -763,7 +768,7 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.read(offset)
             }
-            // Unimplemented: USB(3), Protected(9), Backlight(B), Cxxx(C), UART(E)
+            // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => 0x00,
         }
     }
@@ -850,6 +855,11 @@ impl Bus {
                     }
                 }
             }
+            0xB => {
+                // Backlight - mask with 0xFF
+                let offset = (port & 0xFF) as u32;
+                self.ports.backlight.write(offset, value);
+            }
             0xD => {
                 // SPI - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
@@ -860,7 +870,7 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
             }
-            // Unimplemented: USB(3), Protected(9), Backlight(B), Cxxx(C), UART(E)
+            // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => {}
         }
     }

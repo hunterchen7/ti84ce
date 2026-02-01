@@ -100,9 +100,15 @@ impl LcdController {
         self.frame_cycles = 0;
     }
 
-    /// Check if LCD is enabled
+    /// Check if LCD is enabled (bit 0)
     pub fn is_enabled(&self) -> bool {
         self.control & ctrl::ENABLE != 0
+    }
+
+    /// Check if LCD power is on (bit 11)
+    /// This is what CEmu checks for "LCD OFF" display
+    pub fn is_powered(&self) -> bool {
+        self.control & ctrl::PWR != 0
     }
 
     /// Get control register

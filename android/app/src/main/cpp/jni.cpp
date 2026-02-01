@@ -287,4 +287,24 @@ Java_com_calc_emulator_EmulatorBridge_nativeDrainLogs(JNIEnv* env, jobject thiz,
     return array;
 }
 
+JNIEXPORT jint JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeGetBacklight(JNIEnv* env, jobject thiz, jlong handle) {
+    Emu* emu = toEmu(handle);
+    if (emu == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
+    return static_cast<jint>(emu_get_backlight(emu));
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativeIsLcdOn(JNIEnv* env, jobject thiz, jlong handle) {
+    Emu* emu = toEmu(handle);
+    if (emu == nullptr) {
+        return JNI_FALSE;
+    }
+    std::lock_guard<std::mutex> lock(g_emulator_mutex);
+    return emu_is_lcd_on(emu) ? JNI_TRUE : JNI_FALSE;
+}
+
 } // extern "C"

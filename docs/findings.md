@@ -1174,3 +1174,111 @@ All JNI functions now acquire the lock using `std::lock_guard` for RAII safety.
 **Source**: Android app MainActivity.kt, JNI layer jni.cpp, investigation of hang symptoms.
 
 _Fixed: 2026-01-31 - Added g_emulator_mutex to prevent race conditions_
+
+## Display Mode Investigation
+
+### Classic Mode vs MathPrint Mode After Boot
+
+**Status: Under Investigation**
+
+**Symptoms:**
+- Status bar shows "CL" (Classic mode) instead of "MP" (MathPrint mode)
+- Cursor and text appear lower on screen than expected
+- Compared to CEmu which shows MathPrint mode after boot
+
+**What we found:**
+- TI-OS stores MathPrint flag at address 0xD000C4, bit 5
+- After boot, this byte is 0x00 in our emulator (MathPrint disabled)
+- curRow = 6 (cursor at row 6 instead of row 0)
+- mathprintFlags (0xD000C4) = 0x00
+- mathprintBackup (0xD003E6) = 0x00
+
+**Relevant TI-OS variables:**
+- `mathprintFlagsLoc = $D000C4` - Flag byte location
+- `mathprintEnabled = $0005` - Bit 5 indicates MathPrint enabled
+- `mathprintBackup = $D003E6` - Backup of MathPrint state
+
+**LCD Timing (interesting observation):**
+- PPL (pixels per line) = 240 (not 320)
+- LPP (lines per panel) = 320 (not 240)
+- These appear transposed, though CEmu uses fixed LCD_WIDTH=320, LCD_HEIGHT=240 for rendering regardless
+
+**Investigation Results (memory write trace):**
+
+Traced writes to 0xD000C4 during boot using `cargo run --example debug -- mathprint`:
+
+```
+=== Writes to MathPrint Flag (0xD000C4) ===
+  Cycle       9853: 0xD000C4 <- 0x00 (bit5=CLEAR - Classic)
+  Cycle   24056341: 0xD000C4 <- 0x00 (bit5=CLEAR - Classic)
+```
+
+**Key finding:** The TI-OS ROM explicitly writes 0x00 (Classic mode) to the MathPrint flag **twice** during boot. It never writes a value with bit 5 set.
+
+**Why CEmu shows MathPrint mode:**
+- ~~Initial theory was CEmu restores saved states~~
+- **User reports:** Even after a fresh reset in CEmu (not restoring state), it boots to MathPrint mode
+- This indicates a real difference in emulation behavior that affects ROM initialization
+
+**Investigation - USB Status Difference:**
+- CEmu's `usb_status()` returns 0x40 at reset (ROLE_D bit set in otgcsr = 0x00310E20)
+- Our emulator was returning 0xC0 for USB status
+- **However**, changing to 0x40 causes boot to fail (infinite loop at PC=0x0013B3)
+- The ROM seems to require certain USB status bits to be set for boot to complete
+- This mismatch needs further investigation
+
+**Investigation - RNG Differences:**
+- CEmu seeds its bus RNG with `srand(time(NULL)); bus_init_rand(rand(), rand(), rand())`
+- This produces time-dependent pseudo-random values for unmapped memory reads
+- Our emulator uses fixed RNG seeds
+- Unclear if this affects MathPrint mode selection
+
+**Investigation - Battery FSM:**
+- CEmu has a complex battery status state machine (readBatteryStatus FSM)
+- Ports 0x00, 0x07, 0x09, 0x0A, 0x0C participate in the FSM
+- We attempted to implement the FSM but it broke boot (infinite loop)
+- Reverted to simple implementation: port 0x02 always returns 0
+- **Conclusion:** Battery FSM is NOT the cause of MathPrint difference
+
+**Debug Tools Added:**
+- `cargo run --example debug -- ports` - Dumps control port values after boot
+- Control ports now show battery FSM state, charging status, etc.
+- Port dump shows our values match expected behavior
+
+**Current Control Port Values After Boot:**
+```
+0x00 POWER:          0x03
+0x01 CPU_SPEED:      0x03 (48MHz)
+0x02 BATTERY_STATUS: 0x00 (probe complete)
+0x05 CONTROL_FLAGS:  0x16
+0x07 BATTERY_CONFIG: 0xB6
+0x0F USB_CONTROL:    0x02 -> 0xC2 (with USB status)
+```
+
+**Current Status:**
+- Cause of MathPrint vs Classic mode difference remains under investigation
+- Battery FSM ruled out as the cause
+- **Note:** This is a cosmetic difference only - emulator boots and functions correctly
+
+**New Finding (2026-01-31): No MathPrint writes during boot**
+
+Added a watchpoint command to trace exact PC when 0xD000C4 changes. Results:
+- **NO value changes** to 0xD000C4 during 70M cycles of boot
+- RAM starts at 0x00 (zeroed during reset)
+- ROM writes 0x00 twice (cycles ~9K and ~24M) but value doesn't change
+- Final value at boot completion: 0x00 (Classic mode)
+
+**Implication:** The ROM's default behavior with zeroed RAM is Classic mode. If CEmu shows MathPrint, either:
+1. CEmu has additional initialization that sets the flag
+2. CEmu is loading a saved state that had MathPrint enabled
+3. The user's observation about CEmu may need verification
+
+**Debug command added:**
+```bash
+cargo run --example debug -- watchpoint
+```
+This single-steps through boot and reports the exact PC when 0xD000C4's value changes.
+
+**Related:** The cursor being at row 6 after boot is correct for Classic mode - it's where the "RAM Cleared" message positions the cursor.
+
+_Investigation update: 2026-01-31 - Watchpoint analysis shows no MathPrint flag changes during boot_

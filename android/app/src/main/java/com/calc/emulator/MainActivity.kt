@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.Modifier
@@ -107,6 +108,7 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     var showDebug by remember { mutableStateOf(false) }
     var lastKeyPress by remember { mutableStateOf("None") }
     val logLines = remember { mutableStateListOf<String>() }
+    var isLcdOn by remember { mutableStateOf(true) }
 
     // Framebuffer bitmap
     val bitmap = remember {
@@ -168,6 +170,7 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     // Update framebuffer on each frame and drain logs
     LaunchedEffect(frameCounter) {
         emulator.copyFramebufferToBitmap(bitmap)
+        isLcdOn = emulator.isLcdOn()
         val newLogs = emulator.drainLogs()
         if (newLogs.isNotEmpty()) {
             logLines.addAll(newLogs)
@@ -188,6 +191,7 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
         EmulatorView(
             emulator = emulator,
             bitmap = bitmap,
+            isLcdOn = isLcdOn,
             romName = romName,
             romSize = romSize,
             isRunning = isRunning,
@@ -294,10 +298,12 @@ fun RomLoadingScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EmulatorView(
     emulator: EmulatorBridge,
     bitmap: Bitmap,
+    isLcdOn: Boolean,
     romName: String?,
     romSize: Int,
     isRunning: Boolean,
@@ -315,82 +321,181 @@ fun EmulatorView(
 ) {
     var overlayOffset by remember { mutableStateOf(Offset(6f, 6f)) }
     var overlaySize by remember { mutableStateOf(IntSize.Zero) }
-    val density = LocalDensity.current
+    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(8.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // Control buttons
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 8.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            Button(
-                onClick = onLoadNewRom,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF2196F3)
-                )
+    ModalNavigationDrawer(
+        drawerState = drawerState,
+        drawerContent = {
+            ModalDrawerSheet(
+                drawerContainerColor = Color(0xFF1A1A2E)
             ) {
-                Text("ROM")
-            }
-
-            Button(
-                onClick = onToggleRunning,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isRunning) Color(0xFFFF5722) else Color(0xFF4CAF50)
+                Spacer(modifier = Modifier.height(24.dp))
+                Text(
+                    text = "TI-84 Plus CE",
+                    fontSize = 20.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
-            ) {
-                Text(if (isRunning) "Pause" else "Run")
-            }
-
-            Button(onClick = onReset) {
-                Text("Reset")
-            }
-
-            Button(
-                onClick = onToggleDebug,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (showDebug) Color(0xFF9C27B0) else Color.DarkGray
+                Divider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = Color(0xFF333344)
                 )
-            ) {
-                Text("Debug")
+
+                // ROM button
+                NavigationDrawerItem(
+                    label = { Text("Load ROM", color = Color.White) },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onLoadNewRom()
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        unselectedContainerColor = Color.Transparent
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                // Pause/Run button
+                NavigationDrawerItem(
+                    label = {
+                        Text(
+                            if (isRunning) "Pause Emulation" else "Run Emulation",
+                            color = if (isRunning) Color(0xFFFF5722) else Color(0xFF4CAF50)
+                        )
+                    },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onToggleRunning()
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        unselectedContainerColor = Color.Transparent
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                // Reset button
+                NavigationDrawerItem(
+                    label = { Text("Reset", color = Color.White) },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onReset()
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        unselectedContainerColor = Color.Transparent
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                Divider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = Color(0xFF333344)
+                )
+
+                // Debug toggle
+                NavigationDrawerItem(
+                    label = {
+                        Text(
+                            if (showDebug) "Hide Debug Info" else "Show Debug Info",
+                            color = if (showDebug) Color(0xFF9C27B0) else Color.White
+                        )
+                    },
+                    selected = showDebug,
+                    onClick = {
+                        onToggleDebug()
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        selectedContainerColor = Color(0xFF2A2A3E),
+                        unselectedContainerColor = Color.Transparent
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                // ROM info at bottom
+                romName?.let {
+                    Text(
+                        text = "ROM: $it",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
+                    Text(
+                        text = "Size: ${romSize / 1024} KB",
+                        fontSize = 12.sp,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
+    ) {
+        var containerSize by remember { mutableStateOf(IntSize.Zero) }
 
-        // Screen display
-        BoxWithConstraints(
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(320f / 240f)
-                .background(Color.Black, RoundedCornerShape(4.dp))
-                .padding(4.dp)
+                .fillMaxSize()
+                .onSizeChanged { containerSize = it }
         ) {
-            val maxWidthPx = with(density) { maxWidth.toPx() }
-            val maxHeightPx = with(density) { maxHeight.toPx() }
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Emulator screen",
-                modifier = Modifier.fillMaxSize(),
-                contentScale = ContentScale.Fit,
-                filterQuality = FilterQuality.None
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(8.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                // Screen display
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(320f / 240f)
+                        .background(Color.Black, RoundedCornerShape(4.dp))
+                        .padding(4.dp)
+                ) {
+                    // Only show framebuffer when LCD is on; otherwise show black (matching CEmu)
+                    if (isLcdOn) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Emulator screen",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Fit,
+                            filterQuality = FilterQuality.None
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Keypad
+                Keypad(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    onKeyDown = onKeyDown,
+                    onKeyUp = onKeyUp
+                )
+            }
+
+            // Floating debug overlay - can be dragged anywhere on screen
             if (showDebug) {
+                val containerWidthPx = containerSize.width.toFloat()
+                val containerHeightPx = containerSize.height.toFloat()
+
                 Column(
                     modifier = Modifier
                         .offset { IntOffset(overlayOffset.x.roundToInt(), overlayOffset.y.roundToInt()) }
                         .onSizeChanged { overlaySize = it }
-                        .pointerInput(maxWidthPx, maxHeightPx, overlaySize) {
+                        .pointerInput(containerWidthPx, containerHeightPx, overlaySize) {
                             detectDragGestures { change, dragAmount ->
                                 change.consume()
                                 val newX = overlayOffset.x + dragAmount.x
                                 val newY = overlayOffset.y + dragAmount.y
-                                val maxX = (maxWidthPx - overlaySize.width).coerceAtLeast(0f)
-                                val maxY = (maxHeightPx - overlaySize.height).coerceAtLeast(0f)
+                                val maxX = (containerWidthPx - overlaySize.width).coerceAtLeast(0f)
+                                val maxY = (containerHeightPx - overlaySize.height).coerceAtLeast(0f)
                                 overlayOffset = Offset(
                                     newX.coerceIn(0f, maxX),
                                     newY.coerceIn(0f, maxY)
@@ -452,17 +557,6 @@ fun EmulatorView(
                 }
             }
         }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Keypad
-        Keypad(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            onKeyDown = onKeyDown,
-            onKeyUp = onKeyUp
-        )
     }
 }
 

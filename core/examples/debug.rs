@@ -53,6 +53,9 @@ fn main() {
             let expr = args.get(2).map(|s| s.as_str()).unwrap_or("6+7");
             cmd_calc(expr);
         }
+        "mathprint" => cmd_mathprint_trace(),
+        "watchpoint" => cmd_watchpoint_mathprint(),
+        "ports" => cmd_ports(),
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -89,6 +92,15 @@ Commands:
                     Default: "6+7"
                     Boots, types expression, captures trace on ENTER
                     Supported chars: 0-9, +, -, *, /
+
+  mathprint         Trace writes to MathPrint flag (0xD000C4) during boot
+                    Investigates why emulator boots into Classic mode
+
+  watchpoint        Single-step boot and capture PC when 0xD000C4 is written
+                    Provides exact code location making MathPrint decision
+
+  ports             Dump control port values after boot
+                    Useful for comparing with CEmu
 
   help              Show this help message
 
@@ -529,6 +541,44 @@ fn cmd_vram() {
     println!("Control: 0x{:08X}", lcd.control);
     println!("VRAM base: 0x{:06X}", lcd.upbase);
 
+    // TI-OS cursor and display state variables
+    println!("\n=== TI-OS Display State ===");
+    let currow = emu.peek_byte(0xD00595);
+    let curcol = emu.peek_byte(0xD00596);
+    let penrow = emu.peek_byte(0xD008D5) as u16 | ((emu.peek_byte(0xD008D6) as u16) << 8);
+    let pencol = emu.peek_byte(0xD008D2) as u16 | ((emu.peek_byte(0xD008D3) as u16) << 8);
+    println!("curRow: {} curCol: {}", currow, curcol);
+    println!("penRow: {} penCol: {}", penrow, pencol);
+
+    // MathPrint vs Classic mode flags
+    let mathprint_flags = emu.peek_byte(0xD000C4);
+    let mathprint_backup = emu.peek_byte(0xD003E6);
+    println!("mathprintFlags (0xD000C4): 0x{:02X}", mathprint_flags);
+    println!("mathprintBackup (0xD003E6): 0x{:02X}", mathprint_backup);
+
+    // Check some system flags area for MathPrint enabled bit
+    // mathprintEnabled is apparently at offset 0x0005 in some flags structure
+    let flags_base_d00080 = 0xD00080u32;
+    let flags = emu.peek_byte(flags_base_d00080 + 5);
+    println!("flags@0xD00085 (mathprintEnabled?): 0x{:02X}", flags);
+
+    // Check LCD timing registers for display dimensions
+    println!("\n=== LCD Timing ===");
+    println!("timing[0]: 0x{:08X}", lcd.timing[0]);
+    println!("timing[1]: 0x{:08X}", lcd.timing[1]);
+    println!("timing[2]: 0x{:08X}", lcd.timing[2]);
+    println!("timing[3]: 0x{:08X}", lcd.timing[3]);
+
+    // Decode timing like CEmu does
+    let ppl = ((lcd.timing[0] >> 2) & 0x3F) + 1;
+    let lpp = ((lcd.timing[1] >> 0) & 0x3FF) + 1;
+    let vfp = (lcd.timing[1] >> 16) & 0xFF;
+    let vbp = (lcd.timing[1] >> 24) & 0xFF;
+    println!("PPL (pixels/line): {} -> {} pixels", ppl, ppl * 16);
+    println!("LPP (lines/panel): {}", lpp);
+    println!("VFP (vertical front porch): {}", vfp);
+    println!("VBP (vertical back porch): {}", vbp);
+
     // VRAM analysis
     let upbase = lcd.upbase;
     let mut histogram: HashMap<u16, u32> = HashMap::new();
@@ -695,4 +745,297 @@ fn cmd_compare(cemu_file: &str) {
     } else {
         println!("\nNo divergence found - traces match completely!");
     }
+}
+
+// === MathPrint Investigation ===
+
+/// Trace writes to MathPrint flag area during boot
+/// MathPrint flag is at 0xD000C4, bit 5
+fn cmd_mathprint_trace() {
+    let mut emu = match create_emu() {
+        Some(e) => e,
+        None => return,
+    };
+
+    println!("\n=== MathPrint Flag Write Trace ===\n");
+    println!("Target addresses:");
+    println!("  0xD000C4 - mathprintFlagsLoc (bit 5 = MathPrint enabled)");
+    println!("  0xD003E6 - mathprintBackup");
+    println!("  0xD00080-0xD000FF - System flags area");
+    println!();
+
+    // Enable write tracing for the system flags area (includes MathPrint)
+    // We'll trace a wider range to see what's being initialized
+    emu.set_write_trace_filter(0xD00080, 0xD00100);
+    emu.enable_write_tracing();
+
+    println!("Running boot with write tracing enabled...\n");
+
+    // Boot the emulator
+    let boot_cycles = 70_000_000u64;
+    let mut total_cycles = 0u64;
+    let mut steps = 0u64;
+    let mut last_report = 0u64;
+
+    while total_cycles < boot_cycles {
+        let executed = emu.run_cycles(100_000);
+        if executed == 0 {
+            break;
+        }
+        total_cycles += executed as u64;
+        steps += 1;
+
+        // Report progress every 10M cycles
+        if total_cycles - last_report >= 10_000_000 {
+            println!("  ... {} cycles, {} writes so far", total_cycles, emu.write_trace_total());
+            last_report = total_cycles;
+        }
+    }
+
+    println!("\nBoot complete: {} cycles, {} steps\n", total_cycles, steps);
+
+    // Get the detailed write log
+    let write_log = emu.get_write_log();
+    println!("Total writes to filter range: {}", write_log.len());
+    println!();
+
+    // Show writes to specific addresses of interest
+    let mathprint_addr = 0xD000C4u32;
+    let backup_addr = 0xD003E6u32;
+
+    println!("=== Writes to MathPrint Flag (0xD000C4) ===");
+    let mp_writes: Vec<_> = write_log.iter()
+        .filter(|(addr, _, _)| *addr == mathprint_addr)
+        .collect();
+
+    if mp_writes.is_empty() {
+        println!("NO WRITES to 0xD000C4 during boot!");
+    } else {
+        for (addr, value, cycle) in &mp_writes {
+            println!("  Cycle {:10}: 0x{:06X} <- 0x{:02X} (bit5={})",
+                cycle, addr, value,
+                if value & 0x20 != 0 { "SET (MathPrint ON)" } else { "CLEAR (Classic)" });
+        }
+    }
+
+    println!();
+
+    // Now trace writes to the backup address too (need to run again with wider filter)
+    // Actually, let's just check the final values
+    println!("=== Final Values ===");
+    let final_mp = emu.peek_byte(mathprint_addr);
+    let final_backup = emu.peek_byte(backup_addr);
+    println!("mathprintFlagsLoc (0xD000C4): 0x{:02X} (bit5={})",
+        final_mp,
+        if final_mp & 0x20 != 0 { "SET - MathPrint ON" } else { "CLEAR - Classic mode" });
+    println!("mathprintBackup (0xD003E6): 0x{:02X}", final_backup);
+
+    // Also show all writes to the flag area
+    println!("\n=== All Writes to System Flags (0xD00080-0xD00100) ===");
+    println!("Address  Value  Cycle");
+    for (addr, value, cycle) in write_log.iter().take(50) {
+        println!("0x{:06X}  0x{:02X}  {:10}", addr, value, cycle);
+    }
+    if write_log.len() > 50 {
+        println!("... and {} more writes", write_log.len() - 50);
+    }
+
+    // Check write count for the specific address
+    println!("\n=== Write Counts for Key Addresses ===");
+    println!("0xD000C4: {} writes", emu.address_write_count(mathprint_addr));
+    for offset in 0..16u32 {
+        let addr = 0xD000C0 + offset;
+        let count = emu.address_write_count(addr);
+        if count > 0 {
+            println!("0x{:06X}: {} writes (final value: 0x{:02X})",
+                addr, count, emu.peek_byte(addr));
+        }
+    }
+}
+
+// === Control Port Dump ===
+
+/// Dump control port values after boot for comparison with CEmu
+fn cmd_ports() {
+    let mut emu = match create_emu() {
+        Some(e) => e,
+        None => return,
+    };
+
+    println!("\n=== Control Port Dump ===\n");
+
+    // Boot the emulator first
+    println!("Booting emulator...");
+    let boot_cycles = 70_000_000u64;
+    let mut total_cycles = 0u64;
+
+    while total_cycles < boot_cycles {
+        let executed = emu.run_cycles(1_000_000);
+        if executed == 0 {
+            break;
+        }
+        total_cycles += executed as u64;
+        if total_cycles % 10_000_000 < 1_000_000 {
+            println!("  {:.1}M cycles...", total_cycles as f64 / 1_000_000.0);
+        }
+    }
+
+    println!("\nBoot complete: {} cycles\n", total_cycles);
+
+    // Dump control ports
+    println!("{}", emu.dump_control_ports());
+
+    // Also show some key memory values that might affect MathPrint
+    println!("\n=== Key Memory Values ===");
+    let mathprint_flags = emu.peek_byte(0xD000C4);
+    println!("0xD000C4 (mathprintFlags): 0x{:02X} (bit5={} -> {})",
+        mathprint_flags,
+        if mathprint_flags & 0x20 != 0 { "SET" } else { "CLEAR" },
+        if mathprint_flags & 0x20 != 0 { "MathPrint" } else { "Classic" });
+
+    let mathprint_backup = emu.peek_byte(0xD003E6);
+    println!("0xD003E6 (mathprintBackup): 0x{:02X}", mathprint_backup);
+
+    // Show system flags
+    println!("\n=== System Flags Area (0xD00080-0xD000FF) ===");
+    for base in (0xD00080u32..0xD00100).step_by(16) {
+        print!("0x{:06X}: ", base);
+        for offset in 0..16u32 {
+            print!("{:02X} ", emu.peek_byte(base + offset));
+        }
+        println!();
+    }
+
+    // Test: Poke MathPrint flag to 0x20 and render to see if status bar changes
+    println!("\n=== Poking MathPrint Flag Test ===");
+    println!("Before: 0xD000C4 = 0x{:02X}", emu.peek_byte(0xD000C4));
+    emu.poke_byte(0xD000C4, 0x20); // Set bit 5 (MathPrint enabled)
+    println!("After:  0xD000C4 = 0x{:02X}", emu.peek_byte(0xD000C4));
+    println!("Rendering screen to ports_mathprint.ppm...");
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "ports_mathprint.ppm");
+
+    // Also render without the flag for comparison
+    emu.poke_byte(0xD000C4, 0x00); // Clear bit 5 (Classic mode)
+    println!("Rendering screen to ports_classic.ppm...");
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "ports_classic.ppm");
+    println!("Compare the two screenshots to see if status bar changes");
+}
+
+// === Watchpoint for MathPrint Investigation ===
+
+/// Single-step through boot and capture PC when 0xD000C4 is written
+/// This gives us the exact code location making the MathPrint/Classic decision
+fn cmd_watchpoint_mathprint() {
+    let mut emu = match create_emu() {
+        Some(e) => e,
+        None => return,
+    };
+
+    println!("\n=== MathPrint Watchpoint ===\n");
+    println!("Single-stepping through boot to find writes to 0xD000C4...");
+    println!("This will capture the PC when the MathPrint flag is set.\n");
+
+    const MATHPRINT_ADDR: u32 = 0xD000C4;
+    const MAX_CYCLES: u64 = 70_000_000; // Stop after 70M cycles (full boot)
+
+    let mut total_cycles = 0u64;
+    let mut step_count = 0u64;
+    let mut prev_value = emu.peek_byte(MATHPRINT_ADDR);
+    let mut writes_found: Vec<(u64, u32, u8, u8)> = Vec::new(); // (cycle, pc, old, new)
+    let mut last_report = 0u64;
+
+    println!("Initial value at 0xD000C4: 0x{:02X}", prev_value);
+    println!();
+
+    while total_cycles < MAX_CYCLES {
+        // Capture PC before stepping
+        let pc_before = emu.pc();
+
+        // Single step
+        let cycles = emu.run_cycles(1) as u64;
+        if cycles == 0 {
+            break;
+        }
+        total_cycles += cycles;
+        step_count += 1;
+
+        // Check if 0xD000C4 changed
+        let new_value = emu.peek_byte(MATHPRINT_ADDR);
+        if new_value != prev_value {
+            writes_found.push((total_cycles, pc_before, prev_value, new_value));
+
+            let mode = if new_value & 0x20 != 0 { "MathPrint" } else { "Classic" };
+            println!("=== WRITE DETECTED ===");
+            println!("  Cycle: {}", total_cycles);
+            println!("  Step: {}", step_count);
+            println!("  PC: 0x{:06X}", pc_before);
+            println!("  Old value: 0x{:02X}", prev_value);
+            println!("  New value: 0x{:02X} ({})", new_value, mode);
+
+            // Dump registers at time of write
+            println!("\n  === Registers ===");
+            println!("  AF={:02X}{:02X} BC={:06X} DE={:06X} HL={:06X}",
+                emu.a(), emu.f(), emu.bc(), emu.de(), emu.hl());
+            println!("  IX={:06X} IY={:06X} SP={:06X}", emu.ix(), emu.iy(), emu.sp());
+
+            // Read instruction bytes at PC
+            print!("  Instruction at PC: ");
+            for i in 0..6 {
+                print!("{:02X} ", emu.peek_byte(pc_before.wrapping_add(i)));
+            }
+            println!();
+
+            // Dump surrounding memory context
+            println!("\n  === Memory around write ===");
+            let base = (MATHPRINT_ADDR & !0xF) as u32;
+            for row in 0..4u32 {
+                let addr = base + row * 16;
+                print!("  0x{:06X}: ", addr);
+                for offset in 0..16u32 {
+                    let byte = emu.peek_byte(addr + offset);
+                    if addr + offset == MATHPRINT_ADDR {
+                        print!("[{:02X}]", byte);
+                    } else {
+                        print!("{:02X} ", byte);
+                    }
+                }
+                println!();
+            }
+
+            // Dump execution history
+            println!("\n  === Recent execution history ===");
+            println!("{}", emu.dump_history());
+
+            prev_value = new_value;
+        }
+
+        // Progress report every 5M cycles
+        if total_cycles - last_report >= 5_000_000 {
+            println!("  ... {} cycles ({} steps), {} writes found so far",
+                total_cycles, step_count, writes_found.len());
+            last_report = total_cycles;
+        }
+    }
+
+    println!("\n=== Summary ===");
+    println!("Total cycles: {}", total_cycles);
+    println!("Total steps: {}", step_count);
+    println!("Writes to 0xD000C4: {}", writes_found.len());
+
+    if !writes_found.is_empty() {
+        println!("\nAll writes:");
+        for (cycle, pc, old, new) in &writes_found {
+            let mode = if new & 0x20 != 0 { "MathPrint" } else { "Classic" };
+            println!("  Cycle {:10} | PC=0x{:06X} | 0x{:02X} -> 0x{:02X} ({})",
+                cycle, pc, old, new, mode);
+        }
+    }
+
+    // Final state
+    let final_value = emu.peek_byte(MATHPRINT_ADDR);
+    println!("\nFinal value at 0xD000C4: 0x{:02X} ({})",
+        final_value,
+        if final_value & 0x20 != 0 { "MathPrint" } else { "Classic" });
 }
