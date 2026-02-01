@@ -112,7 +112,7 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
     var isLcdOn by remember { mutableStateOf(true) }
 
     // Speed control (1x = 800K cycles, adjustable 1-10x)
-    var speedMultiplier by remember { mutableStateOf(2f) } // Default 2x for CEmu
+    var speedMultiplier by remember { mutableStateOf(1f) } // Default 1x (real-time)
 
     // Framebuffer bitmap
     val bitmap = remember {
