@@ -1,6 +1,6 @@
 #!/bin/bash
-# Build Android APK using CEmu backend (arm64 only, fast build)
-# Usage: ./scripts/build-android-cemu.sh [--install]
+# Fast Android build using CEmu backend - arm64 only, auto-installs
+# Usage: ./scripts/build-android-cemu.sh
 
 set -e
 
@@ -23,13 +23,12 @@ cd android
 # Clean native build to ensure CEmu backend is used
 rm -rf app/.cxx app/build/intermediates/cmake
 
-# Build with CEmu backend flag (arm64 only for fast builds)
+# Build with CEmu backend flag, arm64 only
 ./gradlew assembleDebug \
-    -PuseCemu=true
+    -PuseCemu=true \
+    -PabiFilters=arm64-v8a
 
-if [ "$1" = "--install" ]; then
-    echo "==> Installing APK..."
-    adb install -r app/build/outputs/apk/debug/app-debug.apk
-fi
+echo "==> Installing APK..."
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 
-echo "==> Done! APK built with CEmu backend."
+echo "==> Done!"

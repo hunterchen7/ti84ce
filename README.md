@@ -98,8 +98,7 @@ git clone https://github.com/CE-Programming/CEmu.git cemu-ref
 **Build with CEmu:**
 
 ```bash
-make android-cemu           # Build APK using CEmu backend
-make android-cemu-install   # Build and install
+make android-cemu-fast      # Build arm64 + install using CEmu backend
 ```
 
 **Local testing (macOS):**

@@ -1,6 +1,6 @@
 # TI-84 CE Emulator Build Commands
 
-.PHONY: android android-fast android-install android-cemu android-cemu-install \
+.PHONY: android android-fast android-install android-cemu-fast \
         log-android test clean cemu cemu-test cemu-clean
 
 # Build Android APK (all ABIs)
@@ -15,13 +15,9 @@ android-fast:
 android-install:
 	./scripts/build-android.sh --install
 
-# Build Android APK using CEmu backend
-android-cemu:
+# Fast Android build using CEmu backend (arm64 only + install)
+android-cemu-fast:
 	./scripts/build-android-cemu.sh
-
-# Build and install Android APK using CEmu backend
-android-cemu-install:
-	./scripts/build-android-cemu.sh --install
 
 # Capture Android emulator logs to file
 log-android:
@@ -38,6 +34,7 @@ test:
 clean:
 	cd core && cargo clean
 	cd android && ./gradlew clean
+	rm -rf android/app/.cxx android/app/build/intermediates/cmake
 
 # CEmu backend (reference emulator)
 cemu:
@@ -65,8 +62,7 @@ help:
 	@echo "  make android             - Build APK for all Android ABIs (Rust)"
 	@echo "  make android-fast        - Build arm64 only + install (Rust)"
 	@echo "  make android-install     - Build all ABIs + install (Rust)"
-	@echo "  make android-cemu        - Build APK using CEmu backend"
-	@echo "  make android-cemu-install- Build + install using CEmu backend"
+	@echo "  make android-cemu-fast   - Build arm64 + install (CEmu backend)"
 	@echo "  make log-android         - Capture emulator logs to emulator_logs.txt"
 	@echo "  make test                - Run Rust tests"
 	@echo "  make clean               - Clean all build artifacts"

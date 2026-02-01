@@ -21,7 +21,12 @@ android {
         }
 
         ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            // Support ABI override via: ./gradlew assembleDebug -PabiFilters=arm64-v8a
+            if (project.hasProperty("abiFilters")) {
+                abiFilters += project.property("abiFilters").toString().split(",")
+            } else {
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
+            }
         }
 
         externalNativeBuild {

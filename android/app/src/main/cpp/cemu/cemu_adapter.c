@@ -110,8 +110,8 @@ static void cemu_run_internal(uint64_t ticks) {
     }
 }
 
-// Internal: load ROM from file
-static int cemu_load_rom_file(const char *path) {
+// Internal: load ROM from memory buffer (no temp file needed)
+static int cemu_load_rom_from_memory(const uint8_t *rom_data, size_t rom_size) {
     bool gotType = false;
     uint16_t field_type;
     const uint8_t *outer;
@@ -121,39 +121,19 @@ static int cemu_load_rom_file(const char *path) {
     uint32_t data_field_size;
     emu_device_t device_type = TI84PCE;
     uint32_t offset;
-    size_t size;
-    FILE *file;
 
-    gui_console_printf("[CEmu] Loading ROM Image...\n");
+    gui_console_printf("[CEmu] Loading ROM Image from memory (%zu bytes)...\n", rom_size);
 
-    file = fopen_utf8(path, "rb");
-    if (!file) {
-        gui_console_err_printf("[CEmu] ROM file nonexistent.\n");
+    if (rom_size > SIZE_FLASH) {
+        gui_console_err_printf("[CEmu] Invalid ROM size\n");
         return -1;
     }
-
-    if (fseek(file, 0L, SEEK_END) < 0) {
-        fclose(file);
-        return -2;
-    }
-    size = (size_t)ftell(file);
-    if (size > SIZE_FLASH) {
-        gui_console_err_printf("[CEmu] Invalid ROM size\n");
-        fclose(file);
-        return -3;
-    }
-    rewind(file);
 
     asic_free();
     asic_init();
 
-    if (fread(mem.flash.block, size, 1, file) != 1) {
-        gui_console_err_printf("[CEmu] Error reading ROM image\n");
-        fclose(file);
-        asic_free();
-        return -4;
-    }
-    fclose(file);
+    // Copy ROM data directly into flash memory
+    memcpy(mem.flash.block, rom_data, rom_size);
 
     // Parse certificate fields to determine model
     for (offset = 0x20000U; offset < 0x40000U; offset += 0x10000U) {
@@ -263,27 +243,10 @@ int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
         return -1;
     }
 
-    // Write ROM to temp file (CEmu expects file path)
-    const char* temp_path = "/data/local/tmp/cemu_temp_rom.rom";
-    FILE* f = fopen(temp_path, "wb");
-    if (!f) {
-        temp_path = "/tmp/cemu_temp_rom.rom";
-        f = fopen(temp_path, "wb");
-        if (!f) {
-            return -2;
-        }
-    }
-
-    if (fwrite(data, 1, len, f) != len) {
-        fclose(f);
-        return -3;
-    }
-    fclose(f);
-
-    // Load ROM
-    int result = cemu_load_rom_file(temp_path);
+    // Load ROM directly from memory (no temp file needed)
+    int result = cemu_load_rom_from_memory(data, len);
     if (result != 0) {
-        return -4;
+        return -2;
     }
 
     // Set run rate to 48MHz
@@ -310,14 +273,13 @@ int emu_run_cycles(Emu* emu, int cycles) {
 }
 
 const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
-    if (!emu || emu != g_instance || !emu->initialized) {
-        if (w) *w = 0;
-        if (h) *h = 0;
-        return NULL;
-    }
-
+    // Always return valid dimensions (matches Rust implementation behavior)
     if (w) *w = LCD_WIDTH;
     if (h) *h = LCD_HEIGHT;
+
+    if (!emu || emu != g_instance || !emu->initialized) {
+        return NULL;
+    }
 
     emu_lcd_drawframe(((struct Emu*)emu)->framebuffer);
     return emu->framebuffer;
