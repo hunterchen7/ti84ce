@@ -3,6 +3,7 @@
 //! Test suite for the eZ80 CPU implementation, organized into:
 //! - instructions.rs: Tests for individual instructions and instruction families
 //! - modes.rs: Tests for ADL mode and Z80 mode specific behavior
+//! - parity.rs: Comprehensive CEmu parity tests for flag and register behavior
 //!
 //! # References
 //! - eZ80 CPU User Manual (Zilog UM0077)
@@ -13,6 +14,7 @@ use crate::bus::Bus;
 
 mod instructions;
 mod modes;
+mod parity;
 
 // ========== Test Helpers ==========
 

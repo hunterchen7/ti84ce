@@ -625,7 +625,11 @@ impl Cpu {
     }
 
     /// Execute rotate/shift operation (CB prefix, x=0)
+    /// CEmu: preserves F3/F5 from previous F (cpuflag_undef behavior)
     pub fn execute_rot(&mut self, y: u8, val: u8) -> u8 {
+        // Preserve F3/F5 from previous F (CEmu: cpuflag_undef(r->F))
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
+
         let result = match y {
             0 => {
                 // RLC - rotate left circular
@@ -674,10 +678,11 @@ impl Cpu {
             _ => val,
         };
 
-        // Set S, Z, P flags
+        // Set S, Z, P flags while preserving F3/F5
         self.set_flag_h(false);
         self.set_flag_n(false);
         self.set_sz_flags(result);
+        self.f = (self.f & !(flags::F5 | flags::F3)) | old_f3f5; // Restore F3/F5
         self.set_flag_pv(Self::parity(result));
 
         result
@@ -988,11 +993,14 @@ impl Cpu {
                     match p {
                         0 => {
                             // NEG (ED 44)
+                            // CEmu: preserves F3/F5 from previous F (cpuflag_undef)
                             let old_a = self.a;
                             self.a = 0u8.wrapping_sub(old_a);
 
+                            let old_f3f5 = self.f & (flags::F5 | flags::F3);
                             self.f = 0;
                             self.set_sz_flags(self.a);
+                            self.f |= old_f3f5; // Preserve F3/F5
                             self.set_flag_h((0 & 0x0F) < (old_a & 0x0F));
                             self.set_flag_pv(old_a == 0x80);
                             self.set_flag_n(true);

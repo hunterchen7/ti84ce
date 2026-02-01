@@ -453,6 +453,7 @@ impl Cpu {
     // ========== ALU Operations ==========
 
     /// Add with flags (used by ADD and ADC)
+    /// CEmu: preserves F3/F5 from previous F register (cpuflag_undef behavior)
     pub(super) fn alu_add(&mut self, val: u8, carry: bool) -> u8 {
         let c = if carry && self.flag_c() { 1u16 } else { 0 };
         let result = self.a as u16 + val as u16 + c;
@@ -463,8 +464,11 @@ impl Cpu {
         // Overflow: sign of result differs from expected
         let overflow = ((self.a ^ val) & 0x80 == 0) && ((self.a ^ result as u8) & 0x80 != 0);
 
+        // Preserve F3/F5 from previous F (CEmu: cpuflag_undef(r->F))
+        let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
         self.set_sz_flags(result as u8);
+        self.f |= old_f3f5; // Restore F3/F5
         self.set_flag_c(result > 0xFF);
         self.set_flag_h(half);
         self.set_flag_pv(overflow);
@@ -474,7 +478,8 @@ impl Cpu {
     }
 
     /// Subtract with flags (used by SUB, SBC, CP)
-    pub(super) fn alu_sub(&mut self, val: u8, carry: bool, store: bool) -> u8 {
+    /// CEmu: preserves F3/F5 from previous F register for ALL sub operations
+    pub(super) fn alu_sub(&mut self, val: u8, carry: bool, _store: bool) -> u8 {
         let c = if carry && self.flag_c() { 1u16 } else { 0 };
         let result = (self.a as u16).wrapping_sub(val as u16).wrapping_sub(c);
 
@@ -484,17 +489,11 @@ impl Cpu {
         // Overflow
         let overflow = ((self.a ^ val) & 0x80 != 0) && ((self.a ^ result as u8) & 0x80 != 0);
 
-        // Save existing F3/F5 flags (CEmu preserves them for CP)
+        // Preserve F3/F5 from previous F (CEmu: cpuflag_undef(r->F))
         let old_f3f5 = self.f & (flags::F5 | flags::F3);
         self.f = 0;
-        if store {
-            // For SUB/SBC, F3/F5 come from the result
-            self.set_sz_flags(result as u8);
-        } else {
-            // For CP, preserve F3/F5 from before (matches CEmu behavior)
-            self.set_sz_flags(result as u8);
-            self.f = (self.f & !(flags::F5 | flags::F3)) | old_f3f5;
-        }
+        self.set_sz_flags(result as u8);
+        self.f |= old_f3f5; // Restore F3/F5 for all sub operations
         self.set_flag_c(result > 0xFF);
         self.set_flag_h(half);
         self.set_flag_pv(overflow);
