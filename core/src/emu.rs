@@ -381,13 +381,12 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
-            // Check if RTC needs a load event scheduled
-            if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-                // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
-                // The scheduler event will call advance_load() which handles the transition
-                //
-                // CEmu delays load processing until LATCH event fires (16429 ticks at 32 kHz)
-                // This ensures load stays pending for ~24M cycles at 48 MHz
+            // Check if RTC needs an event scheduled
+            // Unlike the old load-only scheduling, now we always keep RTC events running
+            // for time ticking. The state machine handles load operations as part of its cycle.
+            if !self.scheduler.is_active(EventId::Rtc) {
+                // Schedule initial RTC event based on current mode
+                // Start with LATCH event which is the first event after reset
                 self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
             }
 
@@ -430,12 +429,8 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
-            if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
-                // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
-                // The scheduler event will call advance_load() which handles the transition
-                //
-                // CEmu delays load processing until LATCH event fires (16429 ticks at 32 kHz)
-                // This ensures load stays pending for ~24M cycles at 48 MHz
+            // Check if RTC needs an event scheduled
+            if !self.scheduler.is_active(EventId::Rtc) {
                 self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
             }
         }
@@ -451,16 +446,17 @@ impl Emu {
         while let Some(event) = self.scheduler.next_pending_event() {
             match event {
                 EventId::Rtc => {
-                    // RTC load complete - advance the load state
-                    self.bus.ports.rtc.advance_load();
-                    // Check if more RTC ticks needed
-                    if self.bus.ports.rtc.needs_more_ticks() {
-                        // Schedule next RTC tick (1 tick at 32kHz)
-                        self.scheduler.repeat(EventId::Rtc, 1);
-                    } else {
-                        // Load complete, clear the event
-                        self.scheduler.clear(EventId::Rtc);
+                    // RTC event - handle state machine transition
+                    let (next_ticks, interrupt_mask) = self.bus.ports.rtc.handle_event();
+
+                    // Raise RTC interrupt if any bits set
+                    if interrupt_mask != 0 {
+                        self.bus.ports.interrupt.raise(sources::RTC);
+                        self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
                     }
+
+                    // Schedule next RTC event
+                    self.scheduler.repeat(EventId::Rtc, next_ticks);
                 }
                 EventId::Spi => {
                     // SPI transfer complete

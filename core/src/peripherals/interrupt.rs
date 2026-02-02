@@ -22,6 +22,7 @@ pub mod sources {
     pub const OSTIMER: u32 = 1 << 4;
     pub const KEYPAD: u32 = 1 << 10;
     pub const LCD: u32 = 1 << 11;
+    pub const RTC: u32 = 1 << 12;
     pub const PWR: u32 = 1 << 15;
     pub const WAKE: u32 = 1 << 19;
 }
