@@ -2,6 +2,10 @@
 //!
 //! This module provides JavaScript-friendly APIs using wasm-bindgen.
 
+// Use wee_alloc as the global allocator for smaller code size and better WASM support
+#[global_allocator]
+static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
+
 use wasm_bindgen::prelude::*;
 use crate::emu::Emu;
 
