@@ -251,6 +251,15 @@ impl Flash {
         &self.data
     }
 
+    /// Load flash data from save state
+    pub fn load_data(&mut self, data: &[u8]) {
+        let len = data.len().min(addr::FLASH_SIZE);
+        self.data[..len].copy_from_slice(&data[..len]);
+        self.initialized = true;
+        self.command = FlashCommand::None;
+        self.write_state = FlashWriteState::Idle;
+    }
+
     /// Reset flash to erased state
     pub fn reset(&mut self) {
         self.data.fill(0xFF);

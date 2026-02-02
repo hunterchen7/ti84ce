@@ -431,6 +431,13 @@ impl ControlPorts {
         s.push_str(&format!("0x3A-3C STACK_LIMIT: 0x{:06X}\n", self.stack_limit));
         s
     }
+
+    /// Restore state from save state (minimal - just key operational values)
+    pub fn restore_state(&mut self, cpu_speed: u8, unlock_status: u8, lcd_enable: u8) {
+        self.cpu_speed = cpu_speed;
+        self.unlock_status = unlock_status;
+        self.lcd_enable = lcd_enable;
+    }
 }
 
 impl Default for ControlPorts {

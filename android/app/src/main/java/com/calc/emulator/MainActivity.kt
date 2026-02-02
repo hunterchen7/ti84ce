@@ -44,6 +44,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.calc.emulator.ui.theme.TI84EmulatorTheme
 import kotlinx.coroutines.*
 import java.io.InputStream
@@ -123,6 +126,82 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
         )
     }
 
+    // Track if we restored from saved state
+    var restoredFromState by remember { mutableStateOf(false) }
+
+    // Helper function to load ROM bytes into emulator
+    fun loadRomBytes(romBytes: ByteArray, name: String, saveToStorage: Boolean = true, tryLoadState: Boolean = true) {
+        romSize = romBytes.size
+        val result = emulator.loadRom(romBytes)
+        if (result == 0) {
+            romLoaded = true
+            romName = name
+            loadError = null
+            totalCyclesExecuted = 0L
+            frameCounter = 0
+            logLines.clear()
+            Log.i("EmulatorScreen", "ROM loaded: ${romBytes.size} bytes")
+
+            // Save to storage for next launch
+            if (saveToStorage) {
+                RomStorage.saveRom(context, romBytes, name)
+            }
+
+            // Try to restore saved emulator state
+            if (tryLoadState) {
+                RomStorage.loadState(context)?.let { stateBytes ->
+                    val loadResult = emulator.loadState(stateBytes)
+                    if (loadResult == 0) {
+                        Log.i("EmulatorScreen", "Restored emulator state")
+                        restoredFromState = true
+                    } else {
+                        Log.w("EmulatorScreen", "Failed to restore state: $loadResult")
+                    }
+                }
+            }
+
+            isRunning = true  // Start emulation
+        } else {
+            loadError = "Failed to load ROM (error: $result)"
+            Log.e("EmulatorScreen", "Failed to load ROM: $result")
+        }
+    }
+
+    // Helper function to save emulator state
+    fun saveEmulatorState() {
+        if (romLoaded) {
+            emulator.saveState()?.let { stateBytes ->
+                if (RomStorage.saveState(context, stateBytes)) {
+                    Log.i("EmulatorScreen", "State saved: ${stateBytes.size} bytes")
+                }
+            }
+        }
+    }
+
+    // Try to load saved ROM on first launch
+    LaunchedEffect(Unit) {
+        if (!romLoaded) {
+            RomStorage.loadSavedRom(context)?.let { (bytes, name) ->
+                loadRomBytes(bytes, name, saveToStorage = false, tryLoadState = true)
+            }
+        }
+    }
+
+    // Save state when app goes to background
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                Log.i("EmulatorScreen", "App paused - saving state")
+                saveEmulatorState()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     // ROM picker launcher
     val romPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -132,21 +211,10 @@ fun EmulatorScreen(emulator: EmulatorBridge) {
                 val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
                 inputStream?.use { stream ->
                     val romBytes = stream.readBytes()
-                    romSize = romBytes.size
-                    val result = emulator.loadRom(romBytes)
-                    if (result == 0) {
-                        romLoaded = true
-                        romName = uri.lastPathSegment ?: "ROM"
-                        loadError = null
-                        totalCyclesExecuted = 0L
-                        frameCounter = 0
-                        logLines.clear()
-                        isRunning = true  // Auto-start to show boot process
-                        Log.i("EmulatorScreen", "ROM loaded: ${romBytes.size} bytes")
-                    } else {
-                        loadError = "Failed to load ROM (error: $result)"
-                        Log.e("EmulatorScreen", "Failed to load ROM: $result")
-                    }
+                    val name = uri.lastPathSegment ?: "ROM"
+                    // Clear existing saved state when loading a new ROM from picker
+                    RomStorage.clearSavedState(context)
+                    loadRomBytes(romBytes, name, saveToStorage = true, tryLoadState = false)
                 }
             } catch (e: Exception) {
                 loadError = "Error: ${e.message}"
@@ -315,7 +383,7 @@ fun RomLoadingScreen(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun EmulatorView(
-    emulator: EmulatorBridge,
+    @Suppress("UNUSED_PARAMETER") emulator: EmulatorBridge,
     bitmap: Bitmap,
     isLcdOn: Boolean,
     romName: String?,
@@ -1161,7 +1229,7 @@ fun DPadSegment(
     sweepAngle: Float,
     directionAngle: Float,
     innerRadiusScale: Float,
-    gapWidthScale: Float,
+    @Suppress("UNUSED_PARAMETER") gapWidthScale: Float,
     fillColor: Color,
     pressedColor: Color,
     borderColor: Color,
@@ -1469,7 +1537,3 @@ private fun hitTestDPad(
 private fun Float.toRadians(): Float {
     return (this / 180f) * PI.toFloat()
 }
-
-private operator fun Offset.plus(other: Offset): Offset = Offset(x + other.x, y + other.y)
-private operator fun Offset.minus(other: Offset): Offset = Offset(x - other.x, y - other.y)
-private operator fun Offset.times(value: Float): Offset = Offset(x * value, y * value)

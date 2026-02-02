@@ -191,6 +191,62 @@ class EmulatorBridge {
         return nativeIsLcdOn(handle)
     }
 
+    /**
+     * Get the size needed for a save state buffer.
+     * @return Size in bytes, or 0 if emulator not created
+     */
+    fun saveStateSize(): Long {
+        if (handle == 0L) return 0
+        return nativeSaveStateSize(handle)
+    }
+
+    /**
+     * Save emulator state to a byte array.
+     * @return State data on success, null on failure
+     */
+    fun saveState(): ByteArray? {
+        if (handle == 0L) {
+            Log.e(TAG, "saveState: emulator not created")
+            return null
+        }
+
+        val size = nativeSaveStateSize(handle)
+        if (size <= 0) {
+            Log.e(TAG, "saveState: invalid state size")
+            return null
+        }
+
+        val buffer = ByteArray(size.toInt())
+        val result = nativeSaveState(handle, buffer)
+        if (result < 0) {
+            Log.e(TAG, "saveState: failed with error $result")
+            return null
+        }
+
+        Log.i(TAG, "State saved: $result bytes")
+        return buffer
+    }
+
+    /**
+     * Load emulator state from a byte array.
+     * @param stateData Previously saved state data
+     * @return 0 on success, negative error code on failure
+     */
+    fun loadState(stateData: ByteArray): Int {
+        if (handle == 0L) {
+            Log.e(TAG, "loadState: emulator not created")
+            return -1
+        }
+
+        val result = nativeLoadState(handle, stateData)
+        if (result == 0) {
+            Log.i(TAG, "State loaded: ${stateData.size} bytes")
+        } else {
+            Log.e(TAG, "loadState: failed with error $result")
+        }
+        return result
+    }
+
     // Native methods
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)

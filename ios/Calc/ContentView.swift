@@ -13,6 +13,9 @@ struct ContentView: View {
     /// Emulator bridge instance
     @StateObject private var state = EmulatorState()
 
+    /// Track scene phase for background/foreground transitions
+    @Environment(\.scenePhase) private var scenePhase
+
     var body: some View {
         ZStack {
             Color(red: 0.067, green: 0.067, blue: 0.067)
@@ -26,6 +29,14 @@ struct ContentView: View {
         }
         .onAppear {
             _ = state.emulator.create()
+            // Try to load saved ROM and state on launch
+            state.tryLoadSavedRom()
+        }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .background {
+                // Save state when app goes to background
+                state.saveEmulatorState()
+            }
         }
     }
 }
@@ -73,7 +84,12 @@ class EmulatorState: ObservableObject {
     }
 
     /// Load ROM from data
-    func loadRom(_ data: Data, name: String) {
+    /// - Parameters:
+    ///   - data: ROM data
+    ///   - name: ROM filename
+    ///   - saveToStorage: Whether to save the ROM to internal storage (default: true)
+    ///   - tryLoadState: Whether to try loading saved emulator state (default: false)
+    func loadRom(_ data: Data, name: String, saveToStorage: Bool = true, tryLoadState: Bool = false) {
         let result = emulator.loadRom(data)
 
         if result == 0 {
@@ -84,10 +100,46 @@ class EmulatorState: ObservableObject {
             totalCyclesExecuted = 0
             frameCounter = 0
             logs.removeAll()
+
+            // Save to storage for next launch
+            if saveToStorage {
+                _ = RomStorage.saveRom(data, originalName: name)
+            }
+
+            // Try to restore saved emulator state
+            if tryLoadState, let stateData = RomStorage.loadState() {
+                let loadResult = emulator.loadState(stateData)
+                if loadResult == 0 {
+                    print("Restored emulator state")
+                } else {
+                    print("Failed to restore state: \(loadResult)")
+                }
+            }
+
             isRunning = true
             startEmulation()
         } else {
             loadError = "Failed to load ROM (error: \(result))"
+        }
+    }
+
+    /// Try to load saved ROM on app launch
+    func tryLoadSavedRom() {
+        guard !romLoaded else { return }
+
+        if let saved = RomStorage.loadSavedRom() {
+            loadRom(saved.data, name: saved.filename, saveToStorage: false, tryLoadState: true)
+        }
+    }
+
+    /// Save current emulator state to storage
+    func saveEmulatorState() {
+        guard romLoaded else { return }
+
+        if let stateData = emulator.saveState() {
+            if RomStorage.saveState(stateData) {
+                print("Emulator state saved: \(stateData.count) bytes")
+            }
         }
     }
 
@@ -107,13 +159,14 @@ class EmulatorState: ObservableObject {
             guard let self = self else { return }
 
             while !Task.isCancelled {
-                guard await self.isRunning else {
+                let running = await MainActor.run { self.isRunning }
+                guard running else {
                     try? await Task.sleep(nanoseconds: 16_000_000) // 16ms
                     continue
                 }
 
                 let frameStart = Date()
-                let cycles = await self.cyclesPerTick
+                let cycles = await MainActor.run { self.cyclesPerTick }
                 let executed = self.emulator.runCycles(cycles)
 
                 await MainActor.run {

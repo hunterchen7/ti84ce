@@ -4,6 +4,7 @@
 
 use crate::bus::Bus;
 use crate::cpu::{Cpu, InterruptMode};
+use crate::memory::addr;
 use crate::peripherals::rtc::LATCH_TICK_OFFSET;
 use crate::scheduler::{EventId, Scheduler};
 use std::ffi::CString;
@@ -12,6 +13,10 @@ use std::io::Write;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+
+// Save state constants
+const STATE_MAGIC: [u8; 4] = *b"TICE";
+const STATE_VERSION: u32 = 2; // v2: Added flash memory
 
 /// Instruction trace flag - when enabled, logs every instruction
 static INST_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -728,19 +733,303 @@ impl Emu {
         }
     }
 
-    /// Get save state size (stub)
+    /// Get save state size
+    /// Header (8) + CPU (64) + Emu flags (16) + Scheduler (24) + Control (16) + RAM + Flash
     pub fn save_state_size(&self) -> usize {
-        1024 // Placeholder
+        8 + 64 + 16 + 24 + 16 + addr::RAM_SIZE + addr::FLASH_SIZE
     }
 
-    /// Save state to buffer (stub)
-    pub fn save_state(&self, _buffer: &mut [u8]) -> Result<usize, i32> {
-        Err(-100) // Not implemented
+    /// Save state to buffer
+    /// Returns number of bytes written, or negative error code
+    pub fn save_state(&self, buffer: &mut [u8]) -> Result<usize, i32> {
+        let required = self.save_state_size();
+        if buffer.len() < required {
+            return Err(-1); // Buffer too small
+        }
+
+        let mut pos = 0;
+
+        // Write header
+        buffer[pos..pos + 4].copy_from_slice(&STATE_MAGIC);
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&STATE_VERSION.to_le_bytes());
+        pos += 4;
+
+        // Write CPU state
+        pos = self.save_cpu_state(&mut buffer[pos..]);
+
+        // Write Emu flags
+        buffer[pos] = self.powered_on as u8;
+        pos += 1;
+        buffer[pos] = self.boot_init_done as u8;
+        pos += 1;
+        buffer[pos..pos + 8].copy_from_slice(&self.total_cycles.to_le_bytes());
+        pos += 8;
+        // Padding to 16 bytes
+        buffer[pos..pos + 6].fill(0);
+        pos += 6;
+
+        // Write scheduler state
+        buffer[pos..pos + 8].copy_from_slice(&self.scheduler.base_ticks.to_le_bytes());
+        pos += 8;
+        buffer[pos..pos + 8].copy_from_slice(&self.scheduler.cpu_cycles().to_le_bytes());
+        pos += 8;
+        buffer[pos] = self.scheduler.cpu_speed();
+        pos += 1;
+        // Padding to 24 bytes
+        buffer[pos..pos + 7].fill(0);
+        pos += 7;
+
+        // Write control port state (CPU speed, LCD enable, etc.)
+        let control = &self.bus.ports.control;
+        buffer[pos] = control.read(0x01); // CPU speed
+        pos += 1;
+        buffer[pos] = control.read(0x06); // Protected ports unlock
+        pos += 1;
+        buffer[pos] = control.read(0x0D); // LCD enable
+        pos += 1;
+        // Padding to 16 bytes
+        buffer[pos..pos + 13].fill(0);
+        pos += 13;
+
+        // Write RAM
+        let ram_data = self.bus.ram.data();
+        buffer[pos..pos + addr::RAM_SIZE].copy_from_slice(ram_data);
+        pos += addr::RAM_SIZE;
+
+        // Write Flash
+        let flash_data = self.bus.flash.data();
+        buffer[pos..pos + addr::FLASH_SIZE].copy_from_slice(flash_data);
+        pos += addr::FLASH_SIZE;
+
+        Ok(pos)
     }
 
-    /// Load state from buffer (stub)
-    pub fn load_state(&mut self, _buffer: &[u8]) -> Result<(), i32> {
-        Err(-100) // Not implemented
+    /// Save CPU state to buffer, returns new position offset
+    fn save_cpu_state(&self, buffer: &mut [u8]) -> usize {
+        let cpu = &self.cpu;
+        let mut pos = 0;
+
+        // Main registers
+        buffer[pos] = cpu.a;
+        pos += 1;
+        buffer[pos] = cpu.f;
+        pos += 1;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.bc.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.de.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.hl.to_le_bytes());
+        pos += 4;
+
+        // Shadow registers
+        buffer[pos] = cpu.a_prime;
+        pos += 1;
+        buffer[pos] = cpu.f_prime;
+        pos += 1;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.bc_prime.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.de_prime.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.hl_prime.to_le_bytes());
+        pos += 4;
+
+        // Index and special registers
+        buffer[pos..pos + 4].copy_from_slice(&cpu.ix.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.iy.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.sp.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 4].copy_from_slice(&cpu.pc.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos + 2].copy_from_slice(&cpu.i.to_le_bytes());
+        pos += 2;
+        buffer[pos] = cpu.r;
+        pos += 1;
+        buffer[pos] = cpu.mbase;
+        pos += 1;
+
+        // CPU state flags
+        buffer[pos] = cpu.iff1 as u8;
+        pos += 1;
+        buffer[pos] = cpu.iff2 as u8;
+        pos += 1;
+        buffer[pos] = match cpu.im {
+            InterruptMode::Mode0 => 0,
+            InterruptMode::Mode1 => 1,
+            InterruptMode::Mode2 => 2,
+        };
+        pos += 1;
+        buffer[pos] = cpu.adl as u8;
+        pos += 1;
+        buffer[pos] = cpu.halted as u8;
+        pos += 1;
+        buffer[pos] = cpu.irq_pending as u8;
+        pos += 1;
+        buffer[pos] = cpu.nmi_pending as u8;
+        pos += 1;
+        buffer[pos] = cpu.on_key_wake as u8;
+        pos += 1;
+        buffer[pos] = cpu.any_key_wake as u8;
+        pos += 1;
+
+        // Padding to 64 bytes
+        buffer[pos..pos + 7].fill(0);
+        pos += 7;
+
+        pos
+    }
+
+    /// Load state from buffer
+    pub fn load_state(&mut self, buffer: &[u8]) -> Result<(), i32> {
+        let required = self.save_state_size();
+        if buffer.len() < required {
+            return Err(-1); // Buffer too small
+        }
+
+        let mut pos = 0;
+
+        // Verify header
+        if buffer[pos..pos + 4] != STATE_MAGIC {
+            return Err(-2); // Invalid magic
+        }
+        pos += 4;
+
+        let version = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        if version != STATE_VERSION {
+            return Err(-3); // Unsupported version
+        }
+        pos += 4;
+
+        // Load CPU state
+        pos = self.load_cpu_state(&buffer[pos..]);
+
+        // Load Emu flags
+        self.powered_on = buffer[pos] != 0;
+        pos += 1;
+        self.boot_init_done = buffer[pos] != 0;
+        pos += 1;
+        self.total_cycles = u64::from_le_bytes([
+            buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3],
+            buffer[pos + 4], buffer[pos + 5], buffer[pos + 6], buffer[pos + 7],
+        ]);
+        pos += 8;
+        pos += 6; // Skip padding
+
+        // Load scheduler state
+        let base_ticks = u64::from_le_bytes([
+            buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3],
+            buffer[pos + 4], buffer[pos + 5], buffer[pos + 6], buffer[pos + 7],
+        ]);
+        pos += 8;
+        let cpu_cycles = u64::from_le_bytes([
+            buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3],
+            buffer[pos + 4], buffer[pos + 5], buffer[pos + 6], buffer[pos + 7],
+        ]);
+        pos += 8;
+        let cpu_speed = buffer[pos];
+        pos += 1;
+        pos += 7; // Skip padding
+
+        self.scheduler.restore_state(base_ticks, cpu_cycles, cpu_speed);
+
+        // Load control port state
+        let cpu_speed_port = buffer[pos];
+        pos += 1;
+        let protected_unlock = buffer[pos];
+        pos += 1;
+        let lcd_enable = buffer[pos];
+        pos += 1;
+        pos += 13; // Skip padding
+
+        self.bus.ports.control.restore_state(cpu_speed_port, protected_unlock, lcd_enable);
+
+        // Load RAM
+        self.bus.ram.load_data(&buffer[pos..pos + addr::RAM_SIZE]);
+        pos += addr::RAM_SIZE;
+
+        // Load Flash
+        self.bus.flash.load_data(&buffer[pos..pos + addr::FLASH_SIZE]);
+
+        // Ensure ROM is marked as loaded
+        self.rom_loaded = true;
+
+        Ok(())
+    }
+
+    /// Load CPU state from buffer, returns bytes consumed
+    fn load_cpu_state(&mut self, buffer: &[u8]) -> usize {
+        let cpu = &mut self.cpu;
+        let mut pos = 0;
+
+        // Main registers
+        cpu.a = buffer[pos];
+        pos += 1;
+        cpu.f = buffer[pos];
+        pos += 1;
+        cpu.bc = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.de = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.hl = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+
+        // Shadow registers
+        cpu.a_prime = buffer[pos];
+        pos += 1;
+        cpu.f_prime = buffer[pos];
+        pos += 1;
+        cpu.bc_prime = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.de_prime = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.hl_prime = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+
+        // Index and special registers
+        cpu.ix = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.iy = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.sp = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.pc = u32::from_le_bytes([buffer[pos], buffer[pos + 1], buffer[pos + 2], buffer[pos + 3]]);
+        pos += 4;
+        cpu.i = u16::from_le_bytes([buffer[pos], buffer[pos + 1]]);
+        pos += 2;
+        cpu.r = buffer[pos];
+        pos += 1;
+        cpu.mbase = buffer[pos];
+        pos += 1;
+
+        // CPU state flags
+        cpu.iff1 = buffer[pos] != 0;
+        pos += 1;
+        cpu.iff2 = buffer[pos] != 0;
+        pos += 1;
+        cpu.im = match buffer[pos] {
+            0 => InterruptMode::Mode0,
+            1 => InterruptMode::Mode1,
+            _ => InterruptMode::Mode2,
+        };
+        pos += 1;
+        cpu.adl = buffer[pos] != 0;
+        pos += 1;
+        cpu.halted = buffer[pos] != 0;
+        pos += 1;
+        cpu.irq_pending = buffer[pos] != 0;
+        pos += 1;
+        cpu.nmi_pending = buffer[pos] != 0;
+        pos += 1;
+        cpu.on_key_wake = buffer[pos] != 0;
+        pos += 1;
+        cpu.any_key_wake = buffer[pos] != 0;
+        pos += 1;
+
+        pos += 7; // Skip padding
+
+        pos
     }
 
     /// Get the last stop reason

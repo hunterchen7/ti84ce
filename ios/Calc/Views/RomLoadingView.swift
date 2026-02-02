@@ -78,7 +78,9 @@ struct RomLoadingView: View {
 
             let data = try Data(contentsOf: url)
             let name = url.lastPathComponent
-            state.loadRom(data, name: name)
+            // Clear existing saved state when loading a new ROM from picker
+            RomStorage.clearSavedState()
+            state.loadRom(data, name: name, saveToStorage: true, tryLoadState: false)
         } catch {
             state.loadError = "Error: \(error.localizedDescription)"
         }

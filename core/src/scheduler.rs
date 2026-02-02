@@ -280,6 +280,22 @@ impl Scheduler {
         events.sort_by_key(|(_, t)| *t);
         events.into_iter().map(|(e, _)| e).collect()
     }
+
+    /// Get current CPU cycles counter
+    pub fn cpu_cycles(&self) -> u64 {
+        self.cpu_cycles
+    }
+
+    /// Restore scheduler state from save state
+    pub fn restore_state(&mut self, base_ticks: u64, cpu_cycles: u64, cpu_speed: u8) {
+        self.base_ticks = base_ticks;
+        self.cpu_cycles = cpu_cycles;
+        self.cpu_speed = cpu_speed;
+        // Events are not restored - they will be re-scheduled by peripherals
+        for item in &mut self.items {
+            item.timestamp = INACTIVE_FLAG;
+        }
+    }
 }
 
 impl Default for Scheduler {
