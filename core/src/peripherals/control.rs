@@ -68,8 +68,11 @@ mod battery {
 pub struct ControlPorts {
     /// Power control register
     power: u8,
-    /// CPU speed setting
+    /// CPU speed setting (0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz)
     cpu_speed: u8,
+    /// Previous CPU clock rate in MHz, for cycle conversion
+    /// CEmu's scheduler starts at 48MHz regardless of cpu_speed register value
+    prev_clock_mhz: u32,
     /// Flag set when port 0x01 (CPU_SPEED) is written
     /// CEmu resets cycle counter on ANY write to this port, not just when value changes
     cpu_speed_written: bool,
@@ -121,7 +124,8 @@ impl ControlPorts {
     pub fn new() -> Self {
         Self {
             power: 0x00,
-            cpu_speed: speed::MHZ_6,  // CEmu starts at 6 MHz, ROM sets speed later
+            cpu_speed: speed::MHZ_48,  // Initial value (scheduler default is 48MHz)
+            prev_clock_mhz: 48,  // CEmu scheduler starts at 48MHz
             cpu_speed_written: false,
             device_type: 0x00,        // Standard device
             control_flags: 0x00,
@@ -238,9 +242,11 @@ impl ControlPorts {
                 // For now we skip the FSM to ensure boot completes
             }
             regs::CPU_SPEED => {
+                // Save the old clock rate before updating
+                self.prev_clock_mhz = self.clock_rate_mhz();
                 self.cpu_speed = value & 0x03;
                 // CEmu calls set_cpu_clock() on EVERY write to port 0x01,
-                // which resets the cycle counter regardless of value change
+                // which triggers cycle conversion
                 self.cpu_speed_written = true;
             }
             regs::BATTERY_STATUS => {} // Read-only
@@ -335,14 +341,39 @@ impl ControlPorts {
     }
 
     /// Check if CPU_SPEED port was written since last check, and reset the flag.
-    /// Returns true if port was written (used to trigger cycle counter reset like CEmu).
-    /// CEmu calls set_cpu_clock() on ANY write to port 0x01, which resets cycles.
-    pub fn cpu_speed_changed(&mut self) -> bool {
+    /// Returns (was_written, conversion_divisor) where conversion_divisor is used
+    /// to convert cycles when clock rate changes (e.g., 8 for 48MHz -> 6MHz).
+    /// CEmu's sched_set_clock converts: new_cycles = old_cycles * new_rate / old_rate
+    pub fn cpu_speed_changed(&mut self) -> (bool, u32) {
         if self.cpu_speed_written {
             self.cpu_speed_written = false;
-            true
+            let new_mhz = self.clock_rate_mhz();
+            // CEmu: base_tick = muldiv_floor(cpu.cycles, old_tick_unit, new_tick_unit)
+            // tick_unit = SCHED_BASE_CLOCK_RATE / clock_rate
+            // So: new_cycles = old_cycles * old_tick / new_tick
+            //                = old_cycles * (base/old_rate) / (base/new_rate)
+            //                = old_cycles * new_rate / old_rate
+            // For 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
+            // divisor = old_rate / new_rate
+            let divisor = if new_mhz > 0 {
+                self.prev_clock_mhz / new_mhz
+            } else {
+                1
+            };
+            (true, divisor.max(1))
         } else {
-            false
+            (false, 1)
+        }
+    }
+
+    /// Get current CPU clock rate in MHz based on speed setting
+    pub fn clock_rate_mhz(&self) -> u32 {
+        match self.cpu_speed {
+            0 => 6,
+            1 => 12,
+            2 => 24,
+            3 => 48,
+            _ => 48, // Default to 48MHz for invalid values
         }
     }
 
@@ -467,8 +498,9 @@ mod tests {
     #[test]
     fn test_new() {
         let ctrl = ControlPorts::new();
-        // CEmu starts at 6 MHz, ROM sets speed later
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_6);
+        // We start cpu_speed at 48MHz to match scheduler default (for cycle conversion)
+        // CEmu's control.cpuSpeed defaults to 0, but scheduler runs at 48MHz
+        assert_eq!(ctrl.cpu_speed(), speed::MHZ_48);
         assert!(!ctrl.lcd_enabled());
         assert!(!ctrl.protected_ports_unlocked());
         // Battery FSM read status defaults to 0 (probe complete)
@@ -489,8 +521,8 @@ mod tests {
         ctrl.write(0x1D, 0x00); // Change privileged boundary
 
         ctrl.reset();
-        // CEmu starts at 6 MHz
-        assert_eq!(ctrl.cpu_speed(), speed::MHZ_6);
+        // We reset cpu_speed to 48MHz to match scheduler default (for cycle conversion)
+        assert_eq!(ctrl.cpu_speed(), speed::MHZ_48);
         // Power port resets to 0
         assert_eq!(ctrl.read(regs::POWER), 0x00);
         // CEmu sets privileged to 0xFFFFFF

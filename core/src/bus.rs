@@ -533,11 +533,13 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                // Serial flash uses cache timing, parallel flash uses constant
+                // Serial flash uses cache timing, parallel flash uses dynamic wait states
                 if self.serial_flash {
                     self.cycles += self.flash_cache.touch(addr);
                 } else {
-                    self.mem_cycles += Self::FLASH_READ_CYCLES;
+                    // Use flash controller's configured wait states (CEmu: flash.waitStates)
+                    // This is dynamically set by ROM via port 0xE10005 writes
+                    self.mem_cycles += self.ports.flash.cached_total_wait_cycles() as u64;
                 }
                 self.flash.read(addr)
             }
@@ -580,11 +582,13 @@ impl Bus {
 
         let value = match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                // Serial flash uses cache timing, parallel flash uses constant
+                // Serial flash uses cache timing, parallel flash uses dynamic wait states
                 if self.serial_flash {
                     self.cycles += self.flash_cache.touch(addr);
                 } else {
-                    self.mem_cycles += Self::FLASH_READ_CYCLES;
+                    // Use flash controller's configured wait states (CEmu: flash.waitStates)
+                    // This is dynamically set by ROM via port 0xE10005 writes
+                    self.mem_cycles += self.ports.flash.cached_total_wait_cycles() as u64;
                 }
                 self.flash.read(addr)
             }
@@ -682,7 +686,8 @@ impl Bus {
                     // Serial flash writes are ignored (no actual write occurs)
                 } else {
                     // CEmu: cpu.cycles += flash.waitStates for parallel flash writes
-                    self.mem_cycles += Self::FLASH_READ_CYCLES;  // Same as read for parallel
+                    // Use flash controller's configured wait states
+                    self.mem_cycles += self.ports.flash.cached_total_wait_cycles() as u64;
                     if self.ports.control.flash_unlocked() {
                         self.flash.write_cpu(addr, value);
                     }
@@ -697,16 +702,38 @@ impl Bus {
                 self.ram.write(addr - addr::RAM_START, value);
             }
             MemoryRegion::Ports => {
-                // Use port-specific timing like CEmu's port_write_byte()
+                // CEmu's port_write_byte timing:
+                // 1. Add PORT_WRITE_DELAY (4) before processing
+                // 2. Do port write (may trigger clock conversion)
+                // 3. Rewind by (PORT_WRITE_DELAY - port_write_cycles)
+                const PORT_WRITE_DELAY: u64 = 4;
                 let port_offset = addr - addr::PORT_START;
                 let port_range = (port_offset >> 12) & 0xF;
+
+                // Add delay before port write (like CEmu)
+                self.mem_cycles += PORT_WRITE_DELAY;
+
                 self.ports.write(port_offset, value, self.cycles);
-                // CEmu: sched_set_clock() resets cycle counter on CPU speed change
-                // Reset BEFORE adding port write cycles so they're counted after reset
-                if self.ports.control.cpu_speed_changed() {
-                    self.reset_cycles();
+
+                // CEmu: sched_set_clock() converts cycles when CPU speed changes
+                // Conversion: new_cycles = old_cycles * new_rate / old_rate
+                // For 48MHz -> 6MHz: divisor = 8, so cycles /= 8
+                let (speed_written, divisor) = self.ports.control.cpu_speed_changed();
+                if speed_written && divisor > 1 {
+                    let total = self.cycles + self.mem_cycles;
+                    let converted = total / divisor as u64;
+                    self.cycles = converted;
+                    self.mem_cycles = 0;
+                    // After conversion, rewind from converted cycles
+                    let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
+                    let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
+                    self.cycles = self.cycles.saturating_sub(rewind);
+                } else {
+                    // No clock conversion - just rewind from mem_cycles
+                    let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
+                    let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
+                    self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
                 }
-                self.mem_cycles += Self::PORT_WRITE_CYCLES[port_range as usize];
             }
             MemoryRegion::Unmapped => {
                 // Writes to unmapped regions are ignored
@@ -980,10 +1007,13 @@ impl Bus {
                 // Control ports - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
-                // CEmu: sched_set_clock() resets cycle counter on CPU speed change
-                // Reset BEFORE adding port write cycles so they're counted after reset
-                if self.ports.control.cpu_speed_changed() {
-                    self.reset_cycles();
+                // CEmu: sched_set_clock() converts cycles when CPU speed changes
+                let (speed_written, divisor) = self.ports.control.cpu_speed_changed();
+                if speed_written && divisor > 1 {
+                    let total = self.cycles + self.mem_cycles;
+                    let converted = total / divisor as u64;
+                    self.cycles = converted;
+                    self.mem_cycles = 0;
                 }
             }
             0x1 => {
@@ -1071,10 +1101,13 @@ impl Bus {
                 // Control ports alternate - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
-                // CEmu: sched_set_clock() resets cycle counter on CPU speed change
-                // Reset BEFORE adding port write cycles so they're counted after reset
-                if self.ports.control.cpu_speed_changed() {
-                    self.reset_cycles();
+                // CEmu: sched_set_clock() converts cycles when CPU speed changes
+                let (speed_written, divisor) = self.ports.control.cpu_speed_changed();
+                if speed_written && divisor > 1 {
+                    let total = self.cycles + self.mem_cycles;
+                    let converted = total / divisor as u64;
+                    self.cycles = converted;
+                    self.mem_cycles = 0;
                 }
             }
             // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)

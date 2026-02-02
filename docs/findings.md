@@ -480,6 +480,25 @@ The formula: `base_ticks_per_tick = 7,680,000,000 / clock_rate`
 
 **Why this matters**: Using a common base clock avoids floating-point arithmetic and rounding errors in timing calculations. All timing conversions are exact integer divisions.
 
+### CPU Clock Speed Changes and Cycle Conversion
+
+When writing to the CPU speed port (0x01), CEmu's `sched_set_clock` converts the current cycle count to the equivalent at the new clock rate:
+
+```c
+// CEmu: sched_set_clock converts cycles when clock rate changes
+// new_cycles = old_cycles * new_rate / old_rate
+// For 48MHz -> 6MHz: divisor = 8, so cycles /= 8
+```
+
+The port write timing in CEmu follows this sequence:
+1. Add `PORT_WRITE_DELAY = 4` cycles before the write
+2. Execute port write (may trigger clock conversion via `sched_set_clock`)
+3. Rewind by `PORT_WRITE_DELAY - port_write_cycles[port_range]` (typically 2)
+
+**Critical insight**: Don't reset cycles to 0 on clock changes. Instead, convert cycles proportionally to maintain timing relationships. The ROM starts at 48MHz and typically changes to 6MHz early in boot (writing 0x44 to port 0x01), so cycles get divided by 8.
+
+**Impact**: After implementing proper cycle conversion, instruction timing deltas match CEmu exactly (e.g., both show 38 cycles for a CALL, 16 cycles for a 2-byte fetch at 6MHz, etc.). The absolute cycle counts may differ due to the conversion calculation, but relative timing is correct.
+
 ### RTC Load Timing
 
 The RTC load operation takes **~51 ticks at 32.768 kHz** to complete:
