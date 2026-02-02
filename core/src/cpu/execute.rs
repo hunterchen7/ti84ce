@@ -37,6 +37,7 @@ impl Cpu {
                         let d = self.fetch_byte(bus) as i8;
                         self.set_b(self.b().wrapping_sub(1));
                         if self.b() != 0 {
+                            bus.add_cycles(1); // CEmu: cpu.cycles++ for branch taken
                             self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                             13
                         } else {
@@ -53,6 +54,7 @@ impl Cpu {
                         // JR cc,d
                         let d = self.fetch_byte(bus) as i8;
                         if self.check_cc(y - 4) {
+                            bus.add_cycles(1); // CEmu: cpu.cycles++ for branch taken
                             self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
                             12
                         } else {
@@ -332,6 +334,7 @@ impl Cpu {
             0 => {
                 // RET cc
                 // Uses L mode for stack operations, then ADL becomes L
+                bus.add_cycles(1); // CEmu: cpu.cycles++ before condition check
                 if self.check_cc(y) {
                     self.pc = self.pop_addr(bus);
                     self.adl = self.l;
@@ -361,6 +364,7 @@ impl Cpu {
                         0 => {
                             // RET
                             // Uses L mode for stack operations, then ADL becomes L
+                            bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
                             self.pc = self.pop_addr(bus);
                             self.adl = self.l;
                             10
@@ -390,6 +394,7 @@ impl Cpu {
                 // Fetch uses IL mode, then ADL becomes IL if jump is taken
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
+                    bus.add_cycles(1); // CEmu: cpu.cycles++ for jump taken
                     self.pc = nn;
                     self.adl = self.il;
                 }
@@ -468,6 +473,7 @@ impl Cpu {
                 // Fetch uses IL mode, push uses L mode, then ADL becomes IL if call is taken
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
+                    bus.add_cycles(1); // CEmu: cpu.cycles++ for call taken
                     self.push_addr(bus, self.pc);
                     self.pc = nn;
                     self.adl = self.il;
@@ -559,6 +565,7 @@ impl Cpu {
             }
             7 => {
                 // RST y*8
+                bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_rst()
                 self.push_addr(bus, self.pc);
                 self.adl = self.l;
                 self.pc = (y as u32) * 8;
@@ -1063,6 +1070,7 @@ impl Cpu {
                 match y {
                     0 => {
                         // RETN - Uses L mode for stack operations, then ADL becomes L
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
                         self.iff1 = self.iff2;
                         self.pc = self.pop_addr(bus);
                         self.adl = self.l;
@@ -1070,6 +1078,7 @@ impl Cpu {
                     }
                     1 => {
                         // RETI - Uses L mode for stack operations, then ADL becomes L
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
                         self.pc = self.pop_addr(bus);
                         self.adl = self.l;
                         14
@@ -1267,6 +1276,9 @@ impl Cpu {
                     self.set_flag_pv(self.bc != 0);
                     // F3/F5 preserved (CEmu behavior)
 
+                    // CEmu: cpu.cycles += internalCycles (1 for LDIR)
+                    bus.add_cycles(1);
+
                     if self.bc != 0 {
                         cycles += 21;
                         // Continue looping internally
@@ -1294,6 +1306,9 @@ impl Cpu {
                     self.set_flag_n(false);
                     self.set_flag_pv(self.bc != 0);
                     // F3/F5 preserved (CEmu behavior)
+
+                    // CEmu: cpu.cycles += internalCycles (1 for LDDR)
+                    bus.add_cycles(1);
 
                     if self.bc != 0 {
                         cycles += 21;
@@ -1361,9 +1376,13 @@ impl Cpu {
                     self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
                     if self.bc != 0 && result != 0 {
+                        // CEmu: cpu.cycles += internalCycles (2 for CPIR when repeating)
+                        bus.add_cycles(2);
                         cycles += 21;
                         // Continue looping internally
                     } else {
+                        // CEmu: internalCycles-- when not repeating, so 1 cycle
+                        bus.add_cycles(1);
                         cycles += 16;
                         break;
                     }
@@ -1391,9 +1410,13 @@ impl Cpu {
                     self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
                     if self.bc != 0 && result != 0 {
+                        // CEmu: cpu.cycles += internalCycles (2 for CPDR when repeating)
+                        bus.add_cycles(2);
                         cycles += 21;
                         // Continue looping internally
                     } else {
+                        // CEmu: internalCycles-- when not repeating, so 1 cycle
+                        bus.add_cycles(1);
                         cycles += 16;
                         break;
                     }

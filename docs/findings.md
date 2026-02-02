@@ -1376,3 +1376,188 @@ fn update_load(&mut self, current_cycles: u64, cpu_speed: u8) {
 **Result:** After the fix, the poll loop correctly runs 432 iterations (vs 1 before), matching CEmu's behavior more closely. Boot still completes successfully.
 
 **Source:** CEmu's realclock.c uses `rtc_update_load()` which calculates elapsed ticks from `sched_ticks_remaining(SCHED_RTC)` during every port read.
+
+---
+
+## CEmu Parity Research (2026-02-02)
+
+Comprehensive analysis of differences between our Rust core and CEmu reference implementation. This research was conducted by 8 parallel subagents investigating each category in `cemu_core_comparison.md`.
+
+### CPU Execution Model Gaps
+
+#### 1. Prefetch Pipeline (LOW PRIORITY)
+CEmu uses a 1-byte prefetch pipeline in `cpu.c` - the prefetch is always one byte ahead of execution. Our implementation fetches directly via `bus.fetch_byte()`. This affects flash unlock detection timing but boot works fine.
+
+#### 2. Cycle Accounting (MODERATE PRIORITY)
+**Gap:** CEmu tracks `cpu.cycles` and updates it with internal instruction cycles. Our implementation only counts memory access cycles via `bus.cycles` - the internal cycle counts returned by `execute_*` functions are never applied.
+
+**Impact:** Affects timing-dependent polling loops and scheduler event timing, but absorbed by polling loop tolerance.
+
+**CEmu code:**
+```c
+cpu.cycles += internalCycles;  // Applied during instruction execution
+```
+
+#### 3. Protection Enforcement (LOW for boot, HIGH for security)
+**Gap:** CEmu enforces unprivileged behavior:
+- `IN` from protected port returns 0
+- `OUT` to protected port triggers NMI
+- Protected memory reads return 0
+- Protected memory writes trigger NMI
+
+Our implementation tracks protection boundaries but doesn't enforce them in CPU/bus paths. Not needed for boot (ROM runs as privileged code).
+
+#### 4. CPU Signals (LOW PRIORITY)
+CEmu uses atomic signals: `CPU_SIGNAL_RESET`, `CPU_SIGNAL_EXIT`, `CPU_SIGNAL_ON_KEY`, `CPU_SIGNAL_ANY_KEY`. We have `on_key_wake`/`any_key_wake` flags but lack RESET and EXIT signals.
+
+#### 5. IM3 Mode (LOW PRIORITY)
+CEmu supports IM3 with vectored interrupts via `asic.im2` flag. We map IM3 to Mode2 (both jump to 0x38). TI-OS doesn't use IM3 vectored mode.
+
+### Bus/Memory/Flash Gaps
+
+#### 1. Flash Cache (MODERATE for serial mode)
+**Gap:** CEmu has a 2-way set-associative flash cache for serial flash mode with 128 sets. Returns 2/3/197 cycles based on hit/miss. We use constant `FLASH_READ_CYCLES = 10` for parallel mode.
+
+**Serial flash features missing:**
+- Cache structures (tags, MRU/LRU)
+- `flash_touch_cache()` for hit/miss detection
+- `flash_flush_cache()` for invalidation
+
+#### 2. Dynamic Wait States (MODERATE)
+CEmu uses `flash.waitStates` to calculate actual timing. We cache wait states but use constant cycles.
+
+#### 3. Flash Command Set (LOW PRIORITY)
+**Missing parallel commands:**
+- CFI query mode (0x98)
+- Chip erase (0x10)
+- Deep power down (0xB9)
+- IPB/DPB protection modes (0xC0, 0xE0)
+
+Basic sector erase and byte program work, which is sufficient for boot.
+
+#### 4. LCD Palette/Cursor Memory (LOW PRIORITY)
+CEmu maps 0xE30200-0xE307FF to palette (512 bytes) and 0xE30800-0xE30BFF to cursor image (1024 bytes). We don't implement these. TI-OS uses 16bpp direct color, so palette is unused.
+
+#### 5. Port I/O Scheduler Processing (MODERATE)
+**Gap:** CEmu calls `sched_process_pending_events()` during port I/O, processes scheduler mid-instruction, and uses write delay + rewind mechanism. We add fixed cycles immediately.
+
+### Scheduler Gaps
+
+#### 1. Missing Event Types
+| Event | CEmu | Ours | Priority |
+|-------|------|------|----------|
+| SCHED_TIMER_DELAY | ✓ | ✗ | MODERATE |
+| SCHED_KEYPAD | ✓ | ✗ | MODERATE |
+| SCHED_WATCHDOG | ✓ | ✗ | MODERATE |
+| SCHED_SECOND | ✓ | ✗ | LOW |
+| SCHED_LCD_DMA | ✓ | ✗ | LOW |
+| SCHED_USB* | ✓ | ✗ | LOW |
+
+#### 2. Timer Delay Event
+CEmu has a 2-cycle delay (`SCHED_TIMER_DELAY`) before timer match/interrupt updates. This ensures proper ordering. We fire interrupts immediately.
+
+### Interrupt Controller / Timer Gaps
+
+#### 1. Timer Global Registers (MODERATE PRIORITY)
+**Gap:** CEmu has global registers at 0x30-0x3F:
+- 0x30: Global control (32-bit, 3 bits per timer)
+- 0x34: Global status (9 bits: match1/match2/overflow per timer)
+- 0x38: Interrupt mask
+- 0x3C: Revision (0x00010801)
+
+We have per-timer control bytes at 0x30, 0x34, 0x38 instead.
+
+#### 2. Delayed Interrupt Delivery
+CEmu uses `gpt_delay()` with `delayStatus` and `delayIntrpt` to fire timer interrupts 2 cycles after match event. We fire immediately.
+
+#### 3. Raw Status Register (index 2/10)
+We return `self.raw` for interrupt reads at index 2/10. CEmu returns 0 (falls through to default). Low impact - TI-OS doesn't read this.
+
+### RTC Gaps
+
+#### 1. Time Ticking (MODERATE PRIORITY)
+**Gap:** CEmu advances `rtc.counter.sec/min/hour/day` every second via `RTC_TICK` event. Our counter never advances - time shows 00:00:00 forever.
+
+**CEmu state machine:**
+- `RTC_TICK`: Advances time, checks alarm
+- `RTC_LATCH`: Copies counter to latched
+- `RTC_LOAD_LATCH`: Copies load to latched after load operation
+
+#### 2. Latch Mechanism
+CEmu updates `latched` from `counter` on LATCH event when control bit 7 set. Our latched values are static.
+
+#### 3. Alarm Functionality (LOW PRIORITY)
+CEmu has alarm registers at 0x10-0x18 with match checking. Ours are stubs returning 0. TI-OS doesn't use alarms during normal operation.
+
+### Keypad Gaps
+
+#### 1. Control Register Packing (LOW-MODERATE PRIORITY)
+CEmu packs mode (2 bits) + rowWait (14 bits) + scanWait (16 bits) into single 32-bit register at 0x00. We have separate registers.
+
+#### 2. Mode 2/3 Behavior
+CEmu Mode 2 is single scan (returns to idle after completion). Our Mode 2 is continuous. Mode 3 is continuous in both.
+
+#### 3. Ghosting (LOW PRIORITY)
+CEmu implements key ghosting matrix multiplication for multi-key scenarios. We don't implement ghosting. Disabled by default in CEmu anyway.
+
+#### 4. GPIO Registers (LOW PRIORITY)
+CEmu has gpioEnable at 0x40 and gpioStatus at 0x44 (always 0). We don't implement these.
+
+### LCD Gaps
+
+#### 1. Timing Registers (LOW PRIORITY)
+**Gap:** CEmu parses timing0-3 registers to calculate frame duration dynamically. We store them but use fixed 60Hz (800,000 cycles at 48MHz).
+
+**CEmu timing calculation:**
+- Parses PPL, HSW, HFP, HBP, LPP, VSW, VFP, VBP, PCD, CPL
+- Calculates `cycles_per_frame = cycles_per_line * total_lines`
+
+TI-OS programs 60Hz timing, so fixed 60Hz is correct.
+
+#### 2. DMA System (LOW PRIORITY)
+CEmu has `SCHED_LCD_DMA` with FIFO buffer (64 words), watermark config, `upcurr` register tracking DMA position. We render by directly reading VRAM. Same visual result.
+
+#### 3. Compare Interrupts
+CEmu has 4 compare modes (front porch, sync, back porch, active video). We only have VBLANK (front porch). TI-OS uses VBLANK only.
+
+### SPI Gaps (MODERATE PRIORITY)
+
+#### 1. No FIFO Data Storage
+CEmu has `rxFifo[16]` and `txFifo[16]` arrays with real data. We track FIFO counts only.
+
+#### 2. No Device Abstraction
+CEmu uses `device_select`, `device_peek`, `device_transfer` function pointers to communicate with LCD panel or coprocessor. We have no device backend.
+
+#### 3. Null Device for Coprocessor
+CEmu returns `0xC3` for coprocessor reads ("Hack to make OS 5.7.0 happy"). We don't have this.
+
+### SHA256 Gaps (LOW PRIORITY)
+
+**Gap:** CEmu implements full SHA256 compression function with K constants and 64 rounds. We're a stub - no actual hash computation.
+
+Control writes only work when `flash_unlocked()` is true in CEmu.
+
+### Watchdog Gaps (LOW PRIORITY)
+
+**Gap:** CEmu has full state machine:
+- `WATCHDOG_COUNTER`: Normal countdown
+- `WATCHDOG_PULSE`: Pulse generation
+- `WATCHDOG_EXPIRED`: Counter reached zero
+- `WATCHDOG_RELOAD`: Reload in progress
+
+With scheduler integration, multiple clock sources (CPU/32K), and reset/NMI triggers. We're a stub that never counts down.
+
+### Backlight Gaps (LOW PRIORITY)
+
+CEmu maintains `ports[0x100]` array with reset defaults and calculates gamma factor `(310 - brightness) / 160.0f`. We track brightness only.
+
+### Summary
+
+**All boot and basic TI-OS operation work correctly with current implementation.** The gaps are primarily:
+
+1. **Timing precision** - cycle accounting, scheduler mid-instruction processing
+2. **Advanced features** - RTC time display, indexed color modes, serial flash
+3. **Security** - protection enforcement for untrusted code
+4. **Newer OS** - SPI coprocessor for OS 5.7.0+
+
+_Research completed: 2026-02-02_

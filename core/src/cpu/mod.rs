@@ -386,17 +386,26 @@ impl Cpu {
                 1 => {
                     if y == 6 && z == 6 {
                         // HALT
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ before cpu_halt()
                         self.halted = true;
                     } else {
                         // LD r,r'
                         let val = self.get_reg8(z, bus);
                         self.set_reg8(y, val, bus);
+                        // CEmu: cpu.cycles += z == 6 || y == 6 for (HL) operand
+                        if z == 6 || y == 6 {
+                            bus.add_cycles(1);
+                        }
                     }
                 }
                 2 => {
                     // ALU A,r
                     let val = self.get_reg8(z, bus);
                     self.execute_alu(y, val);
+                    // CEmu: cpu.cycles += z == 6 for (HL) operand
+                    if z == 6 {
+                        bus.add_cycles(1);
+                    }
                 }
                 3 => { self.execute_x3(bus, y, z, p, q); }
                 _ => {}

@@ -265,6 +265,18 @@ impl Emu {
         Ok(())
     }
 
+    /// Set serial flash mode
+    /// - true: Serial flash (newer TI-84 CE models) - uses cache timing
+    /// - false: Parallel flash (older models) - uses constant 10 cycle timing
+    pub fn set_serial_flash(&mut self, enabled: bool) {
+        self.bus.set_serial_flash(enabled);
+    }
+
+    /// Get serial flash mode
+    pub fn is_serial_flash(&self) -> bool {
+        self.bus.is_serial_flash()
+    }
+
     /// Reset emulator to initial state
     pub fn reset(&mut self) {
         Self::log_event("RESET");

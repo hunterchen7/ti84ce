@@ -302,6 +302,105 @@ impl Default for WriteTracer {
     }
 }
 
+/// Flash cache constants matching CEmu (flash.h)
+/// 32-byte cache lines, 128 sets, 2-way set associative
+const FLASH_CACHE_LINE_BITS: u32 = 5;
+const FLASH_CACHE_SET_BITS: u32 = 7;
+const FLASH_CACHE_SETS: usize = 1 << FLASH_CACHE_SET_BITS;
+const FLASH_CACHE_INVALID_LINE: u32 = 0xFFFFFFFF;
+const FLASH_CACHE_INVALID_TAG: u16 = 0xFFFF;
+
+/// A single cache set with MRU (most recently used) and LRU (least recently used) tags
+#[derive(Debug, Clone, Copy)]
+struct FlashCacheSet {
+    mru: u16,
+    lru: u16,
+}
+
+impl Default for FlashCacheSet {
+    fn default() -> Self {
+        Self {
+            mru: FLASH_CACHE_INVALID_TAG,
+            lru: FLASH_CACHE_INVALID_TAG,
+        }
+    }
+}
+
+/// Flash cache for serial flash timing simulation
+/// Implements CEmu's flash cache model from flash.c
+#[derive(Debug, Clone)]
+pub struct FlashCache {
+    /// Last accessed cache line
+    last_cache_line: u32,
+    /// Cache tags for each set (2-way associative)
+    cache_tags: [FlashCacheSet; FLASH_CACHE_SETS],
+}
+
+impl FlashCache {
+    /// Create a new flash cache in invalidated state
+    pub fn new() -> Self {
+        Self {
+            last_cache_line: FLASH_CACHE_INVALID_LINE,
+            cache_tags: [FlashCacheSet::default(); FLASH_CACHE_SETS],
+        }
+    }
+
+    /// Flush the cache (invalidate all entries)
+    /// Called when flash commands are executed
+    pub fn flush(&mut self) {
+        if self.last_cache_line != FLASH_CACHE_INVALID_LINE {
+            self.last_cache_line = FLASH_CACHE_INVALID_LINE;
+            for set in &mut self.cache_tags {
+                set.mru = FLASH_CACHE_INVALID_TAG;
+                set.lru = FLASH_CACHE_INVALID_TAG;
+            }
+        }
+    }
+
+    /// Touch the cache for an address and return the number of cycles
+    /// From CEmu flash.c flash_touch_cache()
+    ///
+    /// Returns:
+    /// - 2 cycles: Same cache line as last access (hot path)
+    /// - 3 cycles: Different line but hit in MRU or LRU
+    /// - 197 cycles: Cache miss
+    pub fn touch(&mut self, addr: u32) -> u64 {
+        let line = addr >> FLASH_CACHE_LINE_BITS;
+
+        // Fast path: same cache line as last access
+        if line == self.last_cache_line {
+            return 2;
+        }
+
+        self.last_cache_line = line;
+        let set_index = (line & ((FLASH_CACHE_SETS as u32) - 1)) as usize;
+        let set = &mut self.cache_tags[set_index];
+        let tag = (line >> FLASH_CACHE_SET_BITS) as u16;
+
+        if set.mru == tag {
+            // MRU hit
+            3
+        } else if set.lru == tag {
+            // LRU hit - swap to track most-recently-used
+            set.lru = set.mru;
+            set.mru = tag;
+            3
+        } else {
+            // Cache miss - replace LRU
+            set.lru = set.mru;
+            set.mru = tag;
+            // CEmu: "Supposedly this takes from 195-201 cycles, but typically seems to be 196-197"
+            197
+        }
+    }
+}
+
+impl Default for FlashCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// System bus connecting CPU to memory subsystems
 pub struct Bus {
     /// Flash memory
@@ -322,6 +421,11 @@ pub struct Bus {
     fetch_index: usize,
     /// Write tracer for debugging RAM writes
     pub write_tracer: WriteTracer,
+    /// Serial flash mode (newer TI-84 CE models)
+    /// When true, uses flash cache timing; when false, uses parallel flash timing
+    serial_flash: bool,
+    /// Flash cache for serial flash timing simulation
+    flash_cache: FlashCache,
 }
 
 impl Bus {
@@ -351,6 +455,7 @@ impl Bus {
     const MMIO_WRITE_CYCLES: u64 = 3;
 
     /// Create a new bus with fresh memory
+    /// Defaults to parallel flash mode (older TI-84 CE models, more compatible)
     pub fn new() -> Self {
         Self {
             flash: Flash::new(),
@@ -362,7 +467,29 @@ impl Bus {
             fetch_buffer: [0; FETCH_BUFFER_SIZE],
             fetch_index: 0,
             write_tracer: WriteTracer::new(),
+            serial_flash: false,  // Default to parallel flash (10 cycles, more compatible)
+            flash_cache: FlashCache::new(),
         }
+    }
+
+    /// Set serial flash mode
+    /// - true: Serial flash (newer models) - uses cache timing (2-3 or 197 cycles)
+    /// - false: Parallel flash (older models) - uses constant 10 cycles
+    pub fn set_serial_flash(&mut self, enabled: bool) {
+        self.serial_flash = enabled;
+        if enabled {
+            self.flash_cache.flush();
+        }
+    }
+
+    /// Get serial flash mode
+    pub fn is_serial_flash(&self) -> bool {
+        self.serial_flash
+    }
+
+    /// Flush the flash cache (call when flash commands are executed)
+    pub fn flush_flash_cache(&mut self) {
+        self.flash_cache.flush();
     }
 
     /// Determine which memory region an address maps to
@@ -398,7 +525,12 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                self.cycles += Self::FLASH_READ_CYCLES;
+                // Serial flash uses cache timing, parallel flash uses constant
+                if self.serial_flash {
+                    self.cycles += self.flash_cache.touch(addr);
+                } else {
+                    self.cycles += Self::FLASH_READ_CYCLES;
+                }
                 self.flash.read(addr)
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
@@ -432,7 +564,12 @@ impl Bus {
 
         let value = match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                self.cycles += Self::FLASH_READ_CYCLES;
+                // Serial flash uses cache timing, parallel flash uses constant
+                if self.serial_flash {
+                    self.cycles += self.flash_cache.touch(addr);
+                } else {
+                    self.cycles += Self::FLASH_READ_CYCLES;
+                }
                 self.flash.read(addr)
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
@@ -515,10 +652,16 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
-                // Flash writes are ignored unless flash is unlocked
-                self.cycles += Self::UNMAPPED_CYCLES;
-                if self.ports.control.flash_unlocked() {
-                    self.flash.write_cpu(addr, value);
+                // In serial flash mode, writes touch the cache but don't modify flash
+                // In parallel flash mode, writes are ignored unless unlocked
+                if self.serial_flash {
+                    self.cycles += self.flash_cache.touch(addr);
+                    // Serial flash writes are ignored (no actual write occurs)
+                } else {
+                    self.cycles += Self::UNMAPPED_CYCLES;
+                    if self.ports.control.flash_unlocked() {
+                        self.flash.write_cpu(addr, value);
+                    }
                 }
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {

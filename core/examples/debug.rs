@@ -135,9 +135,17 @@ fn load_rom() -> Option<Vec<u8>> {
 }
 
 fn create_emu() -> Option<Emu> {
+    // Check environment variable for flash mode
+    // Default is parallel flash (Bus::new() default), set SERIAL_FLASH=1 for serial flash
+    let serial_flash = std::env::var("SERIAL_FLASH").map(|v| v == "1").unwrap_or(false);
+    create_emu_with_serial_flash(serial_flash)
+}
+
+fn create_emu_with_serial_flash(serial_flash: bool) -> Option<Emu> {
     let rom_data = load_rom()?;
     let mut emu = Emu::new();
     emu.load_rom(&rom_data).expect("Failed to load ROM");
+    emu.set_serial_flash(serial_flash);
     // Power on the calculator (required before run_cycles will execute)
     emu.press_on_key();
     Some(emu)
