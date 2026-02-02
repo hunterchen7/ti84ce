@@ -40,6 +40,7 @@ Thumbs.db
 # iOS build artifacts
 /ios/cemu/build-device/
 /ios/cemu/build-simulator/
+/ios/cemu/build-simulator-dual
 
 # Debug/test example scripts (one-off debugging files)
 /core/examples/check_*.rs
