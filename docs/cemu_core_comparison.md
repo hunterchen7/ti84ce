@@ -40,7 +40,7 @@ High-level differences observed while comparing the Rust core (`core/`) to the C
 
 - Interrupt controller: Rust exposes raw status on read index 2/10; CEmu returns 0 for those registers (`core/src/peripherals/interrupt.rs`, `cemu-ref/core/interrupt.c`).
 - Timers: Rust uses a simplified per-timer model with immediate interrupts; CEmu uses GPT with control/status/mask/revision registers and delayed interrupt delivery (`core/src/peripherals/timer.rs`, `cemu-ref/core/timers.c`).
-- OS Timer: Rust updates it directly in `tick()`; CEmu drives it via scheduled events (`core/src/peripherals/mod.rs`, `cemu-ref/core/timers.c`).
+- OS Timer: Rust updates it directly in `tick()` and only raises on the rising edge (does not clear on falling edge to avoid missed interrupts); CEmu drives it via scheduled events and toggles the raw state each event (`core/src/peripherals/mod.rs`, `cemu-ref/core/timers.c`).
 - RTC: Rust is mostly a stub (no ticking/alarms/full load/latch state machine); CEmu implements full tick/latch/load/alarm behavior (`core/src/peripherals/rtc.rs`, `cemu-ref/core/realclock.c`).
 - Keypad: Rust has simplified scan logic and no ghosting/GPIO; CEmu implements ghosting, GPIO, and scheduler-driven scanning (`core/src/peripherals/keypad.rs`, `cemu-ref/core/keypad.c`).
 - LCD: Rust models a small register set and a fixed 60Hz VBLANK; CEmu implements full timings, palette/cursor, DMA, and panel integration (`core/src/peripherals/lcd.rs`, `cemu-ref/core/lcd.c/.h`, `cemu-ref/core/panel.c`).
