@@ -1,0 +1,36 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_wasmemu_free: (a: number, b: number) => void;
+export const wasmemu_framebuffer_height: (a: number) => number;
+export const wasmemu_framebuffer_width: (a: number) => number;
+export const wasmemu_get_backlight: (a: number) => number;
+export const wasmemu_get_framebuffer_rgba: (a: number) => [number, number];
+export const wasmemu_is_lcd_on: (a: number) => number;
+export const wasmemu_load_rom: (a: number, b: number, c: number) => number;
+export const wasmemu_load_state: (a: number, b: number, c: number) => number;
+export const wasmemu_new: () => number;
+export const wasmemu_power_on: (a: number) => void;
+export const wasmemu_reset: (a: number) => void;
+export const wasmemu_run_cycles: (a: number, b: number) => number;
+export const wasmemu_save_state: (a: number) => [number, number];
+export const wasmemu_save_state_size: (a: number) => number;
+export const wasmemu_set_key: (a: number, b: number, c: number, d: number) => void;
+export const emu_create: () => number;
+export const emu_destroy: (a: number) => void;
+export const emu_framebuffer: (a: number, b: number, c: number) => number;
+export const emu_get_backlight: (a: number) => number;
+export const emu_is_lcd_on: (a: number) => number;
+export const emu_load_rom: (a: number, b: number, c: number) => number;
+export const emu_load_state: (a: number, b: number, c: number) => number;
+export const emu_reset: (a: number) => void;
+export const emu_run_cycles: (a: number, b: number) => number;
+export const emu_save_state_size: (a: number) => number;
+export const emu_set_key: (a: number, b: number, c: number, d: number) => void;
+export const emu_set_log_callback: (a: number) => void;
+export const emu_save_state: (a: number, b: number, c: number) => number;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_start: () => void;

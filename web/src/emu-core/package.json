@@ -1,0 +1,17 @@
+{
+  "name": "emu-core",
+  "type": "module",
+  "description": "TI-84 Plus CE emulator core",
+  "version": "0.1.0",
+  "license": "MIT",
+  "files": [
+    "emu_core_bg.wasm",
+    "emu_core.js",
+    "emu_core.d.ts"
+  ],
+  "main": "emu_core.js",
+  "types": "emu_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}
