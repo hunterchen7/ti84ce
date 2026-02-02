@@ -16,6 +16,8 @@ chrono = "0.4"
 
 [features]
 default = []
+# Export functions with rust_ prefix for iOS dual-backend builds
+ios_prefixed = []
 
 [profile.release]
 lto = true

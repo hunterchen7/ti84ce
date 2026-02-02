@@ -2,8 +2,9 @@
 //  EmulatorBridge.swift
 //  Calc
 //
-//  Swift wrapper for the Rust emulator core C API.
+//  Swift wrapper for the emulator core C API.
 //  Provides thread-safe access to emulator functions.
+//  Supports runtime backend switching when multiple backends are available.
 //
 
 import Foundation
@@ -11,7 +12,8 @@ import CoreGraphics
 import os.log
 
 /// Bridge to the native emulator core.
-/// Thread-safe wrapper around the C API defined in emu.h.
+/// Thread-safe wrapper around the C API defined in emu_backend.h.
+/// Supports runtime switching between Rust and CEmu backends when both are available.
 class EmulatorBridge {
     private static let logger = Logger(subsystem: "com.calc.emulator", category: "EmulatorBridge")
 
@@ -293,6 +295,58 @@ class EmulatorBridge {
             }
             return emu_load_state(h, ptr, data.count)
         }
+    }
+
+    // MARK: - Backend Management
+
+    /// Get the list of available backends.
+    /// - Returns: Array of backend names (e.g., ["rust", "cemu"])
+    static func getAvailableBackends() -> [String] {
+        guard let cString = emu_backend_get_available() else {
+            return []
+        }
+        let available = String(cString: cString)
+        if available.isEmpty {
+            return []
+        }
+        return available.components(separatedBy: ",")
+    }
+
+    /// Get the number of available backends.
+    /// - Returns: Number of backends (0, 1, or 2)
+    static func getBackendCount() -> Int {
+        return Int(emu_backend_count())
+    }
+
+    /// Get the current backend name.
+    /// - Returns: Current backend name, or nil if no backend is loaded
+    static func getCurrentBackend() -> String? {
+        guard let cString = emu_backend_get_current() else {
+            return nil
+        }
+        return String(cString: cString)
+    }
+
+    /// Set the active backend.
+    /// Note: This must be called before creating an emulator instance,
+    /// or after destroying the current instance.
+    /// - Parameter name: Backend name ("rust" or "cemu")
+    /// - Returns: true if successful
+    static func setBackend(_ name: String) -> Bool {
+        let result = emu_backend_set(name)
+        if result == 0 {
+            logger.info("Backend switched to: \(name)")
+            return true
+        } else {
+            logger.error("Failed to switch backend to: \(name)")
+            return false
+        }
+    }
+
+    /// Check if backend switching is available (multiple backends linked).
+    /// - Returns: true if more than one backend is available
+    static func isBackendSwitchingAvailable() -> Bool {
+        return getBackendCount() > 1
     }
 
     // MARK: - Logging

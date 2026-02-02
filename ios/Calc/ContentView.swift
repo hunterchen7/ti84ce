@@ -41,6 +41,9 @@ class EmulatorState: ObservableObject {
     @Published var romSize: Int = 0
     @Published var loadError: String?
 
+    // Store last loaded ROM for backend switching
+    var lastLoadedRomData: Data?
+
     // Emulation state
     @Published var isRunning = false
     @Published var isLcdOn = true
@@ -67,6 +70,13 @@ class EmulatorState: ObservableObject {
         Int32(800_000 * speedMultiplier)
     }
 
+    init() {
+        // Initialize backend from saved preference
+        if let preferredBackend = EmulatorPreferences.getEffectiveBackend() {
+            _ = EmulatorBridge.setBackend(preferredBackend)
+        }
+    }
+
     deinit {
         stopEmulation()
         emulator.destroy()
@@ -80,6 +90,7 @@ class EmulatorState: ObservableObject {
             romLoaded = true
             romName = name
             romSize = data.count
+            lastLoadedRomData = data  // Store for backend switching
             loadError = nil
             totalCyclesExecuted = 0
             frameCounter = 0

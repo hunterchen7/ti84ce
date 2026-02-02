@@ -12,6 +12,7 @@ struct EmulatorView: View {
     @ObservedObject var state: EmulatorState
     @State private var showingSidebar = false
     @State private var showingRomPicker = false
+    @State private var showingBackendPicker = false
     @State private var sidebarDragOffset: CGFloat = 0
     @State private var isDraggingToClose = false
 
@@ -77,6 +78,9 @@ struct EmulatorView: View {
             DocumentPicker { url in
                 loadRom(from: url)
             }
+        }
+        .sheet(isPresented: $showingBackendPicker) {
+            BackendPickerView(state: state)
         }
     }
 
@@ -150,6 +154,17 @@ struct EmulatorView: View {
                         : .white
                 ) {
                     state.showDebug.toggle()
+                }
+
+                // Backend settings (only show if multiple backends available)
+                if EmulatorBridge.isBackendSwitchingAvailable() {
+                    sidebarButton(
+                        title: "Backend: \(EmulatorBridge.getCurrentBackend() ?? "None")",
+                        color: Color(red: 0.129, green: 0.588, blue: 0.953)
+                    ) {
+                        showingSidebar = false
+                        showingBackendPicker = true
+                    }
                 }
 
                 Divider()
@@ -247,6 +262,81 @@ struct EmulatorView: View {
         } catch {
             state.loadError = "Error: \(error.localizedDescription)"
         }
+    }
+}
+
+/// Backend picker sheet for switching between emulator backends
+struct BackendPickerView: View {
+    @ObservedObject var state: EmulatorState
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        NavigationView {
+            List {
+                ForEach(EmulatorBridge.getAvailableBackends(), id: \.self) { backend in
+                    Button(action: {
+                        switchBackend(to: backend)
+                    }) {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(backend.capitalized)
+                                    .foregroundColor(.primary)
+                                Text(backendDescription(backend))
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            if EmulatorBridge.getCurrentBackend() == backend {
+                                Image(systemName: "checkmark")
+                                    .foregroundColor(.blue)
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Select Backend")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func backendDescription(_ backend: String) -> String {
+        switch backend {
+        case "rust":
+            return "Native Rust emulator core"
+        case "cemu":
+            return "CEmu reference emulator"
+        default:
+            return ""
+        }
+    }
+
+    private func switchBackend(to backend: String) {
+        // Stop emulation
+        state.stopEmulation()
+
+        // Destroy current emulator
+        state.emulator.destroy()
+
+        // Switch backend
+        if EmulatorBridge.setBackend(backend) {
+            // Save preference
+            EmulatorPreferences.setPreferredBackend(backend)
+
+            // Recreate emulator with new backend
+            if state.emulator.create() {
+                // Reload ROM if we had one
+                if let romData = state.lastLoadedRomData, let romName = state.romName {
+                    state.loadRom(romData, name: romName)
+                }
+            }
+        }
+
+        dismiss()
     }
 }
 

@@ -61,6 +61,7 @@ impl SyncEmu {
 /// Returns null on allocation failure.
 /// The returned pointer is thread-safe - all operations are synchronized.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_create")]
 pub extern "C" fn emu_create() -> *mut SyncEmu {
     let emu = Box::new(SyncEmu::new());
     Box::into_raw(emu)
@@ -69,6 +70,7 @@ pub extern "C" fn emu_create() -> *mut SyncEmu {
 /// Destroy an emulator instance.
 /// Safe to call with null pointer.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_destroy")]
 pub extern "C" fn emu_destroy(emu: *mut SyncEmu) {
     if !emu.is_null() {
         unsafe {
@@ -80,6 +82,7 @@ pub extern "C" fn emu_destroy(emu: *mut SyncEmu) {
 /// Set an optional log callback for emulator events.
 /// The callback is called with a null-terminated C string.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_set_log_callback")]
 pub extern "C" fn emu_set_log_callback(cb: Option<extern "C" fn(*const c_char)>) {
     emu::set_log_callback(cb);
 }
@@ -87,6 +90,7 @@ pub extern "C" fn emu_set_log_callback(cb: Option<extern "C" fn(*const c_char)>)
 /// Load ROM data into the emulator.
 /// Returns 0 on success, negative error code on failure.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_load_rom")]
 pub extern "C" fn emu_load_rom(emu: *mut SyncEmu, data: *const u8, len: usize) -> i32 {
     if emu.is_null() || data.is_null() {
         return -1;
@@ -104,6 +108,7 @@ pub extern "C" fn emu_load_rom(emu: *mut SyncEmu, data: *const u8, len: usize) -
 
 /// Reset the emulator to initial state.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_reset")]
 pub extern "C" fn emu_reset(emu: *mut SyncEmu) {
     if emu.is_null() {
         return;
@@ -118,6 +123,7 @@ pub extern "C" fn emu_reset(emu: *mut SyncEmu) {
 /// Returns the number of cycles actually executed.
 /// Also updates the framebuffer with current VRAM contents.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_run_cycles")]
 pub extern "C" fn emu_run_cycles(emu: *mut SyncEmu, cycles: i32) -> i32 {
     if emu.is_null() || cycles <= 0 {
         return 0;
@@ -138,6 +144,7 @@ pub extern "C" fn emu_run_cycles(emu: *mut SyncEmu, cycles: i32) -> i32 {
 /// WARNING: The returned pointer is only valid while the mutex is held.
 /// The caller should copy the framebuffer data immediately.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_framebuffer")]
 pub extern "C" fn emu_framebuffer(emu: *const SyncEmu, w: *mut i32, h: *mut i32) -> *const u32 {
     if emu.is_null() {
         return ptr::null();
@@ -161,6 +168,7 @@ pub extern "C" fn emu_framebuffer(emu: *const SyncEmu, w: *mut i32, h: *mut i32)
 /// row: 0-7, col: 0-7
 /// down: non-zero for pressed, zero for released
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_set_key")]
 pub extern "C" fn emu_set_key(emu: *mut SyncEmu, row: i32, col: i32, down: i32) {
     if emu.is_null() {
         return;
@@ -174,6 +182,7 @@ pub extern "C" fn emu_set_key(emu: *mut SyncEmu, row: i32, col: i32, down: i32) 
 /// Get the backlight brightness level (0-255).
 /// Returns 0 if emulator pointer is null.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_get_backlight")]
 pub extern "C" fn emu_get_backlight(emu: *const SyncEmu) -> u8 {
     if emu.is_null() {
         return 0;
@@ -188,6 +197,7 @@ pub extern "C" fn emu_get_backlight(emu: *const SyncEmu) -> u8 {
 /// Returns 1 if LCD is on, 0 if LCD is off.
 /// LCD is off when either control port 0x05 bit 4 is clear OR lcd.control bit 11 is clear.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_is_lcd_on")]
 pub extern "C" fn emu_is_lcd_on(emu: *const SyncEmu) -> i32 {
     if emu.is_null() {
         return 0;
@@ -200,6 +210,7 @@ pub extern "C" fn emu_is_lcd_on(emu: *const SyncEmu) -> i32 {
 
 /// Get the size needed for a save state buffer.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_save_state_size")]
 pub extern "C" fn emu_save_state_size(emu: *const SyncEmu) -> usize {
     if emu.is_null() {
         return 0;
@@ -213,6 +224,7 @@ pub extern "C" fn emu_save_state_size(emu: *const SyncEmu) -> usize {
 /// Save emulator state to a buffer.
 /// Returns bytes written on success, negative error code on failure.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_save_state")]
 pub extern "C" fn emu_save_state(emu: *const SyncEmu, out: *mut u8, cap: usize) -> i32 {
     if emu.is_null() || out.is_null() {
         return -1;
@@ -231,6 +243,7 @@ pub extern "C" fn emu_save_state(emu: *const SyncEmu, out: *mut u8, cap: usize) 
 /// Load emulator state from a buffer.
 /// Returns 0 on success, negative error code on failure.
 #[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_load_state")]
 pub extern "C" fn emu_load_state(emu: *mut SyncEmu, data: *const u8, len: usize) -> i32 {
     if emu.is_null() || data.is_null() {
         return -1;

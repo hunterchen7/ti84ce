@@ -2,11 +2,11 @@
 #
 # Quick reference:
 #   ./scripts/build.sh android [--debug] [--rust|--cemu|--both] [--install]
-#   ./scripts/build.sh ios [--debug] [--rust|--cemu] [--sim] [--open]
+#   ./scripts/build.sh ios [--debug] [--rust|--cemu|--both] [--sim] [--open]
 
 .PHONY: android android-debug android-install android-both android-both-install \
         android-cemu android-cemu-install \
-        ios ios-debug ios-sim ios-cemu ios-sim-cemu \
+        ios ios-debug ios-sim ios-cemu ios-sim-cemu ios-both ios-sim-both \
         log-android test clean cemu cemu-test cemu-clean help
 
 #------------------------------------------------------------------------------
@@ -64,6 +64,18 @@ ios-debug:
 # iOS Simulator (Rust)
 ios-sim:
 	./scripts/build.sh ios --rust --sim
+
+#------------------------------------------------------------------------------
+# iOS - Both backends (runtime switching)
+#------------------------------------------------------------------------------
+
+# iOS device release with both backends
+ios-both:
+	./scripts/build.sh ios --both
+
+# iOS Simulator with both backends
+ios-sim-both:
+	./scripts/build.sh ios --both --sim
 
 #------------------------------------------------------------------------------
 # iOS - CEmu only
@@ -154,6 +166,10 @@ help:
 	@echo "    make ios             Release, device, Rust"
 	@echo "    make ios-debug       Debug, device, Rust"
 	@echo "    make ios-sim         Release, simulator, Rust"
+	@echo ""
+	@echo "  iOS (Both backends - runtime switching):"
+	@echo "    make ios-both        Release, device, both backends"
+	@echo "    make ios-sim-both    Release, simulator, both backends"
 	@echo ""
 	@echo "  iOS (CEmu only):"
 	@echo "    make ios-cemu        Release, device, CEmu"

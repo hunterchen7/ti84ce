@@ -8,8 +8,18 @@
  * Define CEMU_PERF_INSTRUMENTATION to enable timing instrumentation.
  * This adds significant overhead (6+ syscalls per loop iteration) and should
  * only be used for debugging performance issues.
+ *
+ * Symbol Prefixing:
+ * Define IOS_PREFIXED to export functions with cemu_ prefix (for dual-backend iOS builds).
  */
 #include "emu.h"  // Our adapter header
+
+// Symbol prefixing for iOS dual-backend support
+#ifdef IOS_PREFIXED
+#define EMU_FUNC(name) cemu_##name
+#else
+#define EMU_FUNC(name) name
+#endif
 
 // CEmu headers
 #include "asic.h"
@@ -273,7 +283,7 @@ static int cemu_load_rom_from_memory(const uint8_t *rom_data, size_t rom_size) {
 // Public API Implementation
 // ============================================================
 
-Emu* emu_create(void) {
+Emu* EMU_FUNC(emu_create)(void) {
     if (g_instance != NULL) {
         return NULL;
     }
@@ -287,7 +297,7 @@ Emu* emu_create(void) {
     return g_instance;
 }
 
-void emu_destroy(Emu* emu) {
+void EMU_FUNC(emu_destroy)(Emu* emu) {
     if (emu && emu == g_instance) {
         if (emu->initialized) {
             asic_free();
@@ -297,11 +307,11 @@ void emu_destroy(Emu* emu) {
     }
 }
 
-void emu_set_log_callback(emu_log_cb_t cb) {
+void EMU_FUNC(emu_set_log_callback)(emu_log_cb_t cb) {
     g_log_callback = cb;
 }
 
-int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
+int EMU_FUNC(emu_load_rom)(Emu* emu, const uint8_t* data, size_t len) {
     if (!emu || emu != g_instance || !data || len == 0) {
         return -1;
     }
@@ -319,13 +329,13 @@ int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
     return 0;
 }
 
-void emu_reset(Emu* emu) {
+void EMU_FUNC(emu_reset)(Emu* emu) {
     if (emu && emu == g_instance && emu->initialized) {
         asic_reset();
     }
 }
 
-int emu_run_cycles(Emu* emu, int cycles) {
+int EMU_FUNC(emu_run_cycles)(Emu* emu, int cycles) {
     if (!emu || emu != g_instance || !emu->initialized || cycles <= 0) {
         return 0;
     }
@@ -341,7 +351,7 @@ int emu_run_cycles(Emu* emu, int cycles) {
     return cycles;
 }
 
-const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
+const uint32_t* EMU_FUNC(emu_framebuffer)(const Emu* emu, int* w, int* h) {
     // Always return valid dimensions (matches Rust implementation behavior)
     if (w) *w = LCD_WIDTH;
     if (h) *h = LCD_HEIGHT;
@@ -385,38 +395,38 @@ const uint32_t* emu_framebuffer(const Emu* emu, int* w, int* h) {
     return emu->framebuffer;
 }
 
-void emu_set_key(Emu* emu, int row, int col, int down) {
+void EMU_FUNC(emu_set_key)(Emu* emu, int row, int col, int down) {
     if (!emu || emu != g_instance || !emu->initialized) {
         return;
     }
     emu_keypad_event((unsigned int)row, (unsigned int)col, down != 0);
 }
 
-uint8_t emu_get_backlight(const Emu* emu) {
+uint8_t EMU_FUNC(emu_get_backlight)(const Emu* emu) {
     if (!emu || emu != g_instance || !emu->initialized) {
         return 0;
     }
     return backlight.brightness;
 }
 
-int emu_is_lcd_on(const Emu* emu) {
+int EMU_FUNC(emu_is_lcd_on)(const Emu* emu) {
     if (!emu || emu != g_instance || !emu->initialized) {
         return 0;
     }
     return (lcd.control & 1) ? 1 : 0;
 }
 
-size_t emu_save_state_size(const Emu* emu) {
+size_t EMU_FUNC(emu_save_state_size)(const Emu* emu) {
     (void)emu;
     return 0;
 }
 
-int emu_save_state(const Emu* emu, uint8_t* out, size_t cap) {
+int EMU_FUNC(emu_save_state)(const Emu* emu, uint8_t* out, size_t cap) {
     (void)emu; (void)out; (void)cap;
     return -1;
 }
 
-int emu_load_state(Emu* emu, const uint8_t* data, size_t len) {
+int EMU_FUNC(emu_load_state)(Emu* emu, const uint8_t* data, size_t len) {
     (void)emu; (void)data; (void)len;
     return -1;
 }

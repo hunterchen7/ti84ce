@@ -232,33 +232,135 @@ build_ios() {
         PLATFORM_SUFFIX="iphoneos"
     fi
 
-    # For iOS, we currently only support one backend at a time
-    # TODO: Add dual-backend support for iOS
-    if [ "$BUILD_RUST" = true ] && [ "$BUILD_CEMU" = true ]; then
-        echo "Warning: iOS currently only supports one backend at a time."
-        echo "Building with Rust backend. Use --cemu for CEmu."
-        BUILD_CEMU=false
+    # Set up output directory
+    if [ "$BUILD_CONFIG" = "Release" ]; then
+        LIB_CONFIG="release"
+    else
+        LIB_CONFIG="debug"
     fi
+    DEST_DIR="$PROJECT_ROOT/core/target/$RUST_TARGET/$LIB_CONFIG"
+    mkdir -p "$DEST_DIR"
 
-    if [ "$BUILD_CEMU" = true ]; then
+    # Dual-backend build for iOS
+    if [ "$BUILD_RUST" = true ] && [ "$BUILD_CEMU" = true ]; then
+        echo "==> Building dual-backend for iOS (Rust + CEmu)..."
+
+        # Build Rust with prefixed symbols
+        echo "==> Building Rust core with prefixed symbols..."
+        cd core
+        rustup target add "$RUST_TARGET" 2>/dev/null || true
+        if [ "$BUILD_CONFIG" = "Release" ]; then
+            cargo build --release --target "$RUST_TARGET" --features ios_prefixed
+        else
+            cargo build --target "$RUST_TARGET" --features ios_prefixed
+        fi
+        # Rename to libemu_rust.a
+        cp "$DEST_DIR/libemu_core.a" "$DEST_DIR/libemu_rust.a"
+        cd "$PROJECT_ROOT"
+
+        # Build CEmu with prefixed symbols
+        echo "==> Building CEmu adapter with prefixed symbols..."
+        mkdir -p ios/cemu
+        cat > ios/cemu/CMakeLists.txt << 'CMAKEOF'
+cmake_minimum_required(VERSION 3.20)
+project(cemu_adapter C)
+set(CMAKE_C_STANDARD 11)
+option(IOS_PREFIXED "Export symbols with cemu_ prefix" OFF)
+set(CEMU_CORE_DIR "${CMAKE_SOURCE_DIR}/../../cemu-ref/core")
+file(GLOB CEMU_SOURCES "${CEMU_CORE_DIR}/*.c" "${CEMU_CORE_DIR}/usb/*.c")
+list(APPEND CEMU_SOURCES "${CEMU_CORE_DIR}/os/os-linux.c")
+set(ADAPTER_SOURCE "${CMAKE_SOURCE_DIR}/../../android/app/src/main/cpp/cemu/cemu_adapter.c")
+add_library(cemu_adapter STATIC ${CEMU_SOURCES} ${ADAPTER_SOURCE})
+target_include_directories(cemu_adapter PRIVATE
+    ${CEMU_CORE_DIR}
+    ${CEMU_CORE_DIR}/usb
+    ${CEMU_CORE_DIR}/os
+    ${CMAKE_SOURCE_DIR}/../include
+)
+target_compile_definitions(cemu_adapter PRIVATE MULTITHREAD=0 CEMU_NO_UI=1)
+if(IOS_PREFIXED)
+    target_compile_definitions(cemu_adapter PRIVATE IOS_PREFIXED=1)
+endif()
+target_compile_options(cemu_adapter PRIVATE -w)
+CMAKEOF
+
+        cd ios/cemu
+        BUILD_DIR="build-$TARGET-dual"
+        rm -rf "$BUILD_DIR"
+        mkdir -p "$BUILD_DIR"
+        cd "$BUILD_DIR"
+
+        CMAKE_EXTRA=""
+        [ "$TARGET" = "simulator" ] && CMAKE_EXTRA="-DCMAKE_OSX_SYSROOT=iphonesimulator"
+
+        cmake .. -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DIOS_PREFIXED=ON \
+            $CMAKE_EXTRA
+
+        cmake --build . --config "$BUILD_CONFIG"
+
+        CEMU_LIB="$(pwd)/$BUILD_CONFIG-$PLATFORM_SUFFIX/libcemu_adapter.a"
+        cp "$CEMU_LIB" "$DEST_DIR/libemu_cemu.a"
+        cd "$PROJECT_ROOT"
+
+        # Build backend bridge
+        echo "==> Building backend bridge..."
+        BRIDGE_SRC="ios/Calc/Bridge/backend_bridge.c"
+        BRIDGE_OBJ="$DEST_DIR/backend_bridge.o"
+
+        # Determine SDK path
+        if [ "$TARGET" = "simulator" ]; then
+            SDK_PATH=$(xcrun --sdk iphonesimulator --show-sdk-path)
+        else
+            SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+        fi
+
+        clang -c "$BRIDGE_SRC" -o "$BRIDGE_OBJ" \
+            -target arm64-apple-ios16.0 \
+            -isysroot "$SDK_PATH" \
+            -I ios/include \
+            -DHAS_RUST_BACKEND=1 \
+            -DHAS_CEMU_BACKEND=1
+
+        # Create combined library
+        ar rcs "$DEST_DIR/libemu_core.a" "$BRIDGE_OBJ"
+
+        LIBRARY_PATH="$DEST_DIR"
+        OTHER_LDFLAGS="-lemu_core -lemu_rust -lemu_cemu"
+
+        echo ""
+        echo "==> Dual-backend build complete!"
+        echo "    Libraries: $LIBRARY_PATH"
+        echo "      - libemu_core.a (backend bridge)"
+        echo "      - libemu_rust.a (Rust backend)"
+        echo "      - libemu_cemu.a (CEmu backend)"
+
+    elif [ "$BUILD_CEMU" = true ]; then
         echo "==> Building CEmu adapter for iOS..."
 
-        # Setup CEmu iOS build
+        # Setup CEmu iOS build (single backend, no prefix)
         mkdir -p ios/cemu
-        cat > ios/cemu/CMakeLists.txt << 'EOF'
+        cat > ios/cemu/CMakeLists.txt << 'CMAKEOF'
 cmake_minimum_required(VERSION 3.20)
 project(cemu_adapter C)
 set(CMAKE_C_STANDARD 11)
 set(CEMU_CORE_DIR "${CMAKE_SOURCE_DIR}/../../cemu-ref/core")
 file(GLOB CEMU_SOURCES "${CEMU_CORE_DIR}/*.c" "${CEMU_CORE_DIR}/usb/*.c")
-# Add os-linux.c for fopen_utf8 (works on macOS/iOS too)
 list(APPEND CEMU_SOURCES "${CEMU_CORE_DIR}/os/os-linux.c")
 set(ADAPTER_SOURCE "${CMAKE_SOURCE_DIR}/../../android/app/src/main/cpp/cemu/cemu_adapter.c")
 add_library(cemu_adapter STATIC ${CEMU_SOURCES} ${ADAPTER_SOURCE})
-target_include_directories(cemu_adapter PRIVATE ${CEMU_CORE_DIR} ${CEMU_CORE_DIR}/usb ${CEMU_CORE_DIR}/os)
+target_include_directories(cemu_adapter PRIVATE
+    ${CEMU_CORE_DIR}
+    ${CEMU_CORE_DIR}/usb
+    ${CEMU_CORE_DIR}/os
+    ${CMAKE_SOURCE_DIR}/../include
+)
 target_compile_definitions(cemu_adapter PRIVATE MULTITHREAD=0 CEMU_NO_UI=1)
 target_compile_options(cemu_adapter PRIVATE -w)
-EOF
+CMAKEOF
 
         cd ios/cemu
         BUILD_DIR="build-$TARGET"
@@ -276,10 +378,7 @@ EOF
 
         cmake --build . --config "$BUILD_CONFIG"
 
-        # Copy library to where Xcode expects it (same location as Rust)
         CEMU_LIB="$(pwd)/$BUILD_CONFIG-$PLATFORM_SUFFIX/libcemu_adapter.a"
-        DEST_DIR="$PROJECT_ROOT/core/target/$RUST_TARGET/release"
-        mkdir -p "$DEST_DIR"
         rm -f "$DEST_DIR/libemu_core.a"
         cp "$CEMU_LIB" "$DEST_DIR/libemu_core.a"
         echo "==> Copied CEmu library to $DEST_DIR/libemu_core.a"
@@ -296,12 +395,11 @@ EOF
 
         if [ "$BUILD_CONFIG" = "Release" ]; then
             cargo build --release --target "$RUST_TARGET"
-            LIBRARY_PATH="$PROJECT_ROOT/core/target/$RUST_TARGET/release"
         else
             cargo build --target "$RUST_TARGET"
-            LIBRARY_PATH="$PROJECT_ROOT/core/target/$RUST_TARGET/debug"
         fi
 
+        LIBRARY_PATH="$DEST_DIR"
         OTHER_LDFLAGS="-lemu_core"
 
         cd "$PROJECT_ROOT"
@@ -309,7 +407,7 @@ EOF
 
     echo ""
     echo "==> Backend build complete!"
-    echo "    Library: $LIBRARY_PATH"
+    echo "    Library path: $LIBRARY_PATH"
     echo "    Linker flags: $OTHER_LDFLAGS"
     echo ""
     echo "Open ios/Calc.xcodeproj in Xcode to build and run the app."
