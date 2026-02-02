@@ -58,6 +58,33 @@ struct RomLoadingView: View {
                 .font(.system(size: 12))
                 .foregroundColor(Color(white: 0.3))
 
+            // Backend selector (only show if multiple backends available)
+            if EmulatorBridge.isBackendSwitchingAvailable() {
+                Spacer().frame(height: 32)
+
+                HStack {
+                    Text("Backend:")
+                        .font(.system(size: 14))
+                        .foregroundColor(.gray)
+
+                    Picker("Backend", selection: Binding(
+                        get: { EmulatorBridge.getCurrentBackend() ?? "rust" },
+                        set: { newBackend in
+                            if EmulatorBridge.setBackend(newBackend) {
+                                EmulatorPreferences.setPreferredBackend(newBackend)
+                            }
+                        }
+                    )) {
+                        ForEach(EmulatorBridge.getAvailableBackends(), id: \.self) { backend in
+                            Text(backend.capitalized).tag(backend)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 160)
+                }
+                .padding(.horizontal, 32)
+            }
+
             Spacer()
         }
         .sheet(isPresented: $showingPicker) {
