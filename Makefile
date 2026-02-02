@@ -7,6 +7,7 @@
 .PHONY: android android-debug android-install android-both android-both-install \
         android-cemu android-cemu-install \
         ios ios-debug ios-sim ios-cemu ios-sim-cemu ios-both ios-sim-both \
+        web web-cemu web-dev web-clean \
         log-android test clean cemu cemu-test cemu-clean help
 
 #------------------------------------------------------------------------------
@@ -90,6 +91,56 @@ ios-sim-cemu:
 	./scripts/build.sh ios --cemu --sim
 
 #------------------------------------------------------------------------------
+# Web
+#------------------------------------------------------------------------------
+
+# Web release (Rust WASM)
+web:
+	@echo "Building Rust WASM package..."
+	cd core && wasm-pack build --target web --release
+	@echo "Copying WASM package to web app..."
+	rm -rf web/src/emu-core
+	cp -r core/pkg web/src/emu-core
+	@echo "Installing npm dependencies..."
+	cd web && npm install
+	@echo "Building web app..."
+	cd web && npm run build
+	@echo ""
+	@echo "Done! Output in web/dist/"
+	@echo "To serve locally: cd web && npx serve dist"
+
+# Web release with CEmu backend (Emscripten)
+web-cemu:
+	@echo "Building CEmu WASM with Emscripten..."
+	@if ! command -v emcc >/dev/null 2>&1; then \
+		echo "Error: Emscripten not found. Install with: brew install emscripten"; \
+		exit 1; \
+	fi
+	@if [ ! -d "cemu-ref" ]; then \
+		echo "Cloning CEmu reference repository..."; \
+		git clone --depth 1 https://github.com/CE-Programming/CEmu.git cemu-ref; \
+	fi
+	$(MAKE) -C web -f cemu-emscripten.mk wasm
+	@echo "Copying CEmu WASM to web app..."
+	mkdir -p web/src/cemu-core
+	cp web/build-cemu/WebCEmu.js web/build-cemu/WebCEmu.wasm web/src/cemu-core/
+	@echo ""
+	@echo "CEmu WASM built! Files in web/src/cemu-core/"
+
+# Web development server
+web-dev:
+	@if [ ! -d "web/src/emu-core" ]; then \
+		echo "WASM package not found. Building first..."; \
+		$(MAKE) web; \
+	fi
+	cd web && npm run dev
+
+# Clean web artifacts
+web-clean:
+	rm -rf web/dist web/node_modules web/src/emu-core
+	rm -rf core/pkg
+
+#------------------------------------------------------------------------------
 # Utilities
 #------------------------------------------------------------------------------
 
@@ -110,6 +161,7 @@ clean:
 	-cd android && ./gradlew clean
 	rm -rf android/app/.cxx android/app/build/intermediates/cmake
 	rm -rf ios/build ios/cemu/build-* ios/DerivedData
+	rm -rf web/dist web/src/emu-core core/pkg
 
 #------------------------------------------------------------------------------
 # CEmu (reference emulator for macOS)
@@ -174,6 +226,12 @@ help:
 	@echo "  iOS (CEmu only):"
 	@echo "    make ios-cemu        Release, device, CEmu"
 	@echo "    make ios-sim-cemu    Release, simulator, CEmu"
+	@echo ""
+	@echo "  Web:"
+	@echo "    make web             Build web app (Rust WASM)"
+	@echo "    make web-cemu        Build CEmu WASM (Emscripten)"
+	@echo "    make web-dev         Run web dev server"
+	@echo "    make web-clean       Clean web artifacts"
 	@echo ""
 	@echo "  Utilities:"
 	@echo "    make test            Run Rust tests"
