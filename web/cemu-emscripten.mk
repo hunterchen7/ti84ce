@@ -20,6 +20,9 @@ CSOURCES := $(wildcard $(CEMU_CORE)/*.c) $(wildcard $(CEMU_CORE)/usb/*.c) $(CEMU
 
 OBJS = $(patsubst $(CEMU_CORE)/%.c, build-cemu/%.bc, $(CSOURCES))
 
+# Local stubs for missing GUI functions
+STUB_OBJS = build-cemu/cemu-stubs.bc
+
 OUTPUT := build-cemu/WebCEmu
 
 .PHONY: wasm all clean dirs
@@ -33,9 +36,12 @@ dirs:
 	@mkdir -p build-cemu/usb build-cemu/debug build-cemu/os
 
 build-cemu/%.bc: $(CEMU_CORE)/%.c
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -I$(CEMU_CORE) -c $< -o $@
 
-$(OUTPUT).js: $(OBJS)
+build-cemu/cemu-stubs.bc: cemu-stubs.c
+	$(CC) $(CFLAGS) -I$(CEMU_CORE) -c $< -o $@
+
+$(OUTPUT).js: $(OBJS) $(STUB_OBJS)
 	$(CC) $(CFLAGS) $(LFLAGS) $^ -o $@
 
 clean:
