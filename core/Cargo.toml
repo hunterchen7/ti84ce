@@ -7,15 +7,23 @@ license = "MIT"
 
 [lib]
 name = "emu_core"
-crate-type = ["staticlib", "rlib"]
+crate-type = ["staticlib", "rlib", "cdylib"]
 
 [dependencies]
+wasm-bindgen = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", features = ["console"], optional = true }
 
 [dev-dependencies]
 chrono = "0.4"
 
 [features]
 default = []
+wasm = ["wasm-bindgen", "js-sys", "web-sys"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
 
 [profile.release]
 lto = true

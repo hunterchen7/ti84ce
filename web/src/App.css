@@ -1,0 +1,28 @@
+#root {
+  max-width: 1280px;
+  margin: 0 auto;
+  text-align: center;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  font-size: 1rem;
+  cursor: pointer;
+  background: #1a1a1a;
+  color: white;
+  border: 1px solid #333;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+button:hover {
+  background: #333;
+}
+
+button:active {
+  background: #444;
+}
+
+input[type="file"] {
+  padding: 0.5rem;
+}
