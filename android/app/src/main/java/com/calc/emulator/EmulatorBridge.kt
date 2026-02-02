@@ -15,12 +15,31 @@ class EmulatorBridge {
         // Singleton-like initialization tracking
         private var initialized = false
 
+        // Track which backend libraries are available
+        private val loadedBackends = mutableListOf<String>()
+
         init {
+            // Load JNI bridge first
             try {
                 System.loadLibrary("emu_jni")
                 Log.i(TAG, "JNI loader library loaded successfully")
             } catch (e: UnsatisfiedLinkError) {
                 Log.e(TAG, "Failed to load JNI loader library", e)
+            }
+
+            // Preload backend libraries via System.loadLibrary to ensure they're
+            // packaged in the APK. dlopen() will then find them in the native lib dir.
+            tryLoadBackend("rust")
+            tryLoadBackend("cemu")
+        }
+
+        private fun tryLoadBackend(name: String) {
+            try {
+                System.loadLibrary("emu_$name")
+                loadedBackends.add(name)
+                Log.i(TAG, "Backend library loaded: emu_$name")
+            } catch (e: UnsatisfiedLinkError) {
+                Log.d(TAG, "Backend library not available: emu_$name")
             }
         }
 
