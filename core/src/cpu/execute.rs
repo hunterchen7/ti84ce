@@ -38,16 +38,20 @@ impl Cpu {
                         self.set_b(self.b().wrapping_sub(1));
                         if self.b() != 0 {
                             bus.add_cycles(1); // CEmu: cpu.cycles++ for branch taken
-                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            let target = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            self.prefetch(bus, target); // CEmu: cpu_prefetch(target)
+                            self.pc = target;
                             13
                         } else {
                             8
                         }
                     }
                     3 => {
-                        // JR d
+                        // JR d (unconditional)
                         let d = self.fetch_byte(bus) as i8;
-                        self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                        let target = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                        self.prefetch(bus, target); // CEmu: cpu_prefetch(target)
+                        self.pc = target;
                         12
                     }
                     4..=7 => {
@@ -55,7 +59,9 @@ impl Cpu {
                         let d = self.fetch_byte(bus) as i8;
                         if self.check_cc(y - 4) {
                             bus.add_cycles(1); // CEmu: cpu.cycles++ for branch taken
-                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            let target = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            self.prefetch(bus, target); // CEmu: cpu_prefetch(target)
+                            self.pc = target;
                             12
                         } else {
                             7
@@ -1718,23 +1724,31 @@ impl Cpu {
                         let d = self.fetch_byte(bus) as i8;
                         self.set_b(self.b().wrapping_sub(1));
                         if self.b() != 0 {
-                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            bus.add_cycles(1); // CEmu: cpu.cycles++ for branch taken
+                            let target = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            self.prefetch(bus, target); // CEmu: cpu_prefetch(target)
+                            self.pc = target;
                             13
                         } else {
                             8
                         }
                     }
                     3 => {
-                        // JR d
+                        // JR d (unconditional)
                         let d = self.fetch_byte(bus) as i8;
-                        self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                        let target = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                        self.prefetch(bus, target); // CEmu: cpu_prefetch(target)
+                        self.pc = target;
                         12
                     }
                     4..=7 => {
                         // JR cc,d
                         let d = self.fetch_byte(bus) as i8;
                         if self.check_cc(y - 4) {
-                            self.pc = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            bus.add_cycles(1); // CEmu: cpu.cycles++ for branch taken
+                            let target = self.wrap_pc((self.pc as i32 + d as i32) as u32);
+                            self.prefetch(bus, target); // CEmu: cpu_prefetch(target)
+                            self.pc = target;
                             12
                         } else {
                             7

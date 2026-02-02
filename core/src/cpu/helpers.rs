@@ -386,6 +386,16 @@ impl Cpu {
         }
     }
 
+    /// Prefetch byte at target address (for branch/jump cycle cost)
+    /// CEmu's cpu_prefetch() reads the byte at the target address to add memory timing.
+    /// This simulates that behavior without consuming the byte.
+    #[inline]
+    pub fn prefetch(&mut self, bus: &mut Bus, addr: u32) {
+        let effective_addr = self.mask_addr_instr(addr);
+        // Just read to add cycle cost, discard the value
+        let _ = bus.fetch_byte(effective_addr, addr);
+    }
+
     // ========== Stack Operations ==========
     // NOTE: CEmu uses cpu.L mode for stack operations, selecting between
     // SPS (16-bit) and SPL (24-bit) stack pointers. We use a single SP
