@@ -9,6 +9,7 @@ import android.content.SharedPreferences
 object EmulatorPreferences {
     private const val PREFS_NAME = "emulator_prefs"
     private const val KEY_BACKEND = "backend"
+    private const val KEY_LAST_ROM_HASH = "last_rom_hash"
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -45,5 +46,28 @@ object EmulatorPreferences {
 
         // Otherwise use the first available
         return available.firstOrNull()
+    }
+
+    /**
+     * Get the last used ROM hash.
+     * @return ROM hash or null if no ROM was previously loaded
+     */
+    fun getLastRomHash(context: Context): String? {
+        return getPrefs(context).getString(KEY_LAST_ROM_HASH, null)
+    }
+
+    /**
+     * Set the last used ROM hash.
+     * @param hash ROM hash to save
+     */
+    fun setLastRomHash(context: Context, hash: String) {
+        getPrefs(context).edit().putString(KEY_LAST_ROM_HASH, hash).apply()
+    }
+
+    /**
+     * Clear the last ROM hash (e.g., when ROM fails to load).
+     */
+    fun clearLastRomHash(context: Context) {
+        getPrefs(context).edit().remove(KEY_LAST_ROM_HASH).apply()
     }
 }
