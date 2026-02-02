@@ -194,12 +194,6 @@ export function DPad({ onKeyDown, onKeyUp, size = 120 }: DPadProps) {
     ctx.arc(center, center, size * 0.125, 0, Math.PI * 2);
     ctx.fillStyle = CENTER_COLOR;
     ctx.fill();
-
-    // Center dot
-    ctx.beginPath();
-    ctx.arc(center, center, size * 0.04, 0, Math.PI * 2);
-    ctx.fillStyle = CENTER_DOT_COLOR;
-    ctx.fill();
   }, [size, pressedDirection]);
 
   // Redraw when pressed state changes

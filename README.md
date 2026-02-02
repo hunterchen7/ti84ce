@@ -1,14 +1,15 @@
 # TI-84 Plus CE Emulator
 
-A cross-platform emulator for TI-84 Plus CE calculators, with native Android and iOS apps.
+A cross-platform emulator for TI-84 Plus CE calculators, with native Android, iOS, and Web apps.
 
 ## Project Structure
 
 ```
 calc/
-  core/           # Rust emulator core (C ABI)
+  core/           # Rust emulator core (C ABI + WASM)
   android/        # Android app (Kotlin + Jetpack Compose)
   ios/            # iOS app (Swift + SwiftUI)
+  web/            # Web app (React + TypeScript + Vite)
   scripts/        # Build scripts
   docs/           # Architecture and milestone documentation
   cemu-ref/       # CEmu reference emulator (git-ignored, optional)
@@ -18,20 +19,22 @@ calc/
 
 ### Dual Backend Design
 
-The mobile apps (Android & iOS) are designed to work with **two interchangeable emulator backends**:
+The mobile apps (Android & iOS) and web app are designed to work with **two interchangeable emulator backends**:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    Mobile App (UI)                      │
+│                      App (UI)                           │
 │              Android (Kotlin/Compose)                   │
 │              iOS (Swift/SwiftUI)                        │
+│              Web (React/TypeScript)                     │
 ├─────────────────────────────────────────────────────────┤
-│                   C API (emu.h)                         │
+│            C API (emu.h) / WASM Bindings                │
 │    emu_create, emu_load_rom, emu_run_cycles,            │
 │    emu_framebuffer, emu_set_key, ...                    │
 ├───────────────────────┬─────────────────────────────────┤
 │   Rust Core           │   CEmu Adapter                  │
 │   (libemu_core.a)     │   (libcemu_adapter.a)           │
+│   (emu_core.wasm)     │   (cemu.wasm via Emscripten)    │
 │                       │                                 │
 │   Our implementation  │   Wraps CEmu reference          │
 │   from scratch        │   emulator                      │
@@ -78,6 +81,7 @@ The apps provide the UI (screen display, keypad, menus) while the backend handle
 - Rust toolchain
 - For Android: Android Studio with NDK, Android SDK (API 24+)
 - For iOS: Xcode 15+, macOS
+- For Web: Node.js 18+, [wasm-pack](https://rustwasm.github.io/wasm-pack/)
 
 ### Unified Build Script
 
@@ -132,6 +136,11 @@ make ios-cemu         # Release, device, CEmu
 make ios-sim          # Release, simulator, Rust
 make ios-sim-cemu     # Release, simulator, CEmu
 
+# Web
+make web              # Build WASM + web app (production)
+make web-dev          # Start dev server with hot reload
+make web-cemu         # Build with CEmu WASM backend
+
 # Utilities
 make test             # Run Rust tests
 make clean            # Clean all build artifacts
@@ -182,6 +191,43 @@ open ios/Calc.xcodeproj
 
 The build script compiles the emulator backend (Rust or CEmu) as a static library. Xcode handles building the Swift app and linking against the library.
 
+#### Web
+
+**One-time setup** - Install WASM target and wasm-pack:
+
+```bash
+rustup target add wasm32-unknown-unknown
+cargo install wasm-pack
+```
+
+**Building and Running:**
+
+```bash
+# Development (with hot reload)
+make web-dev
+
+# Production build
+make web
+# Output in web/dist/
+```
+
+The web app runs entirely in the browser using WebAssembly (~96KB gzipped).
+
+**Keyboard Controls:**
+
+| Key | Function |
+|-----|----------|
+| 0-9 | Number keys |
+| + - * / | Math operations |
+| ( ) | Parentheses |
+| Enter | Enter |
+| Backspace | Delete |
+| Arrow keys | Navigation |
+| Escape | Mode |
+| Shift | 2nd |
+| Alt | Alpha |
+| O | ON key |
+
 ### Development Workflow
 
 For rapid iteration on Android:
@@ -222,6 +268,8 @@ git clone https://github.com/CE-Programming/CEmu.git cemu-ref
 ./scripts/build.sh ios --sim --cemu     # iOS simulator with CEmu backend
 ./scripts/build.sh ios --cemu           # iOS device with CEmu backend
 # Then open ios/Calc.xcodeproj in Xcode to build the app
+
+make web-cemu                           # Web with CEmu WASM backend
 ```
 
 The app behavior should be identical regardless of backend - if it differs, that's a bug to investigate.

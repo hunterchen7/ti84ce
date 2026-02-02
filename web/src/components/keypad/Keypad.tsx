@@ -77,14 +77,21 @@ export function Keypad({ onKeyDown, onKeyUp }: KeypadProps) {
     </div>
   );
 
-  // Row with 5 keys: narrow, wide, wide, wide, narrow
+  // Render a flex column (equal width)
+  const renderFlexKey = (spec: KeySpec, height: number) => (
+    <div key={`${spec.row}-${spec.col}`} style={{ flex: 1, height }}>
+      <KeyButton
+        keyDef={createKeyDef(spec.label, spec.row, spec.col, spec.style ?? 'dark', spec.second, spec.alpha)}
+        onDown={makeOnDown(spec.row, spec.col)}
+        onUp={makeOnUp(spec.row, spec.col)}
+      />
+    </div>
+  );
+
+  // Row with 5 equal-width keys
   const renderFiveKeyRow = (keys: KeySpec[], height: number) => (
     <div style={{ ...rowStyle, height }}>
-      {renderKey(keys[0], '15%', height)}
-      {renderKey(keys[1], '20%', height)}
-      {renderKey(keys[2], '20%', height)}
-      {renderKey(keys[3], '20%', height)}
-      {renderKey(keys[4], '15%', height)}
+      {keys.map(key => renderFlexKey(key, height))}
     </div>
   );
 
@@ -100,27 +107,33 @@ export function Keypad({ onKeyDown, onKeyUp }: KeypadProps) {
       ], FUNC_ROW_HEIGHT)}
 
       {/* Rows 2-3: 2nd/mode/del + alpha/X,T,θ,n/stat with D-pad */}
-      {/* Uses same 5-column layout: 15%, 20%, 20%, 20%, 15% - D-pad spans last 2 cols */}
+      {/* Uses same 5-column equal-width layout - D-pad spans last 2 cols */}
       <div style={{ position: 'relative', height: CONTROL_ROW_HEIGHT * 2 + ROW_SPACING }}>
-        {/* Button rows */}
+        {/* Full-width rows with spacers for D-pad area */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
           <div style={rowStyle}>
-            {renderKey(k('2nd', 1, 5, 'yellow'), '15%', CONTROL_ROW_HEIGHT)}
-            {renderKey(k('mode', 1, 6, 'dark', 'quit'), '20%', CONTROL_ROW_HEIGHT)}
-            {renderKey(k('del', 1, 7, 'dark', 'ins'), '20%', CONTROL_ROW_HEIGHT)}
+            {renderFlexKey(k('2nd', 1, 5, 'yellow'), CONTROL_ROW_HEIGHT)}
+            {renderFlexKey(k('mode', 1, 6, 'dark', 'quit'), CONTROL_ROW_HEIGHT)}
+            {renderFlexKey(k('del', 1, 7, 'dark', 'ins'), CONTROL_ROW_HEIGHT)}
+            {/* Spacer for D-pad columns 4-5 */}
+            <div style={{ flex: 1 }} />
+            <div style={{ flex: 1 }} />
           </div>
           <div style={rowStyle}>
-            {renderKey(k('alpha', 2, 7, 'green', 'A-lock'), '15%', CONTROL_ROW_HEIGHT)}
-            {renderKey(k('X,T,θ,n', 3, 7, 'dark', 'link'), '20%', CONTROL_ROW_HEIGHT)}
-            {renderKey(k('stat', 4, 7, 'dark', 'list'), '20%', CONTROL_ROW_HEIGHT)}
+            {renderFlexKey(k('alpha', 2, 7, 'green', 'A-lock'), CONTROL_ROW_HEIGHT)}
+            {renderFlexKey(k('X,T,θ,n', 3, 7, 'dark', 'link'), CONTROL_ROW_HEIGHT)}
+            {renderFlexKey(k('stat', 4, 7, 'dark', 'list'), CONTROL_ROW_HEIGHT)}
+            {/* Spacer for D-pad columns 4-5 */}
+            <div style={{ flex: 1 }} />
+            <div style={{ flex: 1 }} />
           </div>
         </div>
-        {/* D-pad positioned in last 2 columns */}
+        {/* D-pad positioned in last 2 columns, shifted right */}
         <div style={{
           position: 'absolute',
           top: 0,
-          right: 0,
-          width: 'calc(35% + 16px)',
+          right: -8,
+          width: 'calc(40% + 16px)',
           height: '100%',
           display: 'flex',
           alignItems: 'center',
@@ -157,43 +170,42 @@ export function Keypad({ onKeyDown, onKeyUp }: KeypadProps) {
         k('÷', 6, 4, 'white', 'e', 'M'),
       ], CONTROL_ROW_HEIGHT)}
 
-      {/* Number block: side columns with center number grid */}
+      {/* Number block: 5 equal columns matching rows above */}
       <div style={{ display: 'flex', gap: COLUMN_SPACING }}>
-        {/* Left column: log, ln, sto→, on */}
-        <div style={{ width: '15%', display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
+        {/* Column 1: log, ln, sto→, on */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
           {renderKey(k('log', 2, 3, 'dark', '10ˣ', 'N'), '100%', SIDE_BUTTON_HEIGHT)}
           {renderKey(k('ln', 2, 2, 'dark', 'eˣ', 'S'), '100%', SIDE_BUTTON_HEIGHT)}
           {renderKey(k('sto→', 2, 1, 'dark', 'rcl', 'X'), '100%', SIDE_BUTTON_HEIGHT)}
           {renderKey(k('on', 2, 0, 'dark', 'off'), '100%', SIDE_BUTTON_HEIGHT)}
         </div>
 
-        {/* Center: number grid */}
-        <div style={{ flex: 1, display: 'flex', gap: COLUMN_SPACING }}>
-          {/* Column: 7, 4, 1, 0 */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
-            {renderKey(k('7', 3, 3, 'white', 'u', 'O'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('4', 3, 2, 'white', 'L4', 'T'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('1', 3, 1, 'white', 'L1', 'Y'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('0', 3, 0, 'white', 'catalog'), '100%', NUMBER_BUTTON_HEIGHT)}
-          </div>
-          {/* Column: 8, 5, 2, . */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
-            {renderKey(k('8', 4, 3, 'white', 'v', 'P'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('5', 4, 2, 'white', 'L5', 'U'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('2', 4, 1, 'white', 'L2', 'Z'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('.', 4, 0, 'white', 'i', ':'), '100%', NUMBER_BUTTON_HEIGHT)}
-          </div>
-          {/* Column: 9, 6, 3, (-) */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
-            {renderKey(k('9', 5, 3, 'white', 'w', 'Q'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('6', 5, 2, 'white', 'L6', 'V'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('3', 5, 1, 'white', 'L3', 'θ'), '100%', NUMBER_BUTTON_HEIGHT)}
-            {renderKey(k('(−)', 5, 0, 'white', 'ans', '?'), '100%', NUMBER_BUTTON_HEIGHT)}
-          </div>
+        {/* Column 2: 7, 4, 1, 0 */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
+          {renderKey(k('7', 3, 3, 'white', 'u', 'O'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('4', 3, 2, 'white', 'L4', 'T'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('1', 3, 1, 'white', 'L1', 'Y'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('0', 3, 0, 'white', 'catalog'), '100%', NUMBER_BUTTON_HEIGHT)}
         </div>
 
-        {/* Right column: ×, −, +, enter */}
-        <div style={{ width: '15%', display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
+        {/* Column 3: 8, 5, 2, . */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
+          {renderKey(k('8', 4, 3, 'white', 'v', 'P'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('5', 4, 2, 'white', 'L5', 'U'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('2', 4, 1, 'white', 'L2', 'Z'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('.', 4, 0, 'white', 'i', ':'), '100%', NUMBER_BUTTON_HEIGHT)}
+        </div>
+
+        {/* Column 4: 9, 6, 3, (-) */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
+          {renderKey(k('9', 5, 3, 'white', 'w', 'Q'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('6', 5, 2, 'white', 'L6', 'V'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('3', 5, 1, 'white', 'L3', 'θ'), '100%', NUMBER_BUTTON_HEIGHT)}
+          {renderKey(k('(−)', 5, 0, 'white', 'ans', '?'), '100%', NUMBER_BUTTON_HEIGHT)}
+        </div>
+
+        {/* Column 5: ×, −, +, enter */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: ROW_SPACING }}>
           {renderKey(k('×', 6, 3, 'white', '[', 'R'), '100%', SIDE_BUTTON_HEIGHT)}
           {renderKey(k('−', 6, 2, 'white', ']', 'W'), '100%', SIDE_BUTTON_HEIGHT)}
           {renderKey(k('+', 6, 1, 'white', 'mem', '"'), '100%', SIDE_BUTTON_HEIGHT)}
