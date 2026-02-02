@@ -38,6 +38,12 @@
 #include <stdarg.h>
 #include <string.h>
 #include <stdbool.h>
+#include <unistd.h>  // For unlink()
+
+// CEmu state size: ~4.6MB (4MB flash + 406KB RAM + peripherals)
+// Use 5MB buffer for safety margin
+#define CEMU_STATE_SIZE (5 * 1024 * 1024)
+#define CEMU_IMAGE_VERSION 0xCECE001B
 
 #ifdef CEMU_PERF_INSTRUMENTATION
 #include <time.h>
@@ -417,16 +423,133 @@ int EMU_FUNC(emu_is_lcd_on)(const Emu* emu) {
 }
 
 size_t EMU_FUNC(emu_save_state_size)(const Emu* emu) {
-    (void)emu;
-    return 0;
+    if (!emu || emu != g_instance || !emu->initialized) {
+        return 0;
+    }
+    return CEMU_STATE_SIZE;
 }
 
 int EMU_FUNC(emu_save_state)(const Emu* emu, uint8_t* out, size_t cap) {
-    (void)emu; (void)out; (void)cap;
-    return -1;
+    if (!emu || emu != g_instance || !emu->initialized) return -1;
+    if (!out || cap < CEMU_STATE_SIZE) return -101;  // Buffer too small
+
+    // Use temp file as intermediary (CEmu only supports FILE* API)
+    const char* temp_path = "/tmp/cemu_state_save.img";
+    FILE* f = fopen(temp_path, "wb");
+    if (!f) return -2;
+
+    // Write version header
+    uint32_t version = CEMU_IMAGE_VERSION;
+    if (fwrite(&version, sizeof(version), 1, f) != 1) {
+        fclose(f);
+        unlink(temp_path);
+        return -3;
+    }
+
+    // Save state via CEmu's asic_save()
+    if (!asic_save(f)) {
+        fclose(f);
+        unlink(temp_path);
+        return -4;
+    }
+    fclose(f);
+
+    // Read temp file into output buffer
+    f = fopen(temp_path, "rb");
+    if (!f) {
+        unlink(temp_path);
+        return -5;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size <= 0 || (size_t)size > cap) {
+        fclose(f);
+        unlink(temp_path);
+        return -101;
+    }
+
+    size_t bytes_read = fread(out, 1, (size_t)size, f);
+    fclose(f);
+    unlink(temp_path);
+
+    gui_console_printf("[CEmu] Saved state: %zu bytes\n", bytes_read);
+    return (bytes_read == (size_t)size) ? (int)bytes_read : -6;
 }
 
 int EMU_FUNC(emu_load_state)(Emu* emu, const uint8_t* data, size_t len) {
-    (void)emu; (void)data; (void)len;
+    if (!emu || emu != g_instance || !emu->initialized) return -1;
+    if (!data || len < 8) return -105;  // Data corruption
+
+    // Verify version header
+    uint32_t version;
+    memcpy(&version, data, sizeof(version));
+    if (version != CEMU_IMAGE_VERSION) {
+        gui_console_err_printf("[CEmu] State version mismatch: got 0x%08X, expected 0x%08X\n",
+                               version, CEMU_IMAGE_VERSION);
+        return -103;  // Version mismatch
+    }
+
+    // Write to temp file
+    const char* temp_path = "/tmp/cemu_state_load.img";
+    FILE* f = fopen(temp_path, "wb");
+    if (!f) return -2;
+
+    if (fwrite(data, 1, len, f) != len) {
+        fclose(f);
+        unlink(temp_path);
+        return -3;
+    }
+    fclose(f);
+
+    // Load via CEmu's asic_restore()
+    f = fopen(temp_path, "rb");
+    if (!f) {
+        unlink(temp_path);
+        return -4;
+    }
+
+    // Skip version header (already verified)
+    fseek(f, sizeof(uint32_t), SEEK_SET);
+
+    bool success = asic_restore(f);
+    fclose(f);
+    unlink(temp_path);
+
+    if (success) {
+        gui_console_printf("[CEmu] Restored state: %zu bytes\n", len);
+        return 0;
+    } else {
+        gui_console_err_printf("[CEmu] Failed to restore state\n");
+        return -105;  // Data corruption
+    }
+}
+
+// ============================================================
+// Backend API (for single-backend builds without bridge)
+// ============================================================
+#ifndef IOS_PREFIXED
+
+const char* emu_backend_get_available(void) {
+    return "cemu";
+}
+
+const char* emu_backend_get_current(void) {
+    return "cemu";
+}
+
+int emu_backend_set(const char* name) {
+    // Only "cemu" is available in single-backend build
+    if (name && strcmp(name, "cemu") == 0) {
+        return 0;
+    }
     return -1;
 }
+
+int emu_backend_count(void) {
+    return 1;
+}
+
+#endif /* !IOS_PREFIXED */

@@ -259,6 +259,53 @@ pub extern "C" fn emu_load_state(emu: *mut SyncEmu, data: *const u8, len: usize)
     }
 }
 
+// ============================================================
+// Backend API (for single-backend builds without bridge)
+// ============================================================
+
+/// Get available backends (comma-separated list).
+/// For Rust-only builds, returns "rust".
+#[no_mangle]
+#[cfg(not(feature = "ios_prefixed"))]
+pub extern "C" fn emu_backend_get_available() -> *const c_char {
+    static BACKENDS: &[u8] = b"rust\0";
+    BACKENDS.as_ptr() as *const c_char
+}
+
+/// Get current backend name.
+/// For Rust-only builds, returns "rust".
+#[no_mangle]
+#[cfg(not(feature = "ios_prefixed"))]
+pub extern "C" fn emu_backend_get_current() -> *const c_char {
+    static RUST: &[u8] = b"rust\0";
+    RUST.as_ptr() as *const c_char
+}
+
+/// Set backend by name.
+/// For Rust-only builds, only "rust" is valid.
+/// Returns 0 on success, -1 on failure.
+#[no_mangle]
+#[cfg(not(feature = "ios_prefixed"))]
+pub extern "C" fn emu_backend_set(name: *const c_char) -> i32 {
+    if name.is_null() {
+        return -1;
+    }
+    let name_str = unsafe { std::ffi::CStr::from_ptr(name) };
+    if name_str.to_bytes() == b"rust" {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Get number of available backends.
+/// For Rust-only builds, returns 1.
+#[no_mangle]
+#[cfg(not(feature = "ios_prefixed"))]
+pub extern "C" fn emu_backend_count() -> i32 {
+    1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
