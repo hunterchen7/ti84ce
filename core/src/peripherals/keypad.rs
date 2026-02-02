@@ -218,16 +218,19 @@ impl KeypadController {
             self.int_status |= status::ANY_KEY;
         }
 
-        // Log scan completion with results
-        static mut FINISH_COUNT: u32 = 0;
-        unsafe {
-            FINISH_COUNT += 1;
-            if FINISH_COUNT % 1000 == 1 || self.any_key_in_scan {
-                crate::emu::log_event(&format!(
-                    "KEYPAD_SCAN_DONE: mode={} any_key={} data_changed={} data={:?}",
-                    self.mode(), self.any_key_in_scan, self.data_changed_in_scan,
-                    self.current_scan_data.iter().take(8).collect::<Vec<_>>()
-                ));
+        // Log scan completion with results (disabled in WASM)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static mut FINISH_COUNT: u32 = 0;
+            unsafe {
+                FINISH_COUNT += 1;
+                if FINISH_COUNT % 1000 == 1 || self.any_key_in_scan {
+                    crate::emu::log_event(&format!(
+                        "KEYPAD_SCAN_DONE: mode={} any_key={} data_changed={} data={:?}",
+                        self.mode(), self.any_key_in_scan, self.data_changed_in_scan,
+                        self.current_scan_data.iter().take(8).collect::<Vec<_>>()
+                    ));
+                }
             }
         }
 
@@ -254,12 +257,15 @@ impl KeypadController {
             return false;
         }
 
-        // Log scan activity (only occasionally to avoid spam)
-        static mut SCAN_LOG_COUNT: u32 = 0;
-        unsafe {
-            SCAN_LOG_COUNT += 1;
-            if SCAN_LOG_COUNT % 100000 == 1 {
-                crate::emu::log_event(&format!("KEYPAD_SCAN: active, mode={}, row={}", self.mode(), self.scan_row));
+        // Log scan activity (disabled in WASM)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static mut SCAN_LOG_COUNT: u32 = 0;
+            unsafe {
+                SCAN_LOG_COUNT += 1;
+                if SCAN_LOG_COUNT % 100000 == 1 {
+                    crate::emu::log_event(&format!("KEYPAD_SCAN: active, mode={}, row={}", self.mode(), self.scan_row));
+                }
             }
         }
 
@@ -419,30 +425,33 @@ impl KeypadController {
                     // Read from stored data (populated by any_key_check or scan events)
                     let row_data = self.current_scan_data[row];
 
-                    // Log data reads - log all reads when any key is pressed
-                    static mut READ_LOG_COUNT: u32 = 0;
-                    static mut LAST_KEY_STATE_HASH: u64 = 0;
-                    unsafe {
-                        READ_LOG_COUNT += 1;
-                        // Hash of key state to detect changes
-                        let key_hash: u64 = key_state.iter()
-                            .enumerate()
-                            .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| {
-                                if v { ((r as u64) << 8) | c as u64 } else { 0 }
-                            }))
-                            .fold(0, |acc, x| acc.wrapping_add(x));
+                    // Log data reads (disabled in WASM)
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        static mut READ_LOG_COUNT: u32 = 0;
+                        static mut LAST_KEY_STATE_HASH: u64 = 0;
+                        unsafe {
+                            READ_LOG_COUNT += 1;
+                            // Hash of key state to detect changes
+                            let key_hash: u64 = key_state.iter()
+                                .enumerate()
+                                .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| {
+                                    if v { ((r as u64) << 8) | c as u64 } else { 0 }
+                                }))
+                                .fold(0, |acc, x| acc.wrapping_add(x));
 
-                        if row_data != 0 || (key_hash != 0 && key_hash != LAST_KEY_STATE_HASH) {
-                            LAST_KEY_STATE_HASH = key_hash;
-                            eprintln!(
-                                "KEYPAD_READ: row={} data=0x{:04X} mode={} key_state={:?} count={}",
-                                row, row_data, self.mode(),
-                                key_state[row].iter().enumerate()
-                                    .filter(|(_, &v)| v)
-                                    .map(|(i, _)| i)
-                                    .collect::<Vec<_>>(),
-                                READ_LOG_COUNT
-                            );
+                            if row_data != 0 || (key_hash != 0 && key_hash != LAST_KEY_STATE_HASH) {
+                                LAST_KEY_STATE_HASH = key_hash;
+                                eprintln!(
+                                    "KEYPAD_READ: row={} data=0x{:04X} mode={} key_state={:?} count={}",
+                                    row, row_data, self.mode(),
+                                    key_state[row].iter().enumerate()
+                                        .filter(|(_, &v)| v)
+                                        .map(|(i, _)| i)
+                                        .collect::<Vec<_>>(),
+                                    READ_LOG_COUNT
+                                );
+                            }
                         }
                     }
 

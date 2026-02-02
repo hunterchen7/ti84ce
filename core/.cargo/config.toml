@@ -1,4 +1,4 @@
 [target.wasm32-unknown-unknown]
-# Increase initial memory to 128MB for the emulator
-# ROM loading requires multiple copies: JS buffer + wasm-bindgen copy + Flash Vec
-rustflags = ["-C", "link-args=--initial-memory=134217728 --max-memory=268435456"]
+# Start with 16MB initial, grow to 256MB as needed
+# dlmalloc handles growth better than large upfront allocations
+rustflags = ["-C", "link-args=--initial-memory=16777216 --max-memory=268435456"]

@@ -307,14 +307,17 @@ impl Peripherals {
                 let offset = a - KEYPAD_BASE;
 
                 // DIAGNOSTIC: Unconditional log to see if writes go through here
-                static mut WRITE_COUNT: u32 = 0;
-                unsafe {
-                    WRITE_COUNT += 1;
-                    if WRITE_COUNT % 10000 == 1 {
-                        crate::emu::log_event(&format!(
-                            "PERIPHERALS_KEYPAD_WRITE: offset=0x{:02X} value=0x{:02X} count={}",
-                            offset, value, WRITE_COUNT
-                        ));
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    static mut WRITE_COUNT: u32 = 0;
+                    unsafe {
+                        WRITE_COUNT += 1;
+                        if WRITE_COUNT % 10000 == 1 {
+                            crate::emu::log_event(&format!(
+                                "PERIPHERALS_KEYPAD_WRITE: offset=0x{:02X} value=0x{:02X} count={}",
+                                offset, value, WRITE_COUNT
+                            ));
+                        }
                     }
                 }
 
@@ -425,13 +428,16 @@ impl Peripherals {
 
         self.os_timer_cycles += cycles as u64;
 
-        // Debug: OS Timer state tracking
-        static mut OS_TIMER_DEBUG_COUNT: u64 = 0;
-        unsafe {
-            OS_TIMER_DEBUG_COUNT += 1;
-            if OS_TIMER_DEBUG_COUNT % 5000000 == 1 {
-                eprintln!("OS_TIMER_TICK: count={}, os_timer_cycles={}, state={}, cycles_per_32k_tick={}",
-                         OS_TIMER_DEBUG_COUNT, self.os_timer_cycles, self.os_timer_state, cycles_per_32k_tick);
+        // Debug: OS Timer state tracking (disabled in WASM)
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            static mut OS_TIMER_DEBUG_COUNT: u64 = 0;
+            unsafe {
+                OS_TIMER_DEBUG_COUNT += 1;
+                if OS_TIMER_DEBUG_COUNT % 5000000 == 1 {
+                    eprintln!("OS_TIMER_TICK: count={}, os_timer_cycles={}, state={}, cycles_per_32k_tick={}",
+                             OS_TIMER_DEBUG_COUNT, self.os_timer_cycles, self.os_timer_state, cycles_per_32k_tick);
+                }
             }
         }
 

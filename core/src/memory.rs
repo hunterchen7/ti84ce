@@ -83,10 +83,11 @@ pub struct Flash {
 }
 
 impl Flash {
-    /// Create a new flash memory instance
+    /// Create a new flash memory instance with lazy allocation
     pub fn new() -> Self {
+        // Start with empty vec - will be allocated when ROM is loaded
         Self {
-            data: vec![0xFF; addr::FLASH_SIZE], // Flash erased state is 0xFF
+            data: Vec::new(),
             initialized: false,
             command: FlashCommand::None,
             write_state: FlashWriteState::Idle,
@@ -106,8 +107,12 @@ impl Flash {
             return Err(FlashError::RomTooLarge);
         }
 
-        // Copy ROM data to start of flash
-        self.data[..data.len()].copy_from_slice(data);
+        // Allocate and copy in one step - start with ROM data
+        let mut new_data = data.to_vec();
+        // Extend with 0xFF to reach full flash size
+        new_data.resize(addr::FLASH_SIZE, 0xFF);
+        self.data = new_data;
+
         self.initialized = true;
         self.command = FlashCommand::None;
         self.write_state = FlashWriteState::Idle;
@@ -135,6 +140,9 @@ impl Flash {
 
     /// Peek flash content ignoring command status (debug-style read)
     pub fn peek(&self, addr: u32) -> u8 {
+        if self.data.is_empty() {
+            return 0xFF; // Uninitialized flash reads as 0xFF
+        }
         let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
         self.data[offset]
     }
@@ -156,6 +164,9 @@ impl Flash {
     /// * `addr` - Address relative to flash start
     /// * `value` - Byte to write
     pub fn write_direct(&mut self, addr: u32, value: u8) {
+        if self.data.is_empty() {
+            return; // Flash not initialized
+        }
         let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
         self.data[offset] = value;
     }
@@ -223,6 +234,9 @@ impl Flash {
     }
 
     fn erase_sector(&mut self, addr: u32) {
+        if self.data.is_empty() {
+            return;
+        }
         let (start, size) = if addr < 0x10000 {
             let sector_start = (addr / 0x2000) * 0x2000; // 8KB sectors
             (sector_start, 0x2000)
@@ -237,6 +251,9 @@ impl Flash {
     }
 
     fn program_byte(&mut self, addr: u32, value: u8) {
+        if self.data.is_empty() {
+            return;
+        }
         let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
         self.data[offset] &= value;
     }
@@ -253,7 +270,9 @@ impl Flash {
 
     /// Reset flash to erased state
     pub fn reset(&mut self) {
-        self.data.fill(0xFF);
+        if !self.data.is_empty() {
+            self.data.fill(0xFF);
+        }
         self.initialized = false;
         self.command = FlashCommand::None;
         self.write_state = FlashWriteState::Idle;
@@ -285,10 +304,17 @@ pub struct Ram {
 }
 
 impl Ram {
-    /// Create a new RAM instance
+    /// Create a new RAM instance (lazy allocation)
     pub fn new() -> Self {
         Self {
-            data: vec![0x00; addr::RAM_SIZE],
+            data: Vec::new(),
+        }
+    }
+
+    /// Ensure RAM is allocated
+    fn ensure_allocated(&mut self) {
+        if self.data.is_empty() {
+            self.data = vec![0x00; addr::RAM_SIZE];
         }
     }
 
@@ -297,6 +323,9 @@ impl Ram {
     /// # Arguments
     /// * `addr` - Address relative to RAM start (0 to RAM_SIZE-1)
     pub fn read(&self, addr: u32) -> u8 {
+        if self.data.is_empty() {
+            return 0x00;
+        }
         let offset = (addr as usize) % addr::RAM_SIZE;
         self.data[offset]
     }
@@ -307,6 +336,9 @@ impl Ram {
     /// * `addr` - Address relative to RAM start
     /// * `value` - Byte to write
     pub fn write(&mut self, addr: u32, value: u8) {
+        if self.data.is_empty() {
+            self.data = vec![0x00; addr::RAM_SIZE];
+        }
         let offset = (addr as usize) % addr::RAM_SIZE;
         self.data[offset] = value;
     }

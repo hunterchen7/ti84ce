@@ -2,10 +2,6 @@
 //!
 //! This module provides JavaScript-friendly APIs using wasm-bindgen.
 
-// Use wee_alloc as the global allocator for smaller code size and better WASM support
-#[global_allocator]
-static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
-
 use wasm_bindgen::prelude::*;
 use crate::emu::Emu;
 
@@ -32,12 +28,19 @@ impl WasmEmu {
 
     /// Load ROM data into the emulator.
     /// Returns 0 on success, negative error code on failure.
+    /// Does NOT auto power-on - call power_on() separately.
     #[wasm_bindgen]
     pub fn load_rom(&mut self, data: &[u8]) -> i32 {
         match self.inner.load_rom(data) {
             Ok(()) => 0,
             Err(code) => code,
         }
+    }
+
+    /// Power on the emulator (simulates ON key press).
+    #[wasm_bindgen]
+    pub fn power_on(&mut self) {
+        self.inner.power_on();
     }
 
     /// Reset the emulator to initial state.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
-import init, { WasmEmu } from './emu-core/emu_core';
+import { createBackend, type EmulatorBackend, type BackendType } from './emulator';
 
 // TI-84 Plus CE keypad layout
 // Maps keyboard keys to [row, col] positions
@@ -85,51 +85,127 @@ const KEY_MAP: Record<string, [number, number]> = {
 
 interface CalculatorProps {
   className?: string;
+  defaultBackend?: BackendType;
 }
 
-export function Calculator({ className }: CalculatorProps) {
+export function Calculator({ className, defaultBackend = 'rust' }: CalculatorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const emuRef = useRef<WasmEmu | null>(null);
+  const backendRef = useRef<EmulatorBackend | null>(null);
   const animationRef = useRef<number>(0);
+  const [backendType, setBackendType] = useState<BackendType>(defaultBackend);
   const [isRunning, setIsRunning] = useState(false);
   const [romLoaded, setRomLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [initialized, setInitialized] = useState(false);
   const [fps, setFps] = useState(0);
+  const [backendName, setBackendName] = useState('');
   const lastFrameTime = useRef(0);
   const frameCount = useRef(0);
+  const romDataRef = useRef<Uint8Array | null>(null);
 
-  // Initialize WASM module
+  // Initialize backend
   useEffect(() => {
-    const initWasm = async () => {
-      try {
-        await init();
-        emuRef.current = new WasmEmu();
-        setInitialized(true);
-      } catch (err) {
-        setError(`Failed to initialize WASM: ${err}`);
+    let cancelled = false;
+    const oldBackend = backendRef.current;
+    const oldAnimation = animationRef.current;
+
+    // Clean up old backend synchronously first
+    if (oldAnimation) {
+      cancelAnimationFrame(oldAnimation);
+      animationRef.current = 0;
+    }
+
+    // Clear the ref before destroying to prevent any in-flight calls
+    backendRef.current = null;
+
+    // Small delay to let any pending operations complete
+    const cleanup = () => {
+      if (oldBackend) {
+        oldBackend.destroy();
       }
     };
-    initWasm();
+
+    // Defer cleanup to next tick to avoid race conditions
+    setTimeout(cleanup, 0);
+
+    const initBackend = async () => {
+      setInitialized(false);
+      setRomLoaded(false);
+      setIsRunning(false);
+      setError(null);
+
+      try {
+        const backend = createBackend(backendType);
+        await backend.init();
+
+        if (cancelled) {
+          // Component unmounted or backend changed during init
+          backend.destroy();
+          return;
+        }
+
+        backendRef.current = backend;
+        setBackendName(backend.name);
+        setInitialized(true);
+
+        // If we had a ROM loaded, reload it
+        if (romDataRef.current) {
+          const result = await backend.loadRom(romDataRef.current);
+          if (result === 0) {
+            backend.powerOn();
+            setRomLoaded(true);
+          } else {
+            setError(`Failed to load ROM with ${backend.name}: error code ${result}`);
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(`Failed to initialize ${backendType} backend: ${err}`);
+        }
+      }
+    };
+
+    initBackend();
 
     return () => {
-      if (emuRef.current) {
-        emuRef.current.free();
-        emuRef.current = null;
+      cancelled = true;
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+        animationRef.current = 0;
+      }
+      // Don't destroy here - will be handled on next init or unmount
+    };
+  }, [backendType]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current);
+      }
+      if (backendRef.current) {
+        backendRef.current.destroy();
+        backendRef.current = null;
       }
     };
   }, []);
 
   // Handle ROM file loading
   const handleRomLoad = useCallback(async (file: File) => {
-    if (!emuRef.current) return;
+    const backend = backendRef.current;
+    if (!backend) return;
 
     try {
       const buffer = await file.arrayBuffer();
       const data = new Uint8Array(buffer);
-      const result = emuRef.current.load_rom(data);
+      romDataRef.current = data; // Store for backend switching
+
+      const result = await backend.loadRom(data);
 
       if (result === 0) {
+        console.log('ROM loaded successfully, calling power_on...');
+        backend.powerOn();
+        console.log('power_on complete');
         setRomLoaded(true);
         setError(null);
       } else {
@@ -142,42 +218,50 @@ export function Calculator({ className }: CalculatorProps) {
 
   // Render frame to canvas
   const renderFrame = useCallback(() => {
-    const emu = emuRef.current;
+    const backend = backendRef.current;
     const canvas = canvasRef.current;
-    if (!emu || !canvas) return;
+    if (!backend || !canvas) return;
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+    try {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
 
-    const width = emu.framebuffer_width();
-    const height = emu.framebuffer_height();
+      const width = backend.getFramebufferWidth();
+      const height = backend.getFramebufferHeight();
 
-    // Get framebuffer as RGBA
-    const rgba = emu.get_framebuffer_rgba();
+      // Get framebuffer as RGBA
+      const rgba = backend.getFramebufferRGBA();
 
-    // Create ImageData and draw - copy into a new Uint8ClampedArray
-    const clampedData = new Uint8ClampedArray(rgba.length);
-    clampedData.set(rgba);
-    const imageData = new ImageData(clampedData, width, height);
-    ctx.putImageData(imageData, 0, 0);
+      // Create ImageData and draw - copy into a new Uint8ClampedArray
+      const clampedData = new Uint8ClampedArray(rgba.length);
+      clampedData.set(rgba);
+      const imageData = new ImageData(clampedData, width, height);
+      ctx.putImageData(imageData, 0, 0);
+    } catch (e) {
+      // Backend was destroyed during render - safe to ignore
+      console.warn('Render error (safe to ignore during backend switch):', e);
+    }
   }, []);
 
   // Main emulation loop
   useEffect(() => {
-    if (!isRunning || !romLoaded || !emuRef.current) return;
-
-    const targetFps = 60;
-    const cyclesPerFrame = 48_000_000 / targetFps; // 48MHz CPU at 60fps
+    if (!isRunning || !romLoaded || !backendRef.current) return;
 
     const loop = () => {
-      const emu = emuRef.current;
-      if (!emu) return;
+      const backend = backendRef.current;
+      if (!backend) return;
 
-      // Run emulation
-      emu.run_cycles(cyclesPerFrame);
+      try {
+        // Run one frame
+        backend.runFrame();
 
-      // Render
-      renderFrame();
+        // Render
+        renderFrame();
+      } catch (e) {
+        // Backend was destroyed during frame - safe to ignore
+        console.warn('Frame error (safe to ignore during backend switch):', e);
+        return;
+      }
 
       // Calculate FPS
       frameCount.current++;
@@ -204,14 +288,14 @@ export function Calculator({ className }: CalculatorProps) {
 
   // Keyboard event handling
   useEffect(() => {
-    const emu = emuRef.current;
-    if (!emu || !romLoaded) return;
+    const backend = backendRef.current;
+    if (!backend || !romLoaded) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const mapping = KEY_MAP[e.key];
       if (mapping) {
         e.preventDefault();
-        emu.set_key(mapping[0], mapping[1], true);
+        backend.setKey(mapping[0], mapping[1], true);
       }
     };
 
@@ -219,7 +303,7 @@ export function Calculator({ className }: CalculatorProps) {
       const mapping = KEY_MAP[e.key];
       if (mapping) {
         e.preventDefault();
-        emu.set_key(mapping[0], mapping[1], false);
+        backend.setKey(mapping[0], mapping[1], false);
       }
     };
 
@@ -230,7 +314,7 @@ export function Calculator({ className }: CalculatorProps) {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [romLoaded]);
+  }, [romLoaded, backendType]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -240,14 +324,39 @@ export function Calculator({ className }: CalculatorProps) {
   };
 
   const handleReset = () => {
-    if (emuRef.current) {
-      emuRef.current.reset();
+    if (backendRef.current) {
+      backendRef.current.reset();
     }
+  };
+
+  const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const newBackend = e.target.value as BackendType;
+    setBackendType(newBackend);
   };
 
   return (
     <div className={className} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
       <h1>TI-84 Plus CE Emulator</h1>
+
+      {/* Backend selector */}
+      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+        <label htmlFor="backend-select">Backend:</label>
+        <select
+          id="backend-select"
+          value={backendType}
+          onChange={handleBackendChange}
+          disabled={isRunning}
+          style={{ padding: '0.5rem' }}
+        >
+          <option value="rust">Rust (Custom)</option>
+          <option value="cemu">CEmu (Reference)</option>
+        </select>
+        {backendName && (
+          <span style={{ fontSize: '0.875rem', color: '#666' }}>
+            Using: {backendName}
+          </span>
+        )}
+      </div>
 
       {error && (
         <div style={{ color: 'red', padding: '0.5rem', background: '#fee', borderRadius: '4px' }}>
@@ -255,7 +364,7 @@ export function Calculator({ className }: CalculatorProps) {
         </div>
       )}
 
-      {!initialized && <p>Loading WASM module...</p>}
+      {!initialized && <p>Loading {backendType === 'rust' ? 'Rust WASM' : 'CEmu WASM'} module...</p>}
 
       {initialized && !romLoaded && (
         <div style={{ padding: '1rem', border: '2px dashed #ccc', borderRadius: '8px' }}>
@@ -298,7 +407,7 @@ export function Calculator({ className }: CalculatorProps) {
             </button>
             <button onClick={handleReset}>Reset</button>
             <span style={{ fontSize: '0.875rem', color: '#666' }}>
-              {fps} FPS
+              {fps} FPS | {backendName}
             </span>
           </div>
 
