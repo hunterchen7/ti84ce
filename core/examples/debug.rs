@@ -164,30 +164,68 @@ fn cmd_boot() {
     println!("{}", emu.dump_registers());
 
     let chunk_size = 1_000_000;
-    let max_cycles = 100_000_000u64;
+    let max_cycles = 300_000_000u64;
     let mut total_executed = 0u64;
 
     println!("\nBooting...");
 
+    // Track how many times we see the idle loop address
+    let mut idle_loop_count = 0;
+    const IDLE_LOOP_THRESHOLD: u32 = 3;
+
     while total_executed < max_cycles {
         let executed = emu.run_cycles(chunk_size);
         total_executed += executed as u64;
+
+        let pc = emu.pc();
+
 
         // Progress every 10M cycles
         if total_executed % 10_000_000 < chunk_size as u64 {
             println!(
                 "[{:.1}M cycles] PC={:06X} SP={:06X} halted={}",
                 total_executed as f64 / 1_000_000.0,
-                emu.pc(),
+                pc,
                 emu.sp(),
                 emu.is_halted()
             );
         }
 
+        // Check for idle loop - TI-OS idle is at 085B7D-085B80 (EI; NOP; HALT; PUSH HL)
+        // The CPU continuously wakes from HALT due to interrupts, so we detect
+        // boot completion by seeing this PC range repeatedly with LCD enabled.
+        if (0x085B7D..=0x085B80).contains(&pc) {
+            idle_loop_count += 1;
+            let lcd = emu.lcd_snapshot();
+            if idle_loop_count >= IDLE_LOOP_THRESHOLD && lcd.control & 1 != 0 {
+                println!(
+                    "\nBoot complete: Reached idle loop at PC={:06X} after {:.2}M cycles",
+                    pc,
+                    total_executed as f64 / 1_000_000.0
+                );
+                break;
+            }
+        }
+        // Don't reset idle_loop_count - PC can be at other addresses during interrupt handling
+
+        // Check for HALT - but don't break if we're in the idle loop area
+        // The TI-OS idle loop (EI; NOP; HALT) continuously halts and wakes
         if emu.is_halted() {
+            // If we've hit the idle loop at least once with LCD enabled, this is normal
+            // operation - boot is complete. Check for LCD enabled.
+            let lcd = emu.lcd_snapshot();
+            if (0x085B7D..=0x085B80).contains(&pc) && lcd.control & 1 != 0 {
+                println!(
+                    "\nBoot complete: CPU halted at idle loop PC={:06X} after {:.2}M cycles",
+                    pc,
+                    total_executed as f64 / 1_000_000.0
+                );
+                break;
+            }
+            // Otherwise, unexpected HALT - report and break
             println!(
                 "\nHALT at PC={:06X} after {:.2}M cycles",
-                emu.pc(),
+                pc,
                 total_executed as f64 / 1_000_000.0
             );
             break;
