@@ -10,8 +10,9 @@
 # Options:
 #   --release       Release build (default)
 #   --debug         Debug build
-#   --cemu          Use CEmu backend (default: Rust)
-#   --rust          Use Rust backend (default)
+#   --rust          Use Rust backend only (default)
+#   --cemu          Use CEmu backend only
+#   --both          Use both backends (runtime switching)
 #   --sim           iOS: Build for Simulator
 #   --install       Android: Install APK after build
 #   --open          iOS: Open Xcode after build
@@ -19,19 +20,17 @@
 #   --help          Show this help
 #
 # Examples:
-#   ./scripts/build.sh android                    # Android, Rust, Release, arm64
-#   ./scripts/build.sh android --debug --install  # Android, Rust, Debug, install
-#   ./scripts/build.sh android --cemu             # Android, CEmu, Release
-#   ./scripts/build.sh ios                        # iOS device, Rust, Release
-#   ./scripts/build.sh ios --sim                  # iOS Simulator, Rust, Release
-#   ./scripts/build.sh ios --cemu                 # iOS device, CEmu, Release
-#   ./scripts/build.sh ios --sim --cemu           # iOS Simulator, CEmu, Release
+#   ./scripts/build.sh android                    # Android, Rust only, Release
+#   ./scripts/build.sh android --both --install   # Android, both backends, install
+#   ./scripts/build.sh android --cemu             # Android, CEmu only
+#   ./scripts/build.sh ios --sim                  # iOS Simulator, Rust only
+#   ./scripts/build.sh ios --both                 # iOS device, both backends
 
 set -e
 
 # Check for platform argument
 if [ $# -eq 0 ] || [ "$1" = "--help" ] || [ "$1" = "-h" ]; then
-    head -25 "$0" | tail -24
+    head -28 "$0" | tail -27
     exit 0
 fi
 
@@ -47,7 +46,8 @@ fi
 
 # Defaults
 BUILD_CONFIG="Release"
-BACKEND="rust"
+BUILD_RUST=true
+BUILD_CEMU=false
 TARGET="device"      # device or simulator (iOS only)
 INSTALL=false        # Android only
 OPEN_XCODE=false     # iOS only
@@ -65,11 +65,18 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --cemu)
-            BACKEND="cemu"
+            BUILD_RUST=false
+            BUILD_CEMU=true
             shift
             ;;
         --rust)
-            BACKEND="rust"
+            BUILD_RUST=true
+            BUILD_CEMU=false
+            shift
+            ;;
+        --both)
+            BUILD_RUST=true
+            BUILD_CEMU=true
             shift
             ;;
         --sim|--simulator)
@@ -93,7 +100,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            head -25 "$0" | tail -24
+            head -28 "$0" | tail -27
             exit 0
             ;;
         *)
@@ -109,17 +116,26 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_ROOT"
 
+# Determine backend description
+if [ "$BUILD_RUST" = true ] && [ "$BUILD_CEMU" = true ]; then
+    BACKEND_DESC="both (Rust + CEmu)"
+elif [ "$BUILD_RUST" = true ]; then
+    BACKEND_DESC="Rust"
+else
+    BACKEND_DESC="CEmu"
+fi
+
 echo "==> Build Configuration:"
 echo "    Platform: $PLATFORM"
 echo "    Config:   $BUILD_CONFIG"
-echo "    Backend:  $BACKEND"
+echo "    Backend:  $BACKEND_DESC"
 [ "$PLATFORM" = "ios" ] && echo "    Target:   $TARGET"
 [ "$PLATFORM" = "android" ] && [ "$ALL_ABIS" = true ] && echo "    ABIs:     all"
 [ "$PLATFORM" = "android" ] && [ "$ALL_ABIS" = false ] && echo "    ABIs:     arm64-v8a"
 echo ""
 
 # Check CEmu if needed
-if [ "$BACKEND" = "cemu" ] && [ ! -d "cemu-ref/core" ]; then
+if [ "$BUILD_CEMU" = true ] && [ ! -d "cemu-ref/core" ]; then
     echo "Error: cemu-ref not found. Please clone CEmu first:"
     echo "  git clone https://github.com/CE-Programming/CEmu.git cemu-ref"
     exit 1
@@ -129,7 +145,7 @@ fi
 # Android Build
 #------------------------------------------------------------------------------
 build_android() {
-    if [ "$BACKEND" = "rust" ]; then
+    if [ "$BUILD_RUST" = true ]; then
         echo "==> Building Rust core for Android..."
         cd core
 
@@ -154,16 +170,23 @@ build_android() {
     echo "==> Building Android APK..."
     cd android
 
-    # Clean native build if switching backends
-    if [ "$BACKEND" = "cemu" ]; then
-        rm -rf app/.cxx app/build/intermediates/cmake 2>/dev/null || true
-    fi
+    # Clean native build if switching backend configurations
+    rm -rf app/.cxx app/build/intermediates/cmake 2>/dev/null || true
 
     GRADLE_TASK="assemble${BUILD_CONFIG}"
     GRADLE_ARGS=""
 
-    if [ "$BACKEND" = "cemu" ]; then
-        GRADLE_ARGS="-PuseCemu=true"
+    # Pass backend flags to Gradle
+    if [ "$BUILD_RUST" = true ]; then
+        GRADLE_ARGS="$GRADLE_ARGS -PbuildRust=true"
+    else
+        GRADLE_ARGS="$GRADLE_ARGS -PbuildRust=false"
+    fi
+
+    if [ "$BUILD_CEMU" = true ]; then
+        GRADLE_ARGS="$GRADLE_ARGS -PbuildCemu=true"
+    else
+        GRADLE_ARGS="$GRADLE_ARGS -PbuildCemu=false"
     fi
 
     if [ "$ALL_ABIS" = false ]; then
@@ -209,7 +232,15 @@ build_ios() {
         PLATFORM_SUFFIX="iphoneos"
     fi
 
-    if [ "$BACKEND" = "cemu" ]; then
+    # For iOS, we currently only support one backend at a time
+    # TODO: Add dual-backend support for iOS
+    if [ "$BUILD_RUST" = true ] && [ "$BUILD_CEMU" = true ]; then
+        echo "Warning: iOS currently only supports one backend at a time."
+        echo "Building with Rust backend. Use --cemu for CEmu."
+        BUILD_CEMU=false
+    fi
+
+    if [ "$BUILD_CEMU" = true ]; then
         echo "==> Building CEmu adapter for iOS..."
 
         # Setup CEmu iOS build
