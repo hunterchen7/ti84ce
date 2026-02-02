@@ -172,7 +172,9 @@ build_android() {
 
     ./gradlew $GRADLE_TASK $GRADLE_ARGS
 
-    APK_PATH="app/build/outputs/apk/${BUILD_CONFIG,,}/app-${BUILD_CONFIG,,}.apk"
+    # Convert BUILD_CONFIG to lowercase for APK path (POSIX-compatible)
+    BUILD_CONFIG_LOWER=$(echo "$BUILD_CONFIG" | tr '[:upper:]' '[:lower:]')
+    APK_PATH="app/build/outputs/apk/${BUILD_CONFIG_LOWER}/app-${BUILD_CONFIG_LOWER}.apk"
 
     cd "$PROJECT_ROOT"
 

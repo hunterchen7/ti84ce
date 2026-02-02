@@ -49,8 +49,8 @@ static uint64_t get_time_ns(void) {
 }
 #endif /* CEMU_PERF_INSTRUMENTATION */
 
-// Tick conversion: at 48MHz, 160 base ticks = 1 CPU cycle
-#define TICKS_PER_CYCLE 160
+// Note: sched_repeat() already multiplies by tick_unit (160 at 48MHz),
+// so we pass cycles directly, not base ticks.
 
 // Wrapper state
 struct Emu {
@@ -333,8 +333,8 @@ int emu_run_cycles(Emu* emu, int cycles) {
 #ifdef CEMU_PERF_INSTRUMENTATION
     uint64_t start = get_time_ns();
 #endif
-    uint64_t ticks = (uint64_t)cycles * TICKS_PER_CYCLE;
-    cemu_run_internal(ticks);
+    // Pass cycles directly - sched_repeat() multiplies by tick_unit internally
+    cemu_run_internal((uint64_t)cycles);
 #ifdef CEMU_PERF_INSTRUMENTATION
     g_run_time_ns += get_time_ns() - start;
 #endif

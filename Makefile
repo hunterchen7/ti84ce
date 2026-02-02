@@ -1,29 +1,66 @@
 # TI-84 CE Emulator Build Commands
+#
+# Quick reference:
+#   ./scripts/build.sh android [--debug] [--cemu] [--install] [--all-abis]
+#   ./scripts/build.sh ios [--debug] [--cemu] [--sim] [--open]
 
-.PHONY: android android-fast android-install android-cemu-fast android-cemu-release \
-        log-android test clean cemu cemu-test cemu-clean
+.PHONY: android android-debug android-cemu android-install android-cemu-install \
+        ios ios-debug ios-cemu ios-sim ios-sim-cemu \
+        log-android test clean cemu cemu-test cemu-clean help
 
-# Build Android APK (all ABIs)
+#------------------------------------------------------------------------------
+# Android
+#------------------------------------------------------------------------------
+
+# Android release (arm64, Rust)
 android:
-	./scripts/build-android.sh
+	./scripts/build.sh android
 
-# Fast Android build (arm64 only) + install
-android-fast:
-	./scripts/build-android-fast.sh
+# Android debug (arm64, Rust)
+android-debug:
+	./scripts/build.sh android --debug
 
-# Build all ABIs and install
+# Android release with CEmu backend
+android-cemu:
+	./scripts/build.sh android --cemu
+
+# Android release + install
 android-install:
-	./scripts/build-android.sh --install
+	./scripts/build.sh android --install
 
-# Fast Android build using CEmu backend (arm64 only + install)
-android-cemu-fast:
-	./scripts/build-android-cemu.sh
+# Android CEmu + install
+android-cemu-install:
+	./scripts/build.sh android --cemu --install
 
-# Release Android build using CEmu backend (fully optimized, arm64 only + install)
-android-cemu-release:
-	./scripts/build-android-cemu-release.sh
+#------------------------------------------------------------------------------
+# iOS
+#------------------------------------------------------------------------------
 
-# Capture Android emulator logs to file
+# iOS device release (arm64, Rust)
+ios:
+	./scripts/build.sh ios
+
+# iOS device debug (arm64, Rust)
+ios-debug:
+	./scripts/build.sh ios --debug
+
+# iOS device release with CEmu backend
+ios-cemu:
+	./scripts/build.sh ios --cemu
+
+# iOS Simulator (Rust)
+ios-sim:
+	./scripts/build.sh ios --sim
+
+# iOS Simulator with CEmu backend
+ios-sim-cemu:
+	./scripts/build.sh ios --sim --cemu
+
+#------------------------------------------------------------------------------
+# Utilities
+#------------------------------------------------------------------------------
+
+# Capture Android emulator logs
 log-android:
 	@echo "Capturing Android emulator logs..."
 	@echo "Press Ctrl+C to stop logging"
@@ -34,13 +71,17 @@ log-android:
 test:
 	cd core && cargo test --lib
 
-# Clean build artifacts
+# Clean all build artifacts
 clean:
 	cd core && cargo clean
-	cd android && ./gradlew clean
+	-cd android && ./gradlew clean
 	rm -rf android/app/.cxx android/app/build/intermediates/cmake
+	rm -rf ios/build ios/cemu/build-* ios/DerivedData
 
-# CEmu backend (reference emulator)
+#------------------------------------------------------------------------------
+# CEmu (reference emulator for macOS)
+#------------------------------------------------------------------------------
+
 cemu:
 	@echo "Building CEmu core library..."
 	$(MAKE) -C cemu-ref/core lib
@@ -60,19 +101,41 @@ cemu-clean:
 	$(MAKE) -C cemu-ref/core clean
 	$(MAKE) -C cemu-ref/test clean
 
+#------------------------------------------------------------------------------
 # Help
+#------------------------------------------------------------------------------
+
 help:
-	@echo "Available targets:"
-	@echo "  make android             - Build APK for all Android ABIs (Rust)"
-	@echo "  make android-fast        - Build arm64 only + install (Rust)"
-	@echo "  make android-install     - Build all ABIs + install (Rust)"
-	@echo "  make android-cemu-fast   - Build arm64 + install (CEmu backend, debug)"
-	@echo "  make android-cemu-release - Build arm64 + install (CEmu backend, release)"
-	@echo "  make log-android         - Capture emulator logs to emulator_logs.txt"
-	@echo "  make test                - Run Rust tests"
-	@echo "  make clean               - Clean all build artifacts"
+	@echo "TI-84 CE Emulator Build System"
 	@echo ""
-	@echo "CEmu backend (reference emulator for macOS):"
-	@echo "  make cemu                - Build CEmu library for macOS"
-	@echo "  make cemu-test           - Build CEmu test programs"
-	@echo "  make cemu-clean          - Clean CEmu build artifacts"
+	@echo "Unified build script:"
+	@echo "  ./scripts/build.sh <platform> [options]"
+	@echo ""
+	@echo "  Platforms: android, ios"
+	@echo "  Options:   --debug, --cemu, --install, --sim, --open, --all-abis"
+	@echo ""
+	@echo "Make targets (shortcuts):"
+	@echo ""
+	@echo "  Android:"
+	@echo "    make android              Release, arm64, Rust"
+	@echo "    make android-debug        Debug, arm64, Rust"
+	@echo "    make android-cemu         Release, arm64, CEmu"
+	@echo "    make android-install      Release, arm64, Rust + install"
+	@echo "    make android-cemu-install Release, arm64, CEmu + install"
+	@echo ""
+	@echo "  iOS:"
+	@echo "    make ios             Release, device, Rust"
+	@echo "    make ios-debug       Debug, device, Rust"
+	@echo "    make ios-cemu        Release, device, CEmu"
+	@echo "    make ios-sim         Release, simulator, Rust"
+	@echo "    make ios-sim-cemu    Release, simulator, CEmu"
+	@echo ""
+	@echo "  Utilities:"
+	@echo "    make test            Run Rust tests"
+	@echo "    make clean           Clean all build artifacts"
+	@echo "    make log-android     Capture Android logs"
+	@echo ""
+	@echo "  CEmu (macOS reference):"
+	@echo "    make cemu            Build CEmu library"
+	@echo "    make cemu-test       Build CEmu test programs"
+	@echo "    make cemu-clean      Clean CEmu artifacts"

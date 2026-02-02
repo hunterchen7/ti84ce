@@ -119,10 +119,11 @@ The project uses a single build script for both platforms:
 
 ```bash
 # Android
-make android          # Release, arm64, Rust
-make android-debug    # Debug, arm64, Rust
-make android-cemu     # Release, CEmu backend
-make android-install  # Release + install
+make android              # Release, arm64, Rust
+make android-debug        # Debug, arm64, Rust
+make android-cemu         # Release, CEmu backend
+make android-install      # Release + install
+make android-cemu-install # CEmu + install
 
 # iOS (builds backend library, then open Xcode to build app)
 make ios              # Release, device, Rust
@@ -259,6 +260,7 @@ cargo test -- --nocapture
 Test tools in `tools/cemu-test/` compare CEmu (reference emulator) behavior with our Rust implementation.
 
 **Prerequisites:**
+
 1. Clone CEmu: `git clone https://github.com/CE-Programming/CEmu.git cemu-ref`
 2. Build CEmu core: `cd cemu-ref/core && make`
 3. Obtain a TI-84 Plus CE ROM file
@@ -279,6 +281,7 @@ make
 ```
 
 Key addresses monitored:
+
 - `0xD000C4` - MathPrint flag (bit 5: 1=MathPrint, 0=Classic)
 - `0xF80020` - RTC control register (bit 6: load in progress)
 - `0xF80040` - RTC load status (0x00=complete, 0xF8=all pending)
