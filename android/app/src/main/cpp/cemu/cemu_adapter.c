@@ -79,6 +79,9 @@ static struct Emu* g_instance = NULL;
 static emu_log_cb_t g_log_callback = NULL;
 static char g_log_buffer[4096];
 
+// Temp directory for state save/load (Android doesn't have /tmp)
+static char g_temp_dir[512] = "/tmp";  // Default fallback for non-Android platforms
+
 // GUI callback implementations (required by CEmu core)
 void gui_console_clear(void) {
     // No-op
@@ -122,6 +125,18 @@ void gui_debug_open(int reason, uint32_t data) {
 }
 void gui_debug_close(void) {}
 #endif
+
+// ============================================================
+// Temp directory configuration (Android doesn't have /tmp)
+// ============================================================
+
+void EMU_FUNC(backend_set_temp_dir)(const char* path) {
+    if (path && strlen(path) < sizeof(g_temp_dir) - 1) {
+        strncpy(g_temp_dir, path, sizeof(g_temp_dir) - 1);
+        g_temp_dir[sizeof(g_temp_dir) - 1] = '\0';
+        gui_console_printf("[CEmu] Temp directory set to: %s\n", g_temp_dir);
+    }
+}
 
 // ============================================================
 // CEmu emu.c functions reimplemented (to avoid symbol conflicts)
@@ -434,9 +449,13 @@ int EMU_FUNC(emu_save_state)(const Emu* emu, uint8_t* out, size_t cap) {
     if (!out || cap < CEMU_STATE_SIZE) return -101;  // Buffer too small
 
     // Use temp file as intermediary (CEmu only supports FILE* API)
-    const char* temp_path = "/tmp/cemu_state_save.img";
+    char temp_path[600];
+    snprintf(temp_path, sizeof(temp_path), "%s/cemu_state_save.img", g_temp_dir);
     FILE* f = fopen(temp_path, "wb");
-    if (!f) return -2;
+    if (!f) {
+        gui_console_err_printf("[CEmu] Failed to create temp file: %s\n", temp_path);
+        return -2;
+    }
 
     // Write version header
     uint32_t version = CEMU_IMAGE_VERSION;
@@ -493,9 +512,13 @@ int EMU_FUNC(emu_load_state)(Emu* emu, const uint8_t* data, size_t len) {
     }
 
     // Write to temp file
-    const char* temp_path = "/tmp/cemu_state_load.img";
+    char temp_path[600];
+    snprintf(temp_path, sizeof(temp_path), "%s/cemu_state_load.img", g_temp_dir);
     FILE* f = fopen(temp_path, "wb");
-    if (!f) return -2;
+    if (!f) {
+        gui_console_err_printf("[CEmu] Failed to create temp file: %s\n", temp_path);
+        return -2;
+    }
 
     if (fwrite(data, 1, len, f) != len) {
         fclose(f);

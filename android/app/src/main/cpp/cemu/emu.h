@@ -43,10 +43,13 @@ uint8_t emu_get_backlight(const Emu* emu);
 // LCD state
 int emu_is_lcd_on(const Emu* emu);
 
-// Save state (not fully implemented for CEmu)
+// Save state
 size_t emu_save_state_size(const Emu* emu);
 int    emu_save_state(const Emu* emu, uint8_t* out, size_t cap);
 int    emu_load_state(Emu* emu, const uint8_t* data, size_t len);
+
+// Configuration
+void backend_set_temp_dir(const char* path);
 
 #ifdef __cplusplus
 }

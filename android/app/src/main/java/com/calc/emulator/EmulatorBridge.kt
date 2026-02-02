@@ -50,9 +50,10 @@ class EmulatorBridge {
         fun initialize(context: Context) {
             if (!initialized) {
                 val nativeLibDir = context.applicationInfo.nativeLibraryDir
-                nativeInit(nativeLibDir)
+                val cacheDir = context.cacheDir.absolutePath
+                nativeInit(nativeLibDir, cacheDir)
                 initialized = true
-                Log.i(TAG, "Initialized with native lib dir: $nativeLibDir")
+                Log.i(TAG, "Initialized with native lib dir: $nativeLibDir, cache dir: $cacheDir")
             }
         }
 
@@ -73,7 +74,7 @@ class EmulatorBridge {
 
         // Static native methods
         @JvmStatic
-        private external fun nativeInit(nativeLibDir: String)
+        private external fun nativeInit(nativeLibDir: String, cacheDir: String)
 
         @JvmStatic
         private external fun nativeGetAvailableBackends(): Array<String>?

@@ -38,6 +38,7 @@ typedef int (*backend_is_lcd_on_fn)(const Emu*);
 typedef size_t (*backend_save_state_size_fn)(const Emu*);
 typedef int (*backend_save_state_fn)(const Emu*, uint8_t*, size_t);
 typedef int (*backend_load_state_fn)(Emu*, const uint8_t*, size_t);
+typedef void (*backend_set_temp_dir_fn)(const char*);
 
 // Backend interface structure
 struct BackendInterface {
@@ -58,6 +59,7 @@ struct BackendInterface {
     backend_save_state_size_fn save_state_size = nullptr;
     backend_save_state_fn save_state = nullptr;
     backend_load_state_fn load_state = nullptr;
+    backend_set_temp_dir_fn set_temp_dir = nullptr;  // Optional
 
     bool isLoaded() const { return handle != nullptr; }
 
@@ -75,6 +77,7 @@ static std::mutex g_mutex;
 static BackendInterface g_backend;
 static Emu* g_emu = nullptr;
 static std::string g_native_lib_dir;
+static std::string g_cache_dir;
 
 // Log callback state
 static std::mutex g_log_mutex;
@@ -134,12 +137,20 @@ static bool loadBackend(const std::string& backendName) {
 
     #undef LOAD_FUNC
 
+    // Load optional symbols (don't fail if missing)
+    newBackend.set_temp_dir = (backend_set_temp_dir_fn)dlsym(handle, "backend_set_temp_dir");
+
     // Unload previous backend
     g_backend.unload();
     g_backend = newBackend;
 
     // Set up log callback
     g_backend.set_log_callback(emu_log_callback);
+
+    // Set temp directory if available
+    if (g_backend.set_temp_dir && !g_cache_dir.empty()) {
+        g_backend.set_temp_dir(g_cache_dir.c_str());
+    }
 
     LOGI("Backend %s loaded successfully", g_backend.get_name());
     return true;
@@ -182,13 +193,20 @@ static inline jlong fromEmu(Emu* emu) {
     return reinterpret_cast<jlong>(emu);
 }
 
-// Initialize with native library directory
+// Initialize with native library directory and cache directory
 JNIEXPORT void JNICALL
-Java_com_calc_emulator_EmulatorBridge_nativeInit(JNIEnv* env, jobject thiz, jstring nativeLibDir) {
+Java_com_calc_emulator_EmulatorBridge_nativeInit(JNIEnv* env, jobject thiz, jstring nativeLibDir, jstring cacheDir) {
     const char* dir = env->GetStringUTFChars(nativeLibDir, nullptr);
     g_native_lib_dir = dir;
     env->ReleaseStringUTFChars(nativeLibDir, dir);
     LOGI("Native library directory: %s", g_native_lib_dir.c_str());
+
+    if (cacheDir != nullptr) {
+        const char* cache = env->GetStringUTFChars(cacheDir, nullptr);
+        g_cache_dir = cache;
+        env->ReleaseStringUTFChars(cacheDir, cache);
+        LOGI("Cache directory: %s", g_cache_dir.c_str());
+    }
 }
 
 // Get available backends as string array
