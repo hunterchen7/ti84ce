@@ -1,0 +1,13 @@
+# Built binaries
+parity_check
+trace_gen
+test_cemu
+test_wrapper
+
+# Object files and libraries
+*.o
+*.a
+
+# Output files
+*.ppm
+*.png
