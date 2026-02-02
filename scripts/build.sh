@@ -240,8 +240,10 @@ build_android() {
     echo "    APK: android/$APK_PATH"
 
     if [ "$INSTALL" = true ]; then
+        echo "==> Uninstalling existing app..."
+        adb uninstall com.calc.emulator 2>/dev/null || true
         echo "==> Installing APK..."
-        adb install -r "android/$APK_PATH"
+        adb install "android/$APK_PATH"
         echo "==> Installed!"
     fi
 }

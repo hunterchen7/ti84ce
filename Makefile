@@ -22,9 +22,9 @@ android:
 android-debug:
 	./scripts/build.sh android --rust --debug
 
-# Android release + install (Rust only)
+# Android release + install (Rust only, all ABIs)
 android-install:
-	./scripts/build.sh android --rust --install
+	./scripts/build.sh android --rust --install --all-abis
 
 #------------------------------------------------------------------------------
 # Android - Both backends (runtime switching)
@@ -204,7 +204,7 @@ help:
 	@echo "  Android (Rust only - default):"
 	@echo "    make android              Release, arm64, Rust"
 	@echo "    make android-debug        Debug, arm64, Rust"
-	@echo "    make android-install      Release + install, Rust"
+	@echo "    make android-install      Release + install, all ABIs, Rust"
 	@echo ""
 	@echo "  Android (Both backends - runtime switching):"
 	@echo "    make android-both         Release, both backends"
