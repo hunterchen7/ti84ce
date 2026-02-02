@@ -381,6 +381,13 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
+            // Check if timer match occurred and needs delayed interrupt scheduling
+            // CEmu delays timer interrupts by 2 CPU cycles after match event
+            if self.bus.ports.has_pending_timer_delay() && !self.scheduler.is_active(EventId::TimerDelay) {
+                // Schedule the timer delay event for 2 CPU cycles from now
+                self.scheduler.set(EventId::TimerDelay, 2);
+            }
+
             // Check if RTC needs a load event scheduled
             if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
                 // Don't call start_load_ticks() here - keep loadTicksProcessed at LOAD_PENDING
@@ -428,6 +435,11 @@ impl Emu {
 
             if self.bus.ports.tick(cycles_used) {
                 self.cpu.irq_pending = true;
+            }
+
+            // Check if timer match occurred and needs delayed interrupt scheduling
+            if self.bus.ports.has_pending_timer_delay() && !self.scheduler.is_active(EventId::TimerDelay) {
+                self.scheduler.set(EventId::TimerDelay, 2);
             }
 
             if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
@@ -499,6 +511,18 @@ impl Emu {
                     self.bus.ports.interrupt.raise(sources::LCD);
                     self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
                     self.scheduler.clear(EventId::Lcd);
+                }
+                EventId::TimerDelay => {
+                    // Timer delay event - fire pending timer interrupts after 2-cycle delay
+                    // This matches CEmu's SCHED_TIMER_DELAY behavior
+                    let more_pending = self.bus.ports.process_timer_delay();
+                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    if more_pending {
+                        // Reschedule for 1 more cycle if there are more delays
+                        self.scheduler.repeat(EventId::TimerDelay, 1);
+                    } else {
+                        self.scheduler.clear(EventId::TimerDelay);
+                    }
                 }
                 _ => {
                     // Unknown event - clear it

@@ -81,8 +81,11 @@ pub enum EventId {
     OsTimer = 5,
     /// LCD refresh
     Lcd = 6,
+    /// Timer delay event (fires 2 CPU cycles after timer match)
+    /// CEmu uses SCHED_TIMER_DELAY for proper interrupt ordering
+    TimerDelay = 7,
     /// Number of event types
-    Count = 7,
+    Count = 8,
 }
 
 /// Bit 63 set indicates event is inactive
@@ -145,6 +148,7 @@ impl Scheduler {
                 SchedItem::new(EventId::Timer2, ClockId::Cpu),
                 SchedItem::new(EventId::OsTimer, ClockId::Clock32K),
                 SchedItem::new(EventId::Lcd, ClockId::Panel),
+                SchedItem::new(EventId::TimerDelay, ClockId::Cpu),
             ],
             base_ticks: 0,
             cpu_cycles: 0,
@@ -286,8 +290,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 8 (cpu_cycles) + 1 (cpu_speed) + 7*8 (item timestamps) = 73 bytes, round to 80
-    pub const SNAPSHOT_SIZE: usize = 80;
+    /// 8 (base_ticks) + 8 (cpu_cycles) + 1 (cpu_speed) + 8*8 (item timestamps) = 81 bytes, round to 88
+    pub const SNAPSHOT_SIZE: usize = 88;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -299,7 +303,7 @@ impl Scheduler {
         buf[pos..pos+8].copy_from_slice(&self.cpu_cycles.to_le_bytes()); pos += 8;
         buf[pos] = self.cpu_speed; pos += 1;
 
-        // Event timestamps (7 events × 8 bytes each)
+        // Event timestamps (8 events × 8 bytes each)
         for item in &self.items {
             buf[pos..pos+8].copy_from_slice(&item.timestamp.to_le_bytes());
             pos += 8;

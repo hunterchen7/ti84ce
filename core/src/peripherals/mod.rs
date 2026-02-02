@@ -97,6 +97,12 @@ pub struct Peripherals {
     os_timer_state: bool,
     /// OS Timer cycle accumulator
     os_timer_cycles: u64,
+    /// Timer delay status bits (CEmu: delayStatus)
+    /// Bits are packed: for each delay slot (0=now+2, 1=now+1), 3 timers × 3 status bits
+    timer_delay_status: u32,
+    /// Timer delay interrupt bits (CEmu: delayIntrpt)
+    /// Bit mask indicating which timer interrupts to fire
+    timer_delay_intrpt: u8,
 }
 
 impl Peripherals {
@@ -129,6 +135,8 @@ impl Peripherals {
             key_state: [[false; KEYPAD_COLS]; KEYPAD_ROWS],
             os_timer_state: false,
             os_timer_cycles: 0,
+            timer_delay_status: 0,
+            timer_delay_intrpt: 0,
         }
     }
 
@@ -176,6 +184,8 @@ impl Peripherals {
         self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
         self.os_timer_state = false;
         self.os_timer_cycles = 0;
+        self.timer_delay_status = 0;
+        self.timer_delay_intrpt = 0;
     }
 
     /// Read from a port address
@@ -376,16 +386,28 @@ impl Peripherals {
 
     /// Tick all peripherals
     /// Returns true if any interrupt is pending
+    ///
+    /// Note: Timer interrupts are NOT fired immediately. When a timer match occurs,
+    /// we accumulate the pending interrupt into `timer_delay_intrpt` and the caller
+    /// (Emu) schedules a TimerDelay event. This implements CEmu's 2-cycle delay
+    /// between timer match and interrupt firing.
     pub fn tick(&mut self, cycles: u32) -> bool {
-        // Tick timers
-        if self.timer1.tick(cycles) != 0 {
-            self.interrupt.raise(sources::TIMER1);
+        // Tick timers - collect pending interrupts but don't fire immediately
+        // CEmu delays timer interrupts by 2 CPU cycles after match event
+        let timer1_irq = self.timer1.tick(cycles);
+        let timer2_irq = self.timer2.tick(cycles);
+        let timer3_irq = self.timer3.tick(cycles);
+
+        // Accumulate pending timer interrupts for delayed firing
+        // Bit 0 = Timer 1, Bit 1 = Timer 2, Bit 2 = Timer 3
+        if timer1_irq != 0 {
+            self.timer_delay_intrpt |= 1 << 0;
         }
-        if self.timer2.tick(cycles) != 0 {
-            self.interrupt.raise(sources::TIMER2);
+        if timer2_irq != 0 {
+            self.timer_delay_intrpt |= 1 << 1;
         }
-        if self.timer3.tick(cycles) != 0 {
-            self.interrupt.raise(sources::TIMER3);
+        if timer3_irq != 0 {
+            self.timer_delay_intrpt |= 1 << 2;
         }
 
         // Tick LCD
@@ -494,6 +516,41 @@ impl Peripherals {
     /// Check if any interrupt is pending
     pub fn irq_pending(&self) -> bool {
         self.interrupt.irq_pending()
+    }
+
+    /// Check if there are pending timer interrupts that need to be scheduled
+    /// Returns true if the caller should schedule a TimerDelay event
+    pub fn has_pending_timer_delay(&self) -> bool {
+        self.timer_delay_intrpt != 0
+    }
+
+    /// Process the timer delay event (called 2 CPU cycles after timer match)
+    /// This fires the actual timer interrupts after the delay.
+    /// Returns true if there are more pending delays to process (reschedule for +1 cycle)
+    ///
+    /// Based on CEmu's gpt_delay() in timers.c:
+    /// - Updates status bits
+    /// - Fires timer interrupts
+    /// - If more delays pending, returns true to reschedule for 1 more cycle
+    pub fn process_timer_delay(&mut self) -> bool {
+        // Fire pending timer interrupts
+        if self.timer_delay_intrpt & (1 << 0) != 0 {
+            self.interrupt.raise(sources::TIMER1);
+        }
+        if self.timer_delay_intrpt & (1 << 1) != 0 {
+            self.interrupt.raise(sources::TIMER2);
+        }
+        if self.timer_delay_intrpt & (1 << 2) != 0 {
+            self.interrupt.raise(sources::TIMER3);
+        }
+
+        // Clear the processed interrupt bits
+        self.timer_delay_intrpt = 0;
+
+        // CEmu has a more complex scheme with delayStatus shifting,
+        // but for our purposes, once we've fired all pending interrupts,
+        // we're done (no more delays to process)
+        false
     }
 
     // ========== State Persistence ==========
@@ -870,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_timer_interrupt() {
+    fn test_tick_timer_interrupt_delayed() {
         let mut p = Peripherals::new();
 
         // Enable timer 1 with interrupt on overflow
@@ -884,10 +941,94 @@ mod tests {
         // Enable timer 1 interrupt in interrupt controller
         p.write_test(INT_BASE + 0x04, sources::TIMER1 as u8);
 
-        // Tick should overflow timer and raise interrupt
-        let pending = p.tick(2);
-        assert!(pending);
+        // Tick should overflow timer but NOT immediately raise interrupt
+        // (CEmu delays timer interrupts by 2 cycles)
+        let _pending = p.tick(2);
+
+        // Timer overflow should set the delay flag, not fire immediately
+        assert!(p.has_pending_timer_delay());
+
+        // Interrupt should NOT be raised yet (delayed)
+        assert_eq!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
+
+        // Process the delay event (simulating scheduler firing after 2 cycles)
+        let more = p.process_timer_delay();
+        assert!(!more); // No more delays pending
+
+        // NOW the interrupt should be raised
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
         assert!(p.irq_pending());
+    }
+
+    #[test]
+    fn test_timer_delay_accumulates_multiple() {
+        let mut p = Peripherals::new();
+
+        // Enable all 3 timers with interrupt on overflow
+        let ctrl = 0x01 | 0x02 | 0x04; // ENABLE | COUNT_UP | INT_ON_ZERO
+
+        p.timer1.write_control(ctrl);
+        p.write_test(TIMER_BASE, 0xFE);
+        p.write_test(TIMER_BASE + 1, 0xFF);
+        p.write_test(TIMER_BASE + 2, 0xFF);
+        p.write_test(TIMER_BASE + 3, 0xFF);
+
+        p.timer2.write_control(ctrl);
+        p.write_test(TIMER_BASE + 0x10, 0xFE);
+        p.write_test(TIMER_BASE + 0x11, 0xFF);
+        p.write_test(TIMER_BASE + 0x12, 0xFF);
+        p.write_test(TIMER_BASE + 0x13, 0xFF);
+
+        p.timer3.write_control(ctrl);
+        p.write_test(TIMER_BASE + 0x20, 0xFE);
+        p.write_test(TIMER_BASE + 0x21, 0xFF);
+        p.write_test(TIMER_BASE + 0x22, 0xFF);
+        p.write_test(TIMER_BASE + 0x23, 0xFF);
+
+        // Enable all timer interrupts
+        let enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
+        p.write_test(INT_BASE + 0x04, enabled as u8);
+
+        // Tick 2 cycles - all 3 timers should overflow
+        p.tick(2);
+
+        // All 3 should have pending delays
+        assert!(p.has_pending_timer_delay());
+
+        // No interrupts raised yet
+        assert_eq!(p.interrupt.read(0x00) & (enabled as u8), 0);
+
+        // Process delay - all 3 interrupts should fire
+        p.process_timer_delay();
+
+        // All 3 should now be raised
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER2 as u8, 0);
+        assert_ne!(p.interrupt.read(0x00) & sources::TIMER3 as u8, 0);
+    }
+
+    #[test]
+    fn test_timer_delay_cleared_after_process() {
+        let mut p = Peripherals::new();
+
+        // Set up timer 1 to overflow
+        p.timer1.write_control(0x01 | 0x02 | 0x04);
+        p.write_test(TIMER_BASE, 0xFF);
+        p.write_test(TIMER_BASE + 1, 0xFF);
+        p.write_test(TIMER_BASE + 2, 0xFF);
+        p.write_test(TIMER_BASE + 3, 0xFF);
+
+        // Tick to overflow
+        p.tick(2);
+        assert!(p.has_pending_timer_delay());
+
+        // Process delay
+        p.process_timer_delay();
+        assert!(!p.has_pending_timer_delay());
+
+        // Tick again without overflow - no new delay should be pending
+        p.tick(1);
+        assert!(!p.has_pending_timer_delay());
     }
 
     #[test]
@@ -960,17 +1101,24 @@ mod tests {
         let enabled = sources::TIMER1 | sources::TIMER2 | sources::TIMER3;
         p.write_test(INT_BASE + 0x04, enabled as u8);
 
-        // Tick 2 cycles - should overflow timer 1
-        let pending = p.tick(2);
-        assert!(pending);
+        // Tick 2 cycles - should overflow timer 1 (counter=0xFFFFFFFE + 2 = overflow)
+        p.tick(2);
+        // Timer 1 should have pending delay
+        assert!(p.has_pending_timer_delay());
+        // Process delay
+        p.process_timer_delay();
 
-        // Tick 1 more - should overflow timer 2
+        // Tick 1 more - should overflow timer 2 (0xFFFFFFFD + 2 + 1 = overflow)
         p.tick(1);
+        assert!(p.has_pending_timer_delay());
+        p.process_timer_delay();
 
-        // Tick 1 more - should overflow timer 3
+        // Tick 1 more - should overflow timer 3 (0xFFFFFFFC + 2 + 1 + 1 = overflow)
         p.tick(1);
+        assert!(p.has_pending_timer_delay());
+        p.process_timer_delay();
 
-        // All 3 timers should have raised interrupts
+        // All 3 timers should have raised interrupts after processing delays
         assert_ne!(p.interrupt.read(0x00) & sources::TIMER1 as u8, 0);
         assert_ne!(p.interrupt.read(0x00) & sources::TIMER2 as u8, 0);
         assert_ne!(p.interrupt.read(0x00) & sources::TIMER3 as u8, 0);
@@ -991,13 +1139,17 @@ mod tests {
         // But don't enable the interrupt in the interrupt controller
         // (enabled = 0 by default)
 
-        // Tick should overflow timer but not report pending
-        let pending = p.tick(2);
-        assert!(!pending);
-        assert!(!p.irq_pending());
+        // Tick should overflow timer but not report pending (since timer interrupts
+        // are disabled in the interrupt controller)
+        p.tick(2);
+        // Timer delay should be pending
+        assert!(p.has_pending_timer_delay());
+        // Process the delay
+        p.process_timer_delay();
 
-        // Status should still be latched
+        // Status should be set but not pending (because not enabled)
         assert_ne!(p.interrupt.read(0x00), 0);
+        assert!(!p.irq_pending());
     }
 
     #[test]
