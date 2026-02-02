@@ -1,94 +1,111 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { createBackend, type EmulatorBackend, type BackendType } from './emulator';
+import { Keypad } from './components/keypad';
 
-// TI-84 Plus CE keypad layout
+// Bundled ROM (gitignored, not in public repo)
+// Uses import.meta.glob to gracefully handle missing file
+const romModules = import.meta.glob('./assets/CE.rom', { query: '?url', import: 'default' });
+const romLoader = romModules['./assets/CE.rom'] as (() => Promise<string>) | undefined;
+
+async function loadBundledRom(): Promise<Uint8Array | null> {
+  if (!romLoader) return null;
+  try {
+    const romUrl = await romLoader();
+    const response = await fetch(romUrl);
+    if (response.ok) {
+      return new Uint8Array(await response.arrayBuffer());
+    }
+  } catch {
+    // ROM failed to load
+  }
+  return null;
+}
+
+// TI-84 Plus CE keypad layout (matches iOS KeypadView.swift)
 // Maps keyboard keys to [row, col] positions
 const KEY_MAP: Record<string, [number, number]> = {
-  // Row 0: Graph, Trace, Zoom, Window, Y=, 2nd, Mode, Del
-  'F5': [0, 0], // Graph
-  'F4': [0, 1], // Trace
-  'F3': [0, 2], // Zoom
-  'F2': [0, 3], // Window
-  'F1': [0, 4], // Y=
-  'Shift': [0, 5], // 2nd
-  'Escape': [0, 6], // Mode
-  'Backspace': [0, 7], // Del
-  'Delete': [0, 7], // Del
+  // Function keys (row 1)
+  'F1': [1, 4], // Y=
+  'F2': [1, 3], // Window
+  'F3': [1, 2], // Zoom
+  'F4': [1, 1], // Trace
+  'F5': [1, 0], // Graph
+  // Shift (2nd) handled specially - only triggers on release if no other key pressed
+  'Escape': [1, 6], // Mode
+  'Backspace': [1, 7], // Del
+  'Delete': [1, 7], // Del
 
-  // Row 1: Sto, Ln, Log, x², x⁻¹, Math, Alpha, X,T,θ,n
-  'Insert': [1, 0], // Sto
-  'l': [1, 1], // Ln
-  'L': [1, 1], // Ln
-  'g': [1, 2], // Log
-  'G': [1, 2], // Log
-  'q': [1, 3], // x²
-  'Q': [1, 3], // x²
-  'r': [1, 4], // x⁻¹
-  'R': [1, 4], // x⁻¹
-  'm': [1, 5], // Math
-  'M': [1, 5], // Math
-  'Alt': [1, 6], // Alpha
-  'x': [1, 7], // X,T,θ,n
-  'X': [1, 7], // X,T,θ,n
+  // Row 2: on, sto, ln, log, x², x⁻¹, math, alpha
+  'o': [2, 0], // ON
+  'O': [2, 0], // ON
+  'Insert': [2, 1], // Sto
+  'l': [2, 2], // Ln
+  'L': [2, 2], // Ln
+  'g': [2, 3], // Log
+  'G': [2, 3], // Log
+  'r': [2, 5], // x⁻¹
+  'R': [2, 5], // x⁻¹
+  'm': [2, 6], // Math
+  'M': [2, 6], // Math
+  'Alt': [2, 7], // Alpha
 
-  // Row 2: 0, 1, 4, 7, ,, Sin, Apps, Stat
-  '0': [2, 0],
-  '1': [2, 1],
-  '4': [2, 2],
-  '7': [2, 3],
-  ',': [2, 4],
-  's': [2, 5], // Sin
-  'S': [2, 5], // Sin
-  'Home': [2, 6], // Apps
-  'End': [2, 7], // Stat
+  // Row 3: 0, 1, 4, 7, comma, sin, apps, X,T,θ,n
+  '0': [3, 0],
+  '1': [3, 1],
+  '4': [3, 2],
+  '7': [3, 3],
+  ',': [3, 4],
+  's': [3, 5], // Sin
+  'S': [3, 5], // Sin
+  'Home': [3, 6], // Apps
+  'x': [3, 7], // X,T,θ,n
+  'X': [3, 7], // X,T,θ,n
 
-  // Row 3: ., 2, 5, 8, (, Cos, Prgm, Vars
-  '.': [3, 0],
-  '2': [3, 1],
-  '5': [3, 2],
-  '8': [3, 3],
-  '(': [3, 4],
-  'c': [3, 5], // Cos
-  'C': [3, 5], // Cos
-  'PageDown': [3, 6], // Prgm
-  'PageUp': [3, 7], // Vars
+  // Row 4: ., 2, 5, 8, (, cos, prgm, stat
+  '.': [4, 0],
+  '2': [4, 1],
+  '5': [4, 2],
+  '8': [4, 3],
+  '(': [4, 4],
+  'c': [4, 5], // Cos
+  'C': [4, 5], // Cos
+  'PageDown': [4, 6], // Prgm
+  'End': [4, 7], // Stat
 
-  // Row 4: (-), 3, 6, 9, ), Tan, ×, ^
-  '_': [4, 0], // (-)
-  '3': [4, 1],
-  '6': [4, 2],
-  '9': [4, 3],
-  ')': [4, 4],
-  't': [4, 5], // Tan
-  'T': [4, 5], // Tan
-  '*': [4, 6], // ×
-  '^': [4, 7],
+  // Row 5: (-), 3, 6, 9, ), tan, vars
+  '_': [5, 0], // (-)
+  '3': [5, 1],
+  '6': [5, 2],
+  '9': [5, 3],
+  ')': [5, 4],
+  't': [5, 5], // Tan
+  'T': [5, 5], // Tan
+  'PageUp': [5, 6], // Vars
 
-  // Row 5: Enter, +, -, *, /, Clear, Down, Right
-  'Enter': [5, 0],
-  '+': [5, 1],
-  '-': [5, 2],
-  // '*' already mapped to row 4
-  '/': [5, 4],
-  'Clear': [5, 5],
-  'ArrowDown': [5, 6],
-  'ArrowRight': [5, 7],
+  // Row 6: enter, +, -, ×, ÷, ^, clear
+  'Enter': [6, 0],
+  '+': [6, 1],
+  '-': [6, 2],
+  '*': [6, 3], // ×
+  '/': [6, 4], // ÷
+  '^': [6, 5],
+  'Clear': [6, 6],
 
-  // Row 6: Up, Left, ?, ?, ?, ?, ?, ?
-  'ArrowUp': [6, 0],
-  'ArrowLeft': [6, 1],
-
-  // ON key - special handling
-  'o': [6, 5], // ON
-  'O': [6, 5], // ON
+  // Row 7: D-pad (down, left, right, up)
+  'ArrowDown': [7, 0],
+  'ArrowLeft': [7, 1],
+  'ArrowRight': [7, 2],
+  'ArrowUp': [7, 3],
 };
 
 interface CalculatorProps {
   className?: string;
   defaultBackend?: BackendType;
+  useBundledRom?: boolean;
+  fullscreen?: boolean;
 }
 
-export function Calculator({ className, defaultBackend = 'rust' }: CalculatorProps) {
+export function Calculator({ className, defaultBackend = 'rust', useBundledRom = true, fullscreen = false }: CalculatorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const backendRef = useRef<EmulatorBackend | null>(null);
   const animationRef = useRef<number>(0);
@@ -99,9 +116,11 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
   const [initialized, setInitialized] = useState(false);
   const [fps, setFps] = useState(0);
   const [backendName, setBackendName] = useState('');
+  const [speed, setSpeed] = useState(1); // Speed multiplier (0.25x to 4x)
   const lastFrameTime = useRef(0);
   const frameCount = useRef(0);
   const romDataRef = useRef<Uint8Array | null>(null);
+  const speedRef = useRef(1); // Ref for use in animation loop
 
   // Initialize backend
   useEffect(() => {
@@ -154,8 +173,21 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
           if (result === 0) {
             backend.powerOn();
             setRomLoaded(true);
+            setIsRunning(true); // Auto-start after backend switch
           } else {
             setError(`Failed to load ROM with ${backend.name}: error code ${result}`);
+          }
+        } else if (useBundledRom) {
+          // Try to load bundled ROM
+          const bundledData = await loadBundledRom();
+          if (bundledData) {
+            romDataRef.current = bundledData;
+            const result = await backend.loadRom(bundledData);
+            if (result === 0) {
+              backend.powerOn();
+              setRomLoaded(true);
+              setIsRunning(true);
+            }
           }
         }
       } catch (err) {
@@ -175,7 +207,7 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
       }
       // Don't destroy here - will be handled on next init or unmount
     };
-  }, [backendType]);
+  }, [backendType, useBundledRom]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -207,6 +239,7 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
         backend.powerOn();
         console.log('power_on complete');
         setRomLoaded(true);
+        setIsRunning(true); // Auto-start
         setError(null);
       } else {
         setError(`Failed to load ROM: error code ${result}`);
@@ -243,17 +276,30 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
     }
   }, []);
 
+  // Update speed ref when speed changes
+  useEffect(() => {
+    speedRef.current = speed;
+  }, [speed]);
+
   // Main emulation loop
   useEffect(() => {
     if (!isRunning || !romLoaded || !backendRef.current) return;
+
+    let accumulator = 0;
 
     const loop = () => {
       const backend = backendRef.current;
       if (!backend) return;
 
       try {
-        // Run one frame
-        backend.runFrame();
+        // Run frames based on speed multiplier
+        // Halve speed since requestAnimationFrame runs at ~120fps on high refresh displays
+        // Use accumulator for fractional speeds
+        accumulator += speedRef.current / 2;
+        while (accumulator >= 1) {
+          backend.runFrame();
+          accumulator -= 1;
+        }
 
         // Render
         renderFrame();
@@ -291,7 +337,46 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
     const backend = backendRef.current;
     if (!backend || !romLoaded) return;
 
+    // Track if Shift was pressed alone (for 2nd key)
+    let shiftPressedAlone = false;
+
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Control shortcuts
+      if (e.key === ' ') {
+        e.preventDefault();
+        setIsRunning(prev => !prev);
+        return;
+      }
+
+      // Track Shift for 2nd key - only trigger on release if pressed alone
+      if (e.key === 'Shift') {
+        shiftPressedAlone = true;
+        return;
+      }
+
+      // If any other key is pressed while Shift is held, it's not a solo Shift press
+      if (e.shiftKey) {
+        shiftPressedAlone = false;
+      }
+
+      // Special combo keys (2nd + key sequences)
+      if (e.key === 'v' || e.key === 'V') {
+        e.preventDefault();
+        // Square root: 2nd + x²
+        backend.setKey(1, 5, true); // 2nd down
+        setTimeout(() => {
+          backend.setKey(1, 5, false); // 2nd up
+          backend.setKey(2, 4, true); // x² down
+          setTimeout(() => backend.setKey(2, 4, false), 50); // x² up
+        }, 50);
+        return;
+      }
+
+      // Don't intercept browser shortcuts (Ctrl/Cmd + key)
+      if (e.ctrlKey || e.metaKey) {
+        return;
+      }
+
       const mapping = KEY_MAP[e.key];
       if (mapping) {
         e.preventDefault();
@@ -300,6 +385,17 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
     };
 
     const handleKeyUp = (e: KeyboardEvent) => {
+      // Handle Shift release - trigger 2nd only if it was pressed alone
+      if (e.key === 'Shift') {
+        if (shiftPressedAlone) {
+          // Tap 2nd key (press and release)
+          backend.setKey(1, 5, true);
+          setTimeout(() => backend.setKey(1, 5, false), 50);
+        }
+        shiftPressedAlone = false;
+        return;
+      }
+
       const mapping = KEY_MAP[e.key];
       if (mapping) {
         e.preventDefault();
@@ -329,34 +425,69 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
     }
   };
 
+  const handleEjectRom = () => {
+    setIsRunning(false);
+    setRomLoaded(false);
+    romDataRef.current = null;
+    if (backendRef.current) {
+      backendRef.current.reset();
+    }
+  };
+
   const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newBackend = e.target.value as BackendType;
     setBackendType(newBackend);
   };
 
-  return (
-    <div className={className} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '1rem' }}>
-      <h1>TI-84 Plus CE Emulator</h1>
+  // Keypad handlers
+  const handleKeypadDown = useCallback((row: number, col: number) => {
+    if (backendRef.current) {
+      backendRef.current.setKey(row, col, true);
+    }
+  }, []);
 
-      {/* Backend selector */}
-      <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-        <label htmlFor="backend-select">Backend:</label>
-        <select
-          id="backend-select"
-          value={backendType}
-          onChange={handleBackendChange}
-          disabled={isRunning}
-          style={{ padding: '0.5rem' }}
-        >
-          <option value="rust">Rust (Custom)</option>
-          <option value="cemu">CEmu (Reference)</option>
-        </select>
-        {backendName && (
-          <span style={{ fontSize: '0.875rem', color: '#666' }}>
-            Using: {backendName}
-          </span>
-        )}
-      </div>
+  const handleKeypadUp = useCallback((row: number, col: number) => {
+    if (backendRef.current) {
+      backendRef.current.setKey(row, col, false);
+    }
+  }, []);
+
+  // Calculate container width based on fullscreen mode
+  const containerWidth = fullscreen ? 'min(420px, 95vw, calc(95vh * 0.45))' : '360px';
+
+  return (
+    <div className={className} style={{
+      display: 'flex',
+      flexDirection: 'column',
+      alignItems: 'center',
+      gap: fullscreen ? '0.5rem' : '1rem',
+      ...(fullscreen && { transform: 'scale(1)', transformOrigin: 'center center' })
+    }}>
+      {/* Header and backend selector - only on non-demo */}
+      {!useBundledRom && (
+        <>
+          <h1>TI-84 Plus CE Emulator</h1>
+
+          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+            <label htmlFor="backend-select">Backend:</label>
+            <select
+              id="backend-select"
+              value={backendType}
+              onChange={handleBackendChange}
+              disabled={isRunning}
+              style={{ padding: '0.5rem' }}
+            >
+              <option value="rust">Rust (Custom)</option>
+              <option value="cemu">CEmu (Reference)</option>
+            </select>
+            {backendName && (
+              <span style={{ fontSize: '0.875rem', color: '#666' }}>
+                Using: {backendName}
+              </span>
+            )}
+          </div>
+        </>
+      )}
 
       {error && (
         <div style={{ color: 'red', padding: '0.5rem', background: '#fee', borderRadius: '4px' }}>
@@ -383,39 +514,73 @@ export function Calculator({ className, defaultBackend = 'rust' }: CalculatorPro
 
       {romLoaded && (
         <>
+          {/* Calculator container with screen and keypad */}
           <div style={{
-            background: '#000',
-            padding: '1rem',
-            borderRadius: '8px',
-            boxShadow: '0 4px 12px rgba(0,0,0,0.3)'
+            background: '#1B1B1B',
+            borderRadius: fullscreen ? '12px' : '16px',
+            padding: fullscreen ? '12px' : '16px',
+            boxShadow: '0 8px 24px rgba(0,0,0,0.4)',
+            width: containerWidth,
           }}>
-            <canvas
-              ref={canvasRef}
-              width={320}
-              height={240}
-              style={{
-                imageRendering: 'pixelated',
-                width: '640px',
-                height: '480px'
-              }}
-            />
+            {/* Screen */}
+            <div style={{
+              background: '#000',
+              padding: '8px',
+              borderRadius: '8px',
+              marginBottom: '12px',
+            }}>
+              <canvas
+                ref={canvasRef}
+                width={320}
+                height={240}
+                style={{
+                  imageRendering: 'pixelated',
+                  width: '100%',
+                  height: 'auto',
+                  display: 'block',
+                }}
+              />
+            </div>
+
+            {/* Keypad */}
+            <Keypad onKeyDown={handleKeypadDown} onKeyUp={handleKeypadUp} />
           </div>
 
-          <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-            <button onClick={() => setIsRunning(!isRunning)}>
+          {/* Controls - outside calculator */}
+          <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap', justifyContent: 'center' }}>
+            <button onClick={() => setIsRunning(!isRunning)} style={{ padding: '6px 16px' }} title="Space">
               {isRunning ? 'Pause' : 'Run'}
             </button>
-            <button onClick={handleReset}>Reset</button>
-            <span style={{ fontSize: '0.875rem', color: '#666' }}>
-              {fps} FPS | {backendName}
+            <button onClick={handleReset} style={{ padding: '6px 16px' }} title="R">Reset</button>
+            {!useBundledRom && (
+              <button onClick={handleEjectRom} style={{ padding: '6px 16px' }} title="E">Eject</button>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <input
+                type="range"
+                min="0.25"
+                max="4"
+                step="0.25"
+                value={speed}
+                onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                style={{ width: '80px' }}
+                title="CPU Speed"
+              />
+              <span style={{ fontSize: '0.75rem', color: fullscreen ? '#888' : '#666', minWidth: '2.5rem' }}>
+                {speed}x
+              </span>
+            </div>
+            <span style={{ fontSize: '0.875rem', color: fullscreen ? '#888' : '#666' }}>
+              {fps} FPS
             </span>
           </div>
 
-          <div style={{ fontSize: '0.75rem', color: '#888', maxWidth: '640px', textAlign: 'center' }}>
+          {/* Keyboard controls help */}
+          <div style={{ fontSize: '0.75rem', color: '#888', maxWidth: '360px', textAlign: 'center' }}>
             <p><strong>Keyboard Controls:</strong></p>
             <p>Numbers: 0-9 | Arrows: Navigate | Enter: Enter | Backspace: Del</p>
-            <p>+, -, *, / : Math operations | ( ) : Parentheses | O: ON key</p>
-            <p>Shift: 2nd | Alt: Alpha | Escape: Mode</p>
+            <p>+, -, *, / : Math | ( ) : Parens | ^: Power | V: √</p>
+            <p>Shift: 2nd | Alt: Alpha | Escape: Mode | O: ON | Space: Pause</p>
           </div>
         </>
       )}

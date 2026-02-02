@@ -1,3 +1,6 @@
+# ROM files (proprietary)
+*.rom
+
 # Logs
 logs
 *.log
