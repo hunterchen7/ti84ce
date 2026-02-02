@@ -1,32 +1,4 @@
-# Cargo configuration for TI-84 CE Emulator
-# These aliases let you run debug commands more easily
-# Run from the core/ directory
-
-[alias]
-# Debug tool shortcuts
-# Usage: cd core && cargo <alias>
-
-# Boot test - run emulator and show boot progress
-boot = "run --release --example debug -- boot"
-
-# Render screen to PNG after boot
-screen = "run --release --example debug -- screen"
-
-# Analyze VRAM colors
-vram = "run --release --example debug -- vram"
-
-# Generate trace (default 100k steps)
-# For more steps: cargo run --release --example debug -- trace 1000000
-trace = "run --release --example debug -- trace"
-
-# Run calculation test (e.g., cargo calc 6+7)
-calc = "run --release --example debug -- calc"
-
-# Show debug tool help
-dbg = "run --release --example debug -- help"
-
-# Quick test - run all tests
-t = "test"
-
-# Release build
-rb = "build --release"
+[target.wasm32-unknown-unknown]
+# Increase initial memory to 32MB for the emulator
+# (4MB flash + 256KB RAM + framebuffer + overhead)
+rustflags = ["-C", "link-args=--initial-memory=33554432"]
