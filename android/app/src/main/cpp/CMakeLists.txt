@@ -4,32 +4,23 @@ project("emu_jni")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Option to use CEmu backend instead of Rust
-option(USE_CEMU_BACKEND "Use CEmu reference emulator instead of Rust implementation" OFF)
+# Options to control which backends to build
+option(BUILD_RUST_BACKEND "Build Rust emulator backend" ON)
+option(BUILD_CEMU_BACKEND "Build CEmu reference backend" OFF)
 
-if(USE_CEMU_BACKEND)
-    message(STATUS "Using CEmu backend")
+# At least one backend must be enabled
+if(NOT BUILD_RUST_BACKEND AND NOT BUILD_CEMU_BACKEND)
+    message(FATAL_ERROR "At least one backend must be enabled (BUILD_RUST_BACKEND or BUILD_CEMU_BACKEND)")
+endif()
 
-    # Include CEmu build configuration
-    add_subdirectory(cemu)
+# Common include directory for emu.h
+set(EMU_INCLUDE_DIR "${CMAKE_SOURCE_DIR}/../../../../../core/include")
 
-    # JNI bridge library using CEmu
-    add_library(${CMAKE_PROJECT_NAME} SHARED
-        jni.cpp
-    )
-
-    target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/cemu
-    )
-
-    target_link_libraries(${CMAKE_PROJECT_NAME}
-        cemu_adapter
-        android
-        log
-    )
-
-else()
-    message(STATUS "Using Rust backend")
+# ============================================================
+# Rust Backend (libemu_rust.so)
+# ============================================================
+if(BUILD_RUST_BACKEND)
+    message(STATUS "Building Rust backend")
 
     # Path to Rust core
     set(RUST_CORE_DIR "${CMAKE_SOURCE_DIR}/../../../../../core")
@@ -87,20 +78,78 @@ else()
     )
     add_custom_target(rust_core DEPENDS ${RUST_LIB})
 
-    # JNI bridge library
-    add_library(${CMAKE_PROJECT_NAME} SHARED
-        jni.cpp
+    # Rust backend shared library
+    add_library(emu_rust SHARED
+        backend_wrapper.cpp
     )
 
-    add_dependencies(${CMAKE_PROJECT_NAME} rust_core)
+    add_dependencies(emu_rust rust_core)
 
-    target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
+    target_include_directories(emu_rust PRIVATE
         ${RUST_INCLUDE_DIR}
     )
 
-    target_link_libraries(${CMAKE_PROJECT_NAME}
+    target_compile_definitions(emu_rust PRIVATE
+        BACKEND_NAME="rust"
+    )
+
+    target_link_libraries(emu_rust
         emu_core
         android
         log
     )
 endif()
+
+# ============================================================
+# CEmu Backend (libemu_cemu.so)
+# ============================================================
+if(BUILD_CEMU_BACKEND)
+    message(STATUS "Building CEmu backend")
+
+    # Include CEmu build configuration
+    add_subdirectory(cemu)
+
+    # CEmu backend shared library
+    add_library(emu_cemu SHARED
+        backend_wrapper.cpp
+    )
+
+    target_include_directories(emu_cemu PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/cemu
+    )
+
+    target_compile_definitions(emu_cemu PRIVATE
+        BACKEND_NAME="cemu"
+    )
+
+    target_link_libraries(emu_cemu
+        cemu_adapter
+        android
+        log
+    )
+endif()
+
+# ============================================================
+# JNI Bridge Library (libemu_jni.so)
+# This library provides the JNI interface and dynamically loads backends
+# ============================================================
+add_library(emu_jni SHARED
+    jni_loader.cpp
+)
+
+target_include_directories(emu_jni PRIVATE
+    ${EMU_INCLUDE_DIR}
+)
+
+# Pass which backends are available as compile definitions
+if(BUILD_RUST_BACKEND)
+    target_compile_definitions(emu_jni PRIVATE HAS_RUST_BACKEND=1)
+endif()
+if(BUILD_CEMU_BACKEND)
+    target_compile_definitions(emu_jni PRIVATE HAS_CEMU_BACKEND=1)
+endif()
+
+target_link_libraries(emu_jni
+    android
+    log
+)

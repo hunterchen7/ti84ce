@@ -1,24 +1,63 @@
 package com.calc.emulator
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
 
 /**
- * JNI bridge to the Rust emulator core.
- * Wraps native functions with a Kotlin-friendly API.
+ * JNI bridge to the emulator core with dynamic backend support.
+ * Supports switching between Rust and CEmu backends at runtime.
  */
 class EmulatorBridge {
     companion object {
         private const val TAG = "EmulatorBridge"
 
+        // Singleton-like initialization tracking
+        private var initialized = false
+
         init {
             try {
                 System.loadLibrary("emu_jni")
-                Log.i(TAG, "Native library loaded successfully")
+                Log.i(TAG, "JNI loader library loaded successfully")
             } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Failed to load native library", e)
+                Log.e(TAG, "Failed to load JNI loader library", e)
             }
         }
+
+        /**
+         * Initialize the native library with the native library directory.
+         * Must be called once before any other operations.
+         */
+        fun initialize(context: Context) {
+            if (!initialized) {
+                val nativeLibDir = context.applicationInfo.nativeLibraryDir
+                nativeInit(nativeLibDir)
+                initialized = true
+                Log.i(TAG, "Initialized with native lib dir: $nativeLibDir")
+            }
+        }
+
+        /**
+         * Get list of available backend names.
+         * @return List of backend names (e.g., ["rust", "cemu"])
+         */
+        fun getAvailableBackends(): List<String> {
+            return nativeGetAvailableBackends()?.toList() ?: emptyList()
+        }
+
+        /**
+         * Check if multiple backends are available (show settings toggle).
+         */
+        fun hasMultipleBackends(): Boolean {
+            return getAvailableBackends().size > 1
+        }
+
+        // Static native methods
+        @JvmStatic
+        private external fun nativeInit(nativeLibDir: String)
+
+        @JvmStatic
+        private external fun nativeGetAvailableBackends(): Array<String>?
     }
 
     // Native handle (pointer to Emu struct)
@@ -30,6 +69,37 @@ class EmulatorBridge {
 
     // Pixel buffer for framebuffer transfer
     private var pixelBuffer: IntArray = IntArray(width * height)
+
+    /**
+     * Get the currently active backend name.
+     * @return Backend name or null if none loaded
+     */
+    fun getCurrentBackend(): String? {
+        return nativeGetCurrentBackend()
+    }
+
+    /**
+     * Switch to a different backend.
+     * This will destroy the current emulator instance if one exists.
+     * After calling this, you must call create() again.
+     *
+     * @param backendName Name of the backend (e.g., "rust" or "cemu")
+     * @return true if successful
+     */
+    fun setBackend(backendName: String): Boolean {
+        if (handle != 0L) {
+            Log.w(TAG, "Destroying existing emulator before backend switch")
+            destroy()
+        }
+
+        val success = nativeSetBackend(backendName)
+        if (success) {
+            Log.i(TAG, "Backend switched to: $backendName")
+        } else {
+            Log.e(TAG, "Failed to switch backend to: $backendName")
+        }
+        return success
+    }
 
     /**
      * Create the emulator instance.
@@ -53,7 +123,7 @@ class EmulatorBridge {
         height = nativeGetHeight(handle)
         pixelBuffer = IntArray(width * height)
 
-        Log.i(TAG, "Emulator created: ${width}x${height}")
+        Log.i(TAG, "Emulator created: ${width}x${height} (backend: ${getCurrentBackend()})")
         return true
     }
 
@@ -191,7 +261,9 @@ class EmulatorBridge {
         return nativeIsLcdOn(handle)
     }
 
-    // Native methods
+    // Instance native methods
+    private external fun nativeGetCurrentBackend(): String?
+    private external fun nativeSetBackend(backendName: String): Boolean
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
     private external fun nativeLoadRom(handle: Long, romBytes: ByteArray): Int

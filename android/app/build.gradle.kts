@@ -33,9 +33,29 @@ android {
             cmake {
                 cppFlags += "-std=c++17"
                 arguments += "-DANDROID_STL=c++_shared"
-                // Support CEmu backend via: ./gradlew assembleDebug -PuseCemu=true
-                if (project.hasProperty("useCemu") && project.property("useCemu") == "true") {
-                    arguments += "-DUSE_CEMU_BACKEND=ON"
+
+                // Backend selection:
+                // - BUILD_RUST_BACKEND (default: ON) - Build Rust emulator backend
+                // - BUILD_CEMU_BACKEND (default: OFF) - Build CEmu reference backend
+                //
+                // Examples:
+                //   ./gradlew assembleDebug                           # Rust only (default)
+                //   ./gradlew assembleDebug -PbuildCemu=true          # Both backends
+                //   ./gradlew assembleDebug -PbuildRust=false -PbuildCemu=true  # CEmu only
+
+                val buildRust = !project.hasProperty("buildRust") || project.property("buildRust") == "true"
+                val buildCemu = project.hasProperty("buildCemu") && project.property("buildCemu") == "true"
+
+                if (buildRust) {
+                    arguments += "-DBUILD_RUST_BACKEND=ON"
+                } else {
+                    arguments += "-DBUILD_RUST_BACKEND=OFF"
+                }
+
+                if (buildCemu) {
+                    arguments += "-DBUILD_CEMU_BACKEND=ON"
+                } else {
+                    arguments += "-DBUILD_CEMU_BACKEND=OFF"
                 }
             }
         }
