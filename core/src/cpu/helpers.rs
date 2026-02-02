@@ -664,6 +664,7 @@ impl Cpu {
     }
 
     /// Get register pair for push/pop (0=BC, 1=DE, 2=HL, 3=AF)
+    #[allow(dead_code)]
     pub(super) fn get_rp2(&self, idx: u8) -> u16 {
         match idx {
             0 => self.bc as u16,
@@ -675,6 +676,7 @@ impl Cpu {
     }
 
     /// Set register pair for push/pop
+    #[allow(dead_code)]
     pub(super) fn set_rp2(&mut self, idx: u8, val: u16) {
         match idx {
             0 => {

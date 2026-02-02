@@ -308,6 +308,38 @@ impl Timer {
     pub fn write_control(&mut self, value: u8) {
         self.control = value;
     }
+
+    // ========== State Persistence ==========
+
+    /// Get accumulated cycles
+    pub fn accum_cycles(&self) -> u32 {
+        self.accum_cycles
+    }
+
+    /// Set counter value directly
+    pub fn set_counter(&mut self, value: u32) {
+        self.counter = value;
+    }
+
+    /// Set reset value directly
+    pub fn set_reset_value(&mut self, value: u32) {
+        self.reset_value = value;
+    }
+
+    /// Set match1 value directly
+    pub fn set_match1(&mut self, value: u32) {
+        self.match1 = value;
+    }
+
+    /// Set match2 value directly
+    pub fn set_match2(&mut self, value: u32) {
+        self.match2 = value;
+    }
+
+    /// Set accumulated cycles directly
+    pub fn set_accum_cycles(&mut self, value: u32) {
+        self.accum_cycles = value;
+    }
 }
 
 impl Default for Timer {

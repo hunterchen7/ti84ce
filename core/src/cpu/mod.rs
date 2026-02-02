@@ -459,6 +459,141 @@ impl Cpu {
     }
 }
 
+// ========== State Persistence ==========
+
+impl Cpu {
+    /// Size of CPU state snapshot in bytes
+    pub const SNAPSHOT_SIZE: usize = 64;
+
+    /// Save CPU state to bytes for persistence
+    pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
+        let mut buf = [0u8; Self::SNAPSHOT_SIZE];
+        let mut pos = 0;
+
+        // Main registers (11 bytes)
+        buf[pos] = self.a; pos += 1;
+        buf[pos] = self.f; pos += 1;
+        buf[pos..pos+3].copy_from_slice(&self.bc.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.de.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.hl.to_le_bytes()[..3]); pos += 3;
+
+        // Shadow registers (11 bytes)
+        buf[pos] = self.a_prime; pos += 1;
+        buf[pos] = self.f_prime; pos += 1;
+        buf[pos..pos+3].copy_from_slice(&self.bc_prime.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.de_prime.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.hl_prime.to_le_bytes()[..3]); pos += 3;
+
+        // Index registers (6 bytes)
+        buf[pos..pos+3].copy_from_slice(&self.ix.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.iy.to_le_bytes()[..3]); pos += 3;
+
+        // Special registers (10 bytes)
+        buf[pos..pos+3].copy_from_slice(&self.sp.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.pc.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+2].copy_from_slice(&self.i.to_le_bytes()); pos += 2;
+        buf[pos] = self.r; pos += 1;
+        buf[pos] = self.mbase; pos += 1;
+
+        // State flags as bitmask (1 byte)
+        let mut flags = 0u8;
+        if self.iff1 { flags |= 1 << 0; }
+        if self.iff2 { flags |= 1 << 1; }
+        if self.adl { flags |= 1 << 2; }
+        if self.halted { flags |= 1 << 3; }
+        if self.irq_pending { flags |= 1 << 4; }
+        if self.nmi_pending { flags |= 1 << 5; }
+        if self.on_key_wake { flags |= 1 << 6; }
+        if self.any_key_wake { flags |= 1 << 7; }
+        buf[pos] = flags; pos += 1;
+
+        // IM mode (1 byte)
+        buf[pos] = match self.im {
+            InterruptMode::Mode0 => 0,
+            InterruptMode::Mode1 => 1,
+            InterruptMode::Mode2 => 2,
+        }; pos += 1;
+
+        // Internal state (5 bytes)
+        buf[pos] = self.ei_delay; pos += 1;
+        let mut mode_flags = 0u8;
+        if self.l { mode_flags |= 1 << 0; }
+        if self.il { mode_flags |= 1 << 1; }
+        if self.suffix { mode_flags |= 1 << 2; }
+        if self.madl { mode_flags |= 1 << 3; }
+        buf[pos] = mode_flags; pos += 1;
+        buf[pos] = self.prefix; pos += 1;
+
+        // Padding to SNAPSHOT_SIZE
+        let _ = pos; // Unused beyond here
+
+        buf
+    }
+
+    /// Load CPU state from bytes
+    pub fn from_bytes(&mut self, buf: &[u8]) -> Result<(), i32> {
+        if buf.len() < Self::SNAPSHOT_SIZE {
+            return Err(-105); // Buffer too small
+        }
+
+        let mut pos = 0;
+
+        // Main registers
+        self.a = buf[pos]; pos += 1;
+        self.f = buf[pos]; pos += 1;
+        self.bc = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.de = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.hl = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+
+        // Shadow registers
+        self.a_prime = buf[pos]; pos += 1;
+        self.f_prime = buf[pos]; pos += 1;
+        self.bc_prime = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.de_prime = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.hl_prime = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+
+        // Index registers
+        self.ix = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.iy = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+
+        // Special registers
+        self.sp = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.pc = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.i = u16::from_le_bytes([buf[pos], buf[pos+1]]); pos += 2;
+        self.r = buf[pos]; pos += 1;
+        self.mbase = buf[pos]; pos += 1;
+
+        // State flags
+        let flags = buf[pos]; pos += 1;
+        self.iff1 = flags & (1 << 0) != 0;
+        self.iff2 = flags & (1 << 1) != 0;
+        self.adl = flags & (1 << 2) != 0;
+        self.halted = flags & (1 << 3) != 0;
+        self.irq_pending = flags & (1 << 4) != 0;
+        self.nmi_pending = flags & (1 << 5) != 0;
+        self.on_key_wake = flags & (1 << 6) != 0;
+        self.any_key_wake = flags & (1 << 7) != 0;
+
+        // IM mode
+        self.im = match buf[pos] {
+            0 => InterruptMode::Mode0,
+            1 => InterruptMode::Mode1,
+            _ => InterruptMode::Mode2,
+        }; pos += 1;
+
+        // Internal state
+        self.ei_delay = buf[pos]; pos += 1;
+        let mode_flags = buf[pos]; pos += 1;
+        self.l = mode_flags & (1 << 0) != 0;
+        self.il = mode_flags & (1 << 1) != 0;
+        self.suffix = mode_flags & (1 << 2) != 0;
+        self.madl = mode_flags & (1 << 3) != 0;
+        self.prefix = buf[pos];
+
+        Ok(())
+    }
+}
+
 impl Default for Cpu {
     fn default() -> Self {
         Self::new()

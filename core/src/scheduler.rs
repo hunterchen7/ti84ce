@@ -282,6 +282,54 @@ impl Scheduler {
     }
 }
 
+// ========== State Persistence ==========
+
+impl Scheduler {
+    /// Size of scheduler state snapshot in bytes
+    /// 8 (base_ticks) + 8 (cpu_cycles) + 1 (cpu_speed) + 7*8 (item timestamps) = 73 bytes, round to 80
+    pub const SNAPSHOT_SIZE: usize = 80;
+
+    /// Save scheduler state to bytes
+    pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
+        let mut buf = [0u8; Self::SNAPSHOT_SIZE];
+        let mut pos = 0;
+
+        // Base timing state
+        buf[pos..pos+8].copy_from_slice(&self.base_ticks.to_le_bytes()); pos += 8;
+        buf[pos..pos+8].copy_from_slice(&self.cpu_cycles.to_le_bytes()); pos += 8;
+        buf[pos] = self.cpu_speed; pos += 1;
+
+        // Event timestamps (7 events × 8 bytes each)
+        for item in &self.items {
+            buf[pos..pos+8].copy_from_slice(&item.timestamp.to_le_bytes());
+            pos += 8;
+        }
+
+        buf
+    }
+
+    /// Load scheduler state from bytes
+    pub fn from_bytes(&mut self, buf: &[u8]) -> Result<(), i32> {
+        if buf.len() < Self::SNAPSHOT_SIZE {
+            return Err(-105);
+        }
+
+        let mut pos = 0;
+
+        self.base_ticks = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
+        self.cpu_cycles = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
+        self.cpu_speed = buf[pos]; pos += 1;
+
+        // Event timestamps
+        for item in &mut self.items {
+            item.timestamp = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap());
+            pos += 8;
+        }
+
+        Ok(())
+    }
+}
+
 impl Default for Scheduler {
     fn default() -> Self {
         Self::new()

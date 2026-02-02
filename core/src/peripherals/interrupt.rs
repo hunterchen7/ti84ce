@@ -185,6 +185,48 @@ impl InterruptController {
     pub fn enabled(&self) -> u32 {
         self.banks[0].enabled
     }
+
+    // ========== State Persistence ==========
+
+    /// Get status word for a bank (0 or 1)
+    pub fn status_word(&self, bank: usize) -> u32 {
+        self.banks[bank.min(1)].status
+    }
+
+    /// Get enabled word for a bank
+    pub fn enabled_word(&self, bank: usize) -> u32 {
+        self.banks[bank.min(1)].enabled
+    }
+
+    /// Get latched word for a bank
+    pub fn latched_word(&self, bank: usize) -> u32 {
+        self.banks[bank.min(1)].latched
+    }
+
+    /// Get inverted word for a bank
+    pub fn inverted_word(&self, bank: usize) -> u32 {
+        self.banks[bank.min(1)].inverted
+    }
+
+    /// Set status word for a bank
+    pub fn set_status_word(&mut self, bank: usize, value: u32) {
+        self.banks[bank.min(1)].status = value;
+    }
+
+    /// Set enabled word for a bank
+    pub fn set_enabled_word(&mut self, bank: usize, value: u32) {
+        self.banks[bank.min(1)].enabled = value;
+    }
+
+    /// Set latched word for a bank
+    pub fn set_latched_word(&mut self, bank: usize, value: u32) {
+        self.banks[bank.min(1)].latched = value;
+    }
+
+    /// Set inverted word for a bank
+    pub fn set_inverted_word(&mut self, bank: usize, value: u32) {
+        self.banks[bank.min(1)].inverted = value;
+    }
 }
 
 impl Default for InterruptController {

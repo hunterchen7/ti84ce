@@ -57,7 +57,9 @@ const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
 const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
 const RTC_END: u32 = 0x180100;
+#[allow(dead_code)]
 const BACKLIGHT_BASE: u32 = 0x1B0000; // 0xFB0000
+#[allow(dead_code)]
 const BACKLIGHT_END: u32 = 0x1B0100;
 
 /// Peripheral subsystem containing all hardware controllers
@@ -308,6 +310,7 @@ impl Peripherals {
 
                 // DIAGNOSTIC: Unconditional log to see if writes go through here
                 static mut WRITE_COUNT: u32 = 0;
+                #[allow(static_mut_refs)]
                 unsafe {
                     WRITE_COUNT += 1;
                     if WRITE_COUNT % 10000 == 1 {
@@ -427,6 +430,7 @@ impl Peripherals {
 
         // Debug: OS Timer state tracking
         static mut OS_TIMER_DEBUG_COUNT: u64 = 0;
+        #[allow(static_mut_refs)]
         unsafe {
             OS_TIMER_DEBUG_COUNT += 1;
             if OS_TIMER_DEBUG_COUNT % 5000000 == 1 {
@@ -490,6 +494,208 @@ impl Peripherals {
     /// Check if any interrupt is pending
     pub fn irq_pending(&self) -> bool {
         self.interrupt.irq_pending()
+    }
+
+    // ========== State Persistence ==========
+
+    /// Size of peripheral state snapshot in bytes
+    /// Control(32) + Flash(8) + Interrupt(32) + Timers(3×24) + LCD(40) + Keypad(16) + RTC(16) + OS Timer(16) + KeyState(8) + padding = ~256
+    pub const SNAPSHOT_SIZE: usize = 256;
+
+    /// Save peripheral state to bytes
+    pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
+        let mut buf = [0u8; Self::SNAPSHOT_SIZE];
+        let mut pos = 0;
+
+        // Control ports - essential registers (32 bytes)
+        buf[pos] = self.control.read(0x00); pos += 1;  // power
+        buf[pos] = self.control.read(0x01); pos += 1;  // cpu_speed
+        buf[pos] = self.control.read(0x03); pos += 1;  // device_type
+        buf[pos] = self.control.read(0x05); pos += 1;  // control_flags
+        buf[pos] = self.control.read(0x06); pos += 1;  // unlock_status
+        buf[pos] = self.control.read(0x0D); pos += 1;  // lcd_enable
+        buf[pos] = self.control.read(0x0F); pos += 1;  // usb_control
+        buf[pos] = self.control.read(0x28); pos += 1;  // flash_unlock
+        // Privileged boundary (3 bytes at 0x1D-0x1F)
+        buf[pos] = self.control.read(0x1D); pos += 1;
+        buf[pos] = self.control.read(0x1E); pos += 1;
+        buf[pos] = self.control.read(0x1F); pos += 1;
+        // Protected port boundaries (6 bytes at 0x20-0x25)
+        buf[pos] = self.control.read(0x20); pos += 1;
+        buf[pos] = self.control.read(0x21); pos += 1;
+        buf[pos] = self.control.read(0x22); pos += 1;
+        buf[pos] = self.control.read(0x23); pos += 1;
+        buf[pos] = self.control.read(0x24); pos += 1;
+        buf[pos] = self.control.read(0x25); pos += 1;
+        pos += 15; // Padding to 32 bytes
+
+        // Flash controller (8 bytes)
+        buf[pos] = self.flash.read(0x00); pos += 1;  // enabled
+        buf[pos] = self.flash.read(0x01); pos += 1;  // size_config
+        buf[pos] = self.flash.read(0x02); pos += 1;  // map_select
+        buf[pos] = self.flash.read(0x05); pos += 1;  // wait_states
+        pos += 4; // Padding to 8 bytes
+
+        // Interrupt controller (32 bytes)
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.status_word(0).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.status_word(1).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.enabled_word(0).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.enabled_word(1).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.latched_word(0).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.latched_word(1).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.inverted_word(0).to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.interrupt.inverted_word(1).to_le_bytes()); pos += 4;
+
+        // Timer 1 (24 bytes)
+        buf[pos..pos+4].copy_from_slice(&self.timer1.counter().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer1.reset_value().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer1.match1().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer1.match2().to_le_bytes()); pos += 4;
+        buf[pos] = self.timer1.read_control(); pos += 1;
+        buf[pos..pos+4].copy_from_slice(&self.timer1.accum_cycles().to_le_bytes()); pos += 4;
+        pos += 3; // Padding to 24 bytes
+
+        // Timer 2 (24 bytes)
+        buf[pos..pos+4].copy_from_slice(&self.timer2.counter().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer2.reset_value().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer2.match1().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer2.match2().to_le_bytes()); pos += 4;
+        buf[pos] = self.timer2.read_control(); pos += 1;
+        buf[pos..pos+4].copy_from_slice(&self.timer2.accum_cycles().to_le_bytes()); pos += 4;
+        pos += 3; // Padding to 24 bytes
+
+        // Timer 3 (24 bytes)
+        buf[pos..pos+4].copy_from_slice(&self.timer3.counter().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer3.reset_value().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer3.match1().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timer3.match2().to_le_bytes()); pos += 4;
+        buf[pos] = self.timer3.read_control(); pos += 1;
+        buf[pos..pos+4].copy_from_slice(&self.timer3.accum_cycles().to_le_bytes()); pos += 4;
+        pos += 3; // Padding to 24 bytes
+
+        // LCD controller (24 bytes)
+        buf[pos..pos+4].copy_from_slice(&self.lcd.control().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.lcd.upbase().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.lcd.int_mask().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.lcd.int_status().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.lcd.frame_cycles().to_le_bytes()); pos += 4;
+        pos += 4; // Padding
+
+        // OS Timer state (16 bytes)
+        buf[pos] = if self.os_timer_state { 1 } else { 0 }; pos += 1;
+        pos += 7; // Align to 8 bytes
+        buf[pos..pos+8].copy_from_slice(&self.os_timer_cycles.to_le_bytes()); pos += 8;
+
+        // Key state as bit-packed (8 bytes - 64 bits for 8x8 matrix)
+        for row in 0..KEYPAD_ROWS {
+            let mut row_bits = 0u8;
+            for col in 0..KEYPAD_COLS {
+                if self.key_state[row][col] {
+                    row_bits |= 1 << col;
+                }
+            }
+            buf[pos] = row_bits;
+            pos += 1;
+        }
+
+        buf
+    }
+
+    /// Load peripheral state from bytes
+    pub fn from_bytes(&mut self, buf: &[u8]) -> Result<(), i32> {
+        if buf.len() < Self::SNAPSHOT_SIZE {
+            return Err(-105);
+        }
+
+        let mut pos = 0;
+
+        // Control ports
+        self.control.write(0x00, buf[pos]); pos += 1;
+        self.control.write(0x01, buf[pos]); pos += 1;
+        self.control.write(0x03, buf[pos]); pos += 1;
+        self.control.write(0x05, buf[pos]); pos += 1;
+        self.control.write(0x06, buf[pos]); pos += 1;
+        self.control.write(0x0D, buf[pos]); pos += 1;
+        self.control.write(0x0F, buf[pos]); pos += 1;
+        self.control.write(0x28, buf[pos]); pos += 1;
+        self.control.write(0x1D, buf[pos]); pos += 1;
+        self.control.write(0x1E, buf[pos]); pos += 1;
+        self.control.write(0x1F, buf[pos]); pos += 1;
+        self.control.write(0x20, buf[pos]); pos += 1;
+        self.control.write(0x21, buf[pos]); pos += 1;
+        self.control.write(0x22, buf[pos]); pos += 1;
+        self.control.write(0x23, buf[pos]); pos += 1;
+        self.control.write(0x24, buf[pos]); pos += 1;
+        self.control.write(0x25, buf[pos]); pos += 1;
+        pos += 15;
+
+        // Flash controller
+        self.flash.write(0x00, buf[pos]); pos += 1;
+        self.flash.write(0x01, buf[pos]); pos += 1;
+        self.flash.write(0x02, buf[pos]); pos += 1;
+        self.flash.write(0x05, buf[pos]); pos += 1;
+        pos += 4;
+
+        // Interrupt controller
+        self.interrupt.set_status_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_status_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_enabled_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_enabled_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_latched_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_latched_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_inverted_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt.set_inverted_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+
+        // Timer 1
+        self.timer1.set_counter(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer1.set_reset_value(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer1.set_match1(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer1.set_match2(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer1.write_control(buf[pos]); pos += 1;
+        self.timer1.set_accum_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        pos += 3;
+
+        // Timer 2
+        self.timer2.set_counter(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer2.set_reset_value(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer2.set_match1(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer2.set_match2(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer2.write_control(buf[pos]); pos += 1;
+        self.timer2.set_accum_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        pos += 3;
+
+        // Timer 3
+        self.timer3.set_counter(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer3.set_reset_value(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer3.set_match1(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer3.set_match2(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timer3.write_control(buf[pos]); pos += 1;
+        self.timer3.set_accum_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        pos += 3;
+
+        // LCD controller
+        self.lcd.set_control(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_upbase(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_int_mask(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_int_status(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_frame_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        pos += 4;
+
+        // OS Timer state
+        self.os_timer_state = buf[pos] != 0; pos += 1;
+        pos += 7;
+        self.os_timer_cycles = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
+
+        // Key state
+        for row in 0..KEYPAD_ROWS {
+            let row_bits = buf[pos];
+            for col in 0..KEYPAD_COLS {
+                self.key_state[row][col] = (row_bits & (1 << col)) != 0;
+            }
+            pos += 1;
+        }
+
+        Ok(())
     }
 }
 

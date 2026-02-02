@@ -238,6 +238,33 @@ impl LcdController {
             _ => {}
         }
     }
+
+    // ========== State Persistence ==========
+
+    /// Set control register directly
+    pub fn set_control(&mut self, value: u32) {
+        self.control = value;
+    }
+
+    /// Set upbase directly
+    pub fn set_upbase(&mut self, value: u32) {
+        self.upbase = value;
+    }
+
+    /// Set interrupt mask directly
+    pub fn set_int_mask(&mut self, value: u32) {
+        self.int_mask = value;
+    }
+
+    /// Set interrupt status directly
+    pub fn set_int_status(&mut self, value: u32) {
+        self.int_status = value;
+    }
+
+    /// Set frame cycles directly
+    pub fn set_frame_cycles(&mut self, value: u32) {
+        self.frame_cycles = value;
+    }
 }
 
 impl Default for LcdController {

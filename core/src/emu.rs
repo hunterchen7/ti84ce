@@ -25,6 +25,7 @@ static INST_TRACE_ARMED: AtomicBool = AtomicBool::new(false);
 static INST_TRACE_ARMED_LIMIT: AtomicU32 = AtomicU32::new(0);
 
 /// Enable instruction tracing (logs every instruction to log callback)
+#[allow(dead_code)]
 pub fn enable_inst_trace(limit: u32) {
     INST_TRACE_COUNT.store(0, Ordering::SeqCst);
     INST_TRACE_LIMIT.store(limit, Ordering::SeqCst);
@@ -34,6 +35,7 @@ pub fn enable_inst_trace(limit: u32) {
 
 /// Arm instruction tracing to start when CPU wakes from HALT
 /// This avoids tracing HALT loops - only traces after wake event
+#[allow(dead_code)]
 pub fn arm_inst_trace_on_wake(limit: u32) {
     INST_TRACE_ARMED_LIMIT.store(limit, Ordering::SeqCst);
     INST_TRACE_ARMED.store(true, Ordering::SeqCst);
@@ -41,6 +43,7 @@ pub fn arm_inst_trace_on_wake(limit: u32) {
 }
 
 /// Disable instruction tracing
+#[allow(dead_code)]
 pub fn disable_inst_trace() {
     INST_TRACE_ENABLED.store(false, Ordering::SeqCst);
     INST_TRACE_ARMED.store(false, Ordering::SeqCst);
@@ -48,6 +51,7 @@ pub fn disable_inst_trace() {
 }
 
 /// Check if instruction tracing is enabled
+#[allow(dead_code)]
 pub fn is_inst_trace_enabled() -> bool {
     INST_TRACE_ENABLED.load(Ordering::Relaxed)
 }
@@ -728,19 +732,175 @@ impl Emu {
         }
     }
 
-    /// Get save state size (stub)
+    // ========== State Persistence ==========
+
+    /// State format version
+    const STATE_VERSION: u32 = 1;
+    /// Magic bytes for state file identification
+    const STATE_MAGIC: [u8; 4] = *b"CE84";
+    /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
+    const STATE_HEADER_SIZE: usize = 20;
+    /// Metadata size: powered_on(1) + total_cycles(8) + boot_init_done(1) + padding(6) = 16
+    const STATE_META_SIZE: usize = 16;
+
+    /// Compute a simple hash of the ROM for state validation
+    fn compute_rom_hash(&self) -> u64 {
+        // FNV-1a hash of first 64KB of ROM (fast, good distribution)
+        let mut hash: u64 = 0xcbf29ce484222325;
+        let rom_data = self.bus.flash.data();
+        let len = rom_data.len().min(65536);
+        for &byte in &rom_data[..len] {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// Get size required for save state buffer
     pub fn save_state_size(&self) -> usize {
-        1024 // Placeholder
+        use crate::cpu::Cpu;
+        use crate::memory::addr::RAM_SIZE;
+        use crate::peripherals::Peripherals;
+        use crate::scheduler::Scheduler;
+
+        Self::STATE_HEADER_SIZE
+            + Cpu::SNAPSHOT_SIZE
+            + Scheduler::SNAPSHOT_SIZE
+            + Peripherals::SNAPSHOT_SIZE
+            + Self::STATE_META_SIZE
+            + RAM_SIZE
     }
 
-    /// Save state to buffer (stub)
-    pub fn save_state(&self, _buffer: &mut [u8]) -> Result<usize, i32> {
-        Err(-100) // Not implemented
+    /// Save emulator state to buffer
+    /// Returns number of bytes written on success
+    pub fn save_state(&self, buffer: &mut [u8]) -> Result<usize, i32> {
+        use crate::cpu::Cpu;
+        use crate::memory::addr::RAM_SIZE;
+        use crate::peripherals::Peripherals;
+        use crate::scheduler::Scheduler;
+
+        let required = self.save_state_size();
+        if buffer.len() < required {
+            return Err(-101); // Buffer too small
+        }
+
+        let mut pos = 0;
+
+        // Write header
+        buffer[pos..pos+4].copy_from_slice(&Self::STATE_MAGIC);
+        pos += 4;
+        buffer[pos..pos+4].copy_from_slice(&Self::STATE_VERSION.to_le_bytes());
+        pos += 4;
+        buffer[pos..pos+8].copy_from_slice(&self.compute_rom_hash().to_le_bytes());
+        pos += 8;
+        let data_len = (required - Self::STATE_HEADER_SIZE) as u32;
+        buffer[pos..pos+4].copy_from_slice(&data_len.to_le_bytes());
+        pos += 4;
+
+        // Write CPU state
+        let cpu_bytes = self.cpu.to_bytes();
+        buffer[pos..pos+Cpu::SNAPSHOT_SIZE].copy_from_slice(&cpu_bytes);
+        pos += Cpu::SNAPSHOT_SIZE;
+
+        // Write scheduler state
+        let sched_bytes = self.scheduler.to_bytes();
+        buffer[pos..pos+Scheduler::SNAPSHOT_SIZE].copy_from_slice(&sched_bytes);
+        pos += Scheduler::SNAPSHOT_SIZE;
+
+        // Write peripheral state
+        let periph_bytes = self.bus.ports.to_bytes();
+        buffer[pos..pos+Peripherals::SNAPSHOT_SIZE].copy_from_slice(&periph_bytes);
+        pos += Peripherals::SNAPSHOT_SIZE;
+
+        // Write Emu metadata
+        buffer[pos] = if self.powered_on { 1 } else { 0 }; pos += 1;
+        buffer[pos..pos+8].copy_from_slice(&self.total_cycles.to_le_bytes()); pos += 8;
+        buffer[pos] = if self.boot_init_done { 1 } else { 0 }; pos += 1;
+        pos += 6; // Padding to 16 bytes
+
+        // Write RAM
+        let ram_data = self.bus.ram.data();
+        buffer[pos..pos+RAM_SIZE].copy_from_slice(ram_data);
+        pos += RAM_SIZE;
+
+        Self::log_event(&format!("STATE_SAVED: {} bytes", pos));
+        Ok(pos)
     }
 
-    /// Load state from buffer (stub)
-    pub fn load_state(&mut self, _buffer: &[u8]) -> Result<(), i32> {
-        Err(-100) // Not implemented
+    /// Load emulator state from buffer
+    pub fn load_state(&mut self, buffer: &[u8]) -> Result<(), i32> {
+        use crate::cpu::Cpu;
+        use crate::memory::addr::RAM_SIZE;
+        use crate::peripherals::Peripherals;
+        use crate::scheduler::Scheduler;
+
+        // Check minimum size for header
+        if buffer.len() < Self::STATE_HEADER_SIZE {
+            return Err(-102); // Invalid magic / too small
+        }
+
+        let mut pos = 0;
+
+        // Verify magic
+        if &buffer[pos..pos+4] != &Self::STATE_MAGIC {
+            return Err(-102); // Invalid magic
+        }
+        pos += 4;
+
+        // Check version
+        let version = u32::from_le_bytes(buffer[pos..pos+4].try_into().unwrap());
+        if version != Self::STATE_VERSION {
+            return Err(-103); // Version mismatch
+        }
+        pos += 4;
+
+        // Verify ROM hash
+        let saved_hash = u64::from_le_bytes(buffer[pos..pos+8].try_into().unwrap());
+        let current_hash = self.compute_rom_hash();
+        if saved_hash != current_hash {
+            return Err(-104); // ROM mismatch
+        }
+        pos += 8;
+
+        // Check data length
+        let data_len = u32::from_le_bytes(buffer[pos..pos+4].try_into().unwrap()) as usize;
+        pos += 4;
+
+        let expected_data = Cpu::SNAPSHOT_SIZE + Scheduler::SNAPSHOT_SIZE
+            + Peripherals::SNAPSHOT_SIZE + Self::STATE_META_SIZE + RAM_SIZE;
+        if data_len < expected_data || buffer.len() < pos + data_len {
+            return Err(-105); // Data corruption
+        }
+
+        // Load CPU state
+        self.cpu.from_bytes(&buffer[pos..pos+Cpu::SNAPSHOT_SIZE])?;
+        pos += Cpu::SNAPSHOT_SIZE;
+
+        // Load scheduler state
+        self.scheduler.from_bytes(&buffer[pos..pos+Scheduler::SNAPSHOT_SIZE])?;
+        pos += Scheduler::SNAPSHOT_SIZE;
+
+        // Load peripheral state
+        self.bus.ports.from_bytes(&buffer[pos..pos+Peripherals::SNAPSHOT_SIZE])?;
+        pos += Peripherals::SNAPSHOT_SIZE;
+
+        // Load Emu metadata
+        self.powered_on = buffer[pos] != 0; pos += 1;
+        self.total_cycles = u64::from_le_bytes(buffer[pos..pos+8].try_into().unwrap()); pos += 8;
+        self.boot_init_done = buffer[pos] != 0; pos += 1;
+        pos += 6; // Skip padding
+
+        // Load RAM
+        self.bus.ram.load_data(&buffer[pos..pos+RAM_SIZE]);
+
+        // Reset transient state
+        self.rom_loaded = true;
+        self.halt_logged = false;
+        self.history.clear();
+        self.last_stop = StopReason::CyclesComplete;
+
+        Self::log_event("STATE_LOADED");
+        Ok(())
     }
 
     /// Get the last stop reason

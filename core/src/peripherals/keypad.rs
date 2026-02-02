@@ -322,6 +322,7 @@ impl KeypadController {
 
     /// Compute row data from key matrix (non-destructive, current state only)
     /// Returns a bitmask where 1 = pressed, 0 = not pressed (active high, matches CEmu)
+    #[allow(dead_code)]
     fn compute_row_data(&self, row: usize, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u16 {
         let mut result = 0x0000_u16; // All keys released
 
@@ -422,6 +423,7 @@ impl KeypadController {
                     // Log data reads - log all reads when any key is pressed
                     static mut READ_LOG_COUNT: u32 = 0;
                     static mut LAST_KEY_STATE_HASH: u64 = 0;
+                    #[allow(static_mut_refs)]
                     unsafe {
                         READ_LOG_COUNT += 1;
                         // Hash of key state to detect changes
@@ -471,7 +473,7 @@ impl KeypadController {
 
     /// Read a register byte without side effects (for debugging/testing)
     /// addr is offset from controller base (0-0x3F)
-    pub fn peek(&self, addr: u32, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
+    pub fn peek(&self, addr: u32, _key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
         match addr {
             regs::CONTROL => self.control,
             // SIZE register is 4 bytes: rows, cols, mask_lo, mask_hi
