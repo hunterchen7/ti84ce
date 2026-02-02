@@ -311,15 +311,17 @@ CMAKEOF
         BRIDGE_SRC="ios/Calc/Bridge/backend_bridge.c"
         BRIDGE_OBJ="$DEST_DIR/backend_bridge.o"
 
-        # Determine SDK path
+        # Determine SDK path and clang target
         if [ "$TARGET" = "simulator" ]; then
             SDK_PATH=$(xcrun --sdk iphonesimulator --show-sdk-path)
+            CLANG_TARGET="arm64-apple-ios16.0-simulator"
         else
             SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+            CLANG_TARGET="arm64-apple-ios16.0"
         fi
 
         clang -c "$BRIDGE_SRC" -o "$BRIDGE_OBJ" \
-            -target arm64-apple-ios16.0 \
+            -target "$CLANG_TARGET" \
             -isysroot "$SDK_PATH" \
             -I ios/include \
             -DHAS_RUST_BACKEND=1 \
