@@ -31,7 +31,7 @@ pub use lcd::{LcdController, LCD_HEIGHT, LCD_WIDTH};
 pub use rtc::RtcController;
 pub use sha256::Sha256Controller;
 pub use spi::SpiController;
-pub use timer::Timer;
+pub use timer::{Timer, TimerSystem};
 pub use watchdog::WatchdogController;
 
 use interrupt::sources;
@@ -71,11 +71,13 @@ pub struct Peripherals {
     pub flash: FlashController,
     /// Interrupt controller
     pub interrupt: InterruptController,
-    /// Timer 1
+    /// Timer system (3 GPTs with global registers at 0xF20000-0xF2003F)
+    pub timers: TimerSystem,
+    /// Legacy timer 1 (kept for backward compatibility with existing code)
     pub timer1: Timer,
-    /// Timer 2
+    /// Legacy timer 2
     pub timer2: Timer,
-    /// Timer 3
+    /// Legacy timer 3
     pub timer3: Timer,
     /// LCD controller
     pub lcd: LcdController,
@@ -116,6 +118,7 @@ impl Peripherals {
             control: ControlPorts::new(),
             flash: FlashController::new(),
             interrupt: InterruptController::new(),
+            timers: TimerSystem::new(),
             timer1: Timer::new(),
             timer2: Timer::new(),
             timer3: Timer::new(),
@@ -164,6 +167,7 @@ impl Peripherals {
         self.control.reset();
         self.flash.reset();
         self.interrupt.reset();
+        self.timers.reset();
         self.timer1.reset();
         self.timer2.reset();
         self.timer3.reset();
@@ -212,27 +216,10 @@ impl Peripherals {
             a if a >= INT_BASE && a < INT_END => self.interrupt.read(a - INT_BASE),
 
             // Timers (0xF20000 - 0xF2003F)
+            // Uses TimerSystem which has proper CEmu-style global registers at 0x30-0x3F
             a if a >= TIMER_BASE && a < TIMER_END => {
                 let offset = a - TIMER_BASE;
-                if offset >= 0x30 {
-                    // Timer control registers
-                    match offset {
-                        0x30 => self.timer1.read_control(),
-                        0x34 => self.timer2.read_control(),
-                        0x38 => self.timer3.read_control(),
-                        _ => 0x00,
-                    }
-                } else {
-                    // Timer data registers (0x10 bytes per timer)
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.timer1.read(reg_offset),
-                        1 => self.timer2.read(reg_offset),
-                        2 => self.timer3.read(reg_offset),
-                        _ => 0x00,
-                    }
-                }
+                self.timers.read(offset)
             }
 
             // Keypad Controller (0xF50000 - 0xF5003F)
@@ -281,27 +268,10 @@ impl Peripherals {
             a if a >= INT_BASE && a < INT_END => self.interrupt.write(a - INT_BASE, value),
 
             // Timers (0xF20000 - 0xF2003F)
+            // Uses TimerSystem which has proper CEmu-style global registers at 0x30-0x3F
             a if a >= TIMER_BASE && a < TIMER_END => {
                 let offset = a - TIMER_BASE;
-                if offset >= 0x30 {
-                    // Timer control registers
-                    match offset {
-                        0x30 => self.timer1.write_control(value),
-                        0x34 => self.timer2.write_control(value),
-                        0x38 => self.timer3.write_control(value),
-                        _ => {}
-                    }
-                } else {
-                    // Timer data registers (0x10 bytes per timer)
-                    let timer_idx = offset / 0x10;
-                    let reg_offset = offset % 0x10;
-                    match timer_idx {
-                        0 => self.timer1.write(reg_offset, value),
-                        1 => self.timer2.write(reg_offset, value),
-                        2 => self.timer3.write(reg_offset, value),
-                        _ => {}
-                    }
-                }
+                self.timers.write(offset, value);
             }
 
             // Keypad Controller (0xF50000 - 0xF5003F)
@@ -377,7 +347,27 @@ impl Peripherals {
     /// Tick all peripherals
     /// Returns true if any interrupt is pending
     pub fn tick(&mut self, cycles: u32) -> bool {
-        // Tick timers
+        // Tick timers (using TimerSystem with global registers)
+        // Get CPU clock rate for 32K timer calculations
+        let speed = (self.control.read(0x01) & 0x03) as usize;
+        let cpu_clock: u64 = match speed {
+            0 => 6_000_000,
+            1 => 12_000_000,
+            2 => 24_000_000,
+            _ => 48_000_000,
+        };
+        let timer_irqs = self.timers.tick(cycles, cpu_clock);
+        if timer_irqs & 0x01 != 0 {
+            self.interrupt.raise(sources::TIMER1);
+        }
+        if timer_irqs & 0x02 != 0 {
+            self.interrupt.raise(sources::TIMER2);
+        }
+        if timer_irqs & 0x04 != 0 {
+            self.interrupt.raise(sources::TIMER3);
+        }
+
+        // Also tick legacy timers for backward compatibility with tests
         if self.timer1.tick(cycles) != 0 {
             self.interrupt.raise(sources::TIMER1);
         }
@@ -798,9 +788,18 @@ mod tests {
         assert_eq!(p.read_test(TIMER_BASE, &keys), 0x12);
         assert_eq!(p.read_test(TIMER_BASE + 1, &keys), 0x34);
 
-        // Write timer control
-        p.write_test(TIMER_BASE + 0x30, 0x01); // Enable timer 1
-        assert!(p.timer1.is_enabled());
+        // Write global timer control (CEmu-style)
+        p.write_test(TIMER_BASE + 0x30, 0x01); // Enable timer 1 (bit 0)
+
+        // Verify control register was written
+        assert_eq!(p.timers.control() & 0x01, 0x01);
+
+        // Test reading global registers
+        assert_eq!(p.read_test(TIMER_BASE + 0x30, &keys), 0x01); // Control
+        assert_eq!(p.read_test(TIMER_BASE + 0x3C, &keys), 0x01); // Revision LSB (0x00010801)
+        assert_eq!(p.read_test(TIMER_BASE + 0x3D, &keys), 0x08);
+        assert_eq!(p.read_test(TIMER_BASE + 0x3E, &keys), 0x01);
+        assert_eq!(p.read_test(TIMER_BASE + 0x3F, &keys), 0x00);
     }
 
     #[test]
@@ -873,8 +872,10 @@ mod tests {
     fn test_tick_timer_interrupt() {
         let mut p = Peripherals::new();
 
-        // Enable timer 1 with interrupt on overflow
-        p.timer1.write_control(0x01 | 0x02 | 0x04); // ENABLE | COUNT_UP | INT_ON_ZERO
+        // Enable timer 1 with overflow interrupt via global control register
+        // Bit 0 = enable, bit 2 = overflow interrupt enable
+        p.write_test(TIMER_BASE + 0x30, 0x05);
+
         // Set counter to max via write API
         p.write_test(TIMER_BASE, 0xFF);
         p.write_test(TIMER_BASE + 1, 0xFF);
@@ -932,25 +933,30 @@ mod tests {
     fn test_tick_multiple_timers() {
         let mut p = Peripherals::new();
 
-        // Enable all 3 timers counting up with interrupt
-        let ctrl = 0x01 | 0x02 | 0x04; // ENABLE | COUNT_UP | INT_ON_ZERO
+        // Enable all 3 timers with overflow interrupt via global control
+        // Timer 1: bit 0 (enable) + bit 2 (overflow int) = 0x05
+        // Timer 2: bit 3 (enable) + bit 5 (overflow int) = 0x28
+        // Timer 3: bit 6 (enable) + bit 8 (overflow int) = 0x140
+        // Combined: 0x05 | 0x28 | 0x140 = 0x16D
+        // But control is accessed byte-by-byte, so:
+        // Byte 0: 0x6D (bits 0-7)
+        // Byte 1: 0x01 (bits 8-15)
+        p.write_test(TIMER_BASE + 0x30, 0x6D);
+        p.write_test(TIMER_BASE + 0x31, 0x01);
 
-        p.timer1.write_control(ctrl);
-        // Set counter to 0xFFFFFFFE via write API
+        // Set counter to 0xFFFFFFFE via write API for timer 1
         p.write_test(TIMER_BASE, 0xFE);
         p.write_test(TIMER_BASE + 1, 0xFF);
         p.write_test(TIMER_BASE + 2, 0xFF);
         p.write_test(TIMER_BASE + 3, 0xFF);
 
-        p.timer2.write_control(ctrl);
-        // Set counter to 0xFFFFFFFD via write API
+        // Set counter to 0xFFFFFFFD via write API for timer 2
         p.write_test(TIMER_BASE + 0x10, 0xFD);
         p.write_test(TIMER_BASE + 0x11, 0xFF);
         p.write_test(TIMER_BASE + 0x12, 0xFF);
         p.write_test(TIMER_BASE + 0x13, 0xFF);
 
-        p.timer3.write_control(ctrl);
-        // Set counter to 0xFFFFFFFC via write API
+        // Set counter to 0xFFFFFFFC via write API for timer 3
         p.write_test(TIMER_BASE + 0x20, 0xFC);
         p.write_test(TIMER_BASE + 0x21, 0xFF);
         p.write_test(TIMER_BASE + 0x22, 0xFF);
@@ -980,23 +986,25 @@ mod tests {
     fn test_tick_no_interrupts_when_disabled() {
         let mut p = Peripherals::new();
 
-        // Enable timer 1 with interrupt on overflow
-        p.timer1.write_control(0x01 | 0x02 | 0x04);
+        // Enable timer 1 with overflow interrupt via global control
+        // But don't enable the interrupt in the interrupt controller
+        p.write_test(TIMER_BASE + 0x30, 0x05); // Enable + overflow int
+
         // Set counter to max
         p.write_test(TIMER_BASE, 0xFF);
         p.write_test(TIMER_BASE + 1, 0xFF);
         p.write_test(TIMER_BASE + 2, 0xFF);
         p.write_test(TIMER_BASE + 3, 0xFF);
 
-        // But don't enable the interrupt in the interrupt controller
+        // Don't enable the interrupt in the interrupt controller
         // (enabled = 0 by default)
 
-        // Tick should overflow timer but not report pending
+        // Tick should overflow timer but not report pending (interrupt not enabled)
         let pending = p.tick(2);
         assert!(!pending);
         assert!(!p.irq_pending());
 
-        // Status should still be latched
+        // Status should still be latched in interrupt controller
         assert_ne!(p.interrupt.read(0x00), 0);
     }
 
@@ -1082,5 +1090,78 @@ mod tests {
         assert!(p.flash.is_enabled());
         assert_eq!(p.flash.wait_states(), 0x04); // CEmu default
         assert_eq!(p.flash.map_select(), 0x06); // CEmu default
+    }
+
+    #[test]
+    fn test_timer_system_global_registers() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Test writing global control register (0xF20030)
+        // Enable timer 1 (bit 0), overflow interrupt (bit 2)
+        p.write_test(TIMER_BASE + 0x30, 0x05);
+        assert_eq!(p.timers.control(), 0x05);
+        assert_eq!(p.read_test(TIMER_BASE + 0x30, &keys), 0x05);
+
+        // Test writing timer 1 counter to near overflow
+        p.write_test(TIMER_BASE + 0x00, 0xFE);
+        p.write_test(TIMER_BASE + 0x01, 0xFF);
+        p.write_test(TIMER_BASE + 0x02, 0xFF);
+        p.write_test(TIMER_BASE + 0x03, 0xFF);
+        assert_eq!(p.timers.timer1().counter(), 0xFFFFFFFE);
+
+        // Enable timer 1 interrupt
+        p.write_test(INT_BASE + 0x04, sources::TIMER1 as u8);
+
+        // Tick to overflow
+        let pending = p.tick(3);
+        assert!(pending);
+
+        // Status register should have overflow bit set (bit 2)
+        let status = p.timers.status();
+        assert_ne!(status & 0x04, 0, "Overflow status bit should be set");
+
+        // Write 1 to clear status (write-1-to-clear behavior)
+        p.write_test(TIMER_BASE + 0x34, 0x04);
+        assert_eq!(p.timers.status() & 0x04, 0, "Status should be cleared");
+    }
+
+    #[test]
+    fn test_timer_system_revision() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Revision register (0xF2003C) should be 0x00010801
+        assert_eq!(p.read_test(TIMER_BASE + 0x3C, &keys), 0x01);
+        assert_eq!(p.read_test(TIMER_BASE + 0x3D, &keys), 0x08);
+        assert_eq!(p.read_test(TIMER_BASE + 0x3E, &keys), 0x01);
+        assert_eq!(p.read_test(TIMER_BASE + 0x3F, &keys), 0x00);
+
+        // Revision should be read-only
+        p.write_test(TIMER_BASE + 0x3C, 0xFF);
+        assert_eq!(p.read_test(TIMER_BASE + 0x3C, &keys), 0x01);
+    }
+
+    #[test]
+    fn test_timer_system_multiple_timers() {
+        let mut p = Peripherals::new();
+        let keys = empty_keys();
+
+        // Enable all 3 timers via global control
+        // Timer 1: bit 0, Timer 2: bit 3, Timer 3: bit 6
+        p.write_test(TIMER_BASE + 0x30, 0x49); // 0b01001001
+
+        // Set different counters
+        p.write_test(TIMER_BASE + 0x00, 10); // Timer 1
+        p.write_test(TIMER_BASE + 0x10, 20); // Timer 2
+        p.write_test(TIMER_BASE + 0x20, 30); // Timer 3
+
+        // Tick 5 cycles
+        p.tick(5);
+
+        // All timers should have incremented
+        assert_eq!(p.read_test(TIMER_BASE + 0x00, &keys), 15);
+        assert_eq!(p.read_test(TIMER_BASE + 0x10, &keys), 25);
+        assert_eq!(p.read_test(TIMER_BASE + 0x20, &keys), 35);
     }
 }
