@@ -1139,6 +1139,27 @@ impl Bus {
             0x4 => {
                 // LCD controller - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
+                // CEmu: lcd_write_ctrl_delay() only for specific registers:
+                // - index < 0x10 (timing registers 0x00-0x0F)
+                // - (index & ~3) == 0x18 (control register 0x18-0x1B)
+                // CEmu aligns index to 4-byte boundaries before comparison
+                let aligned_offset = offset & !3;
+                if offset < 0x10 || aligned_offset == 0x18 {
+                    let cpu_speed = self.ports.control.cpu_speed();
+                    // CEmu formula: cycles += (base - 2) where base varies by speed
+                    // The -2 accounts for port_write_cycles already added
+                    let delay = match cpu_speed {
+                        0 => 10 - 2,  // 6 MHz
+                        1 => 12 - 2,  // 12 MHz
+                        2 => if self.serial_flash { 14 - 2 } else { 16 - 2 }, // 24 MHz
+                        3 | _ => if self.serial_flash { 23 - 2 } else { 21 - 2 }, // 48 MHz
+                    };
+                    self.cycles += delay as u64;
+                    // CEmu: At 48 MHz with non-serial flash, align CPU to LCD clock
+                    if cpu_speed == 3 && !self.serial_flash {
+                        self.cycles |= 1;
+                    }
+                }
                 self.ports.lcd.write(offset, value);
             }
             0x5 => {
