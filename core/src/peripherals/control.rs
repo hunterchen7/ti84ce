@@ -187,9 +187,16 @@ impl ControlPorts {
             regs::LCD_ENABLE => self.lcd_enable,
             regs::USB_CONTROL => {
                 // CEmu ORs usb_status() into port 0x0F
-                // Note: CEmu's usb_status() returns 0x40 at reset (ROLE_D bit set in otgcsr)
-                // but the ROM seems to expect 0xC0 for boot to complete. Using 0xC0 for now.
-                // TODO: Investigate why 0x40 causes infinite loop at PC=0x0013B3
+                // CEmu's usb_status() returns 0x40 at reset (ROLE_D bit set in otgcsr = 0x00310E20)
+                // Bit 7 (0x80) = VBUS/SESS valid (only set when USB cable connected)
+                // Bit 6 (0x40) = DEV_B or ROLE_D (ROLE_D is set at reset)
+                //
+                // With 0x40: Boot fails at PC=0x13B3 (power-down HALT) - ROM thinks no power
+                // With 0xC0: Boot succeeds - ROM thinks USB power is connected
+                //
+                // This suggests the TI-OS requires USB VBUS to be valid for boot without
+                // battery power. CEmu may have USB cable "connected" by default in GUI,
+                // or the actual hardware behavior differs.
                 self.usb_control | 0xC0
             },
             regs::FIXED_80 => 0x80, // Always returns 0x80
@@ -341,28 +348,19 @@ impl ControlPorts {
     }
 
     /// Check if CPU_SPEED port was written since last check, and reset the flag.
-    /// Returns (was_written, conversion_divisor) where conversion_divisor is used
-    /// to convert cycles when clock rate changes (e.g., 8 for 48MHz -> 6MHz).
+    /// Returns (was_written, new_rate, old_rate) for cycle conversion.
     /// CEmu's sched_set_clock converts: new_cycles = old_cycles * new_rate / old_rate
-    pub fn cpu_speed_changed(&mut self) -> (bool, u32) {
+    /// - 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
+    /// - 6MHz -> 48MHz: new_cycles = old_cycles * 48 / 6 = old_cycles * 8
+    pub fn cpu_speed_changed(&mut self) -> (bool, u32, u32) {
         if self.cpu_speed_written {
             self.cpu_speed_written = false;
             let new_mhz = self.clock_rate_mhz();
-            // CEmu: base_tick = muldiv_floor(cpu.cycles, old_tick_unit, new_tick_unit)
-            // tick_unit = SCHED_BASE_CLOCK_RATE / clock_rate
-            // So: new_cycles = old_cycles * old_tick / new_tick
-            //                = old_cycles * (base/old_rate) / (base/new_rate)
-            //                = old_cycles * new_rate / old_rate
-            // For 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
-            // divisor = old_rate / new_rate
-            let divisor = if new_mhz > 0 {
-                self.prev_clock_mhz / new_mhz
-            } else {
-                1
-            };
-            (true, divisor.max(1))
+            let old_mhz = self.prev_clock_mhz;
+            // Return (was_written, new_rate, old_rate) for conversion
+            (true, new_mhz, old_mhz)
         } else {
-            (false, 1)
+            (false, 1, 1)
         }
     }
 

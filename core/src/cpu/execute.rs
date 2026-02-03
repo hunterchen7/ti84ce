@@ -1306,9 +1306,8 @@ impl Cpu {
             // LDIR - Load, increment, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // CEmu preserves F3/F5 flags
-            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
+            // CEmu only adds internalCycles (1) per iteration; memory ops add their own cycles
             (6, 0) => {
-                let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     bus.write_byte(self.mask_addr(self.de), val);
@@ -1324,22 +1323,17 @@ impl Cpu {
                     // CEmu: cpu.cycles += internalCycles (1 for LDIR)
                     bus.add_cycles(1);
 
-                    if self.bc != 0 {
-                        cycles += 21;
-                        // Continue looping internally
-                    } else {
-                        cycles += 16;
+                    if self.bc == 0 {
                         break;
                     }
                 }
-                cycles
+                0
             }
             // LDDR - Load, decrement, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // CEmu preserves F3/F5 flags
-            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
+            // CEmu only adds internalCycles (1) per iteration; memory ops add their own cycles
             (7, 0) => {
-                let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     bus.write_byte(self.mask_addr(self.de), val);
@@ -1355,15 +1349,11 @@ impl Cpu {
                     // CEmu: cpu.cycles += internalCycles (1 for LDDR)
                     bus.add_cycles(1);
 
-                    if self.bc != 0 {
-                        cycles += 21;
-                        // Continue looping internally
-                    } else {
-                        cycles += 16;
+                    if self.bc == 0 {
                         break;
                     }
                 }
-                cycles
+                0
             }
             // CPI - Compare and increment
             // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
@@ -1405,9 +1395,8 @@ impl Cpu {
             // CPIR - Compare, increment, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // Stops when BC=0 or when A matches the memory byte (result=0)
-            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
+            // CEmu: internalCycles=2 when repeating, 1 when terminating
             (6, 1) => {
-                let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     let result = self.a.wrapping_sub(val);
@@ -1425,23 +1414,19 @@ impl Cpu {
                     if self.bc != 0 && result != 0 {
                         // CEmu: cpu.cycles += internalCycles (2 for CPIR when repeating)
                         bus.add_cycles(2);
-                        cycles += 21;
-                        // Continue looping internally
                     } else {
                         // CEmu: internalCycles-- when not repeating, so 1 cycle
                         bus.add_cycles(1);
-                        cycles += 16;
                         break;
                     }
                 }
-                cycles
+                0
             }
             // CPDR - Compare, decrement, repeat
             // Executes all iterations in a single instruction to match CEmu behavior
             // Stops when BC=0 or when A matches the memory byte (result=0)
-            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
+            // CEmu: internalCycles=2 when repeating, 1 when terminating
             (7, 1) => {
-                let mut cycles = 0u32;
                 loop {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     let result = self.a.wrapping_sub(val);
@@ -1459,16 +1444,13 @@ impl Cpu {
                     if self.bc != 0 && result != 0 {
                         // CEmu: cpu.cycles += internalCycles (2 for CPDR when repeating)
                         bus.add_cycles(2);
-                        cycles += 21;
-                        // Continue looping internally
                     } else {
                         // CEmu: internalCycles-- when not repeating, so 1 cycle
                         bus.add_cycles(1);
-                        cycles += 16;
                         break;
                     }
                 }
-                cycles
+                0
             }
             // INI, IND, INIR, INDR - I/O blocked on TI-84 CE
             (4, 2) | (5, 2) | (6, 2) | (7, 2) => 16,
@@ -1494,12 +1476,13 @@ impl Cpu {
             // z=2: Input instructions (INIM, INDM, INIMR, INDMR)
             // These read from port C, write to (HL), modify BC, and HL
             // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
+            // CEmu only adds internalCycles (1) per iteration; memory ops add their own cycles
             (2, 0, _) | (2, 1, _) => {
-                let mut cycles = 0u32;
                 loop {
                     // INIM/INDM (p=0) or INIMR/INDMR (p=1)
-                    // Read from port - blocked on TI-84 CE, returns 0xFF
-                    let val = 0xFF;
+                    // Read from port C - adds port read cycles
+                    // CEmu: cpu_read_in(r->C) calls port_read_byte which adds cycles
+                    let val = bus.port_read(self.c() as u16);
                     bus.write_byte(self.mask_addr(self.hl), val);
                     self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
                     // Update C by delta
@@ -1515,26 +1498,26 @@ impl Cpu {
                     self.set_flag_h((old_b & 0x0F) == 0);
                     self.set_flag_n(val & 0x80 != 0);
 
-                    if is_repeat && new_b != 0 {
-                        cycles += 21;
-                        // Continue looping internally
-                    } else {
-                        cycles += 16;
+                    // CEmu: cpu.cycles += internalCycles (1 per iteration)
+                    bus.add_cycles(1);
+
+                    if !(is_repeat && new_b != 0) {
                         break;
                     }
                 }
-                cycles
+                0
             }
             // z=3: Output instructions (OTIM, OTDM, OTIMR, OTDMR)
             // These read from (HL), write to port C, modify BC, and HL
-            // CEmu: REG_WRITE_EX(HL, r->HL, cpu_mask_mode(r->HL + delta, cpu.L))
+            // CEmu only adds internalCycles (1) per iteration; memory ops add their own cycles
             (3, 0, _) | (3, 1, _) => {
-                let mut cycles = 0u32;
                 loop {
                     // OTIM/OTDM (p=0) or OTIMR/OTDMR (p=1)
                     // Read from memory
                     let val = bus.read_byte(self.mask_addr(self.hl));
-                    // Output to port - blocked on TI-84 CE, ignored
+                    // Output to port C - adds port write cycles (typically 2)
+                    // CEmu: cpu_write_out(r->C, ...) calls port_write_byte which adds cycles
+                    bus.port_write(self.c() as u16, val);
                     self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
                     // Update C by delta
                     let c = (self.c() as i32 + delta) as u8;
@@ -1549,15 +1532,14 @@ impl Cpu {
                     self.set_flag_h((old_b & 0x0F) == 0);
                     self.set_flag_n(val & 0x80 != 0);
 
-                    if is_repeat && new_b != 0 {
-                        cycles += 21;
-                        // Continue looping internally
-                    } else {
-                        cycles += 16;
+                    // CEmu: cpu.cycles += internalCycles (1 per iteration)
+                    bus.add_cycles(1);
+
+                    if !(is_repeat && new_b != 0) {
                         break;
                     }
                 }
-                cycles
+                0
             }
             _ => 8, // Unknown eZ80 BLI opcode
         }

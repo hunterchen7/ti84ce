@@ -486,6 +486,8 @@ pub struct Bus {
     current_opcode_len: u8,
     /// I/O operations from the current instruction
     instruction_io_ops: Vec<IoRecord>,
+    /// SPI needs scheduler update (set after SPI writes that may start transfers)
+    spi_needs_schedule: bool,
 }
 
 impl Bus {
@@ -539,6 +541,7 @@ impl Bus {
             current_opcode: [0; 4],
             current_opcode_len: 0,
             instruction_io_ops: Vec::new(),
+            spi_needs_schedule: false,
         }
     }
 
@@ -560,6 +563,18 @@ impl Bus {
     /// Flush the flash cache (call when flash commands are executed)
     pub fn flush_flash_cache(&mut self) {
         self.flash_cache.flush();
+    }
+
+    /// Check if SPI needs scheduler update and clear the flag
+    pub fn take_spi_schedule_flag(&mut self) -> bool {
+        let flag = self.spi_needs_schedule;
+        self.spi_needs_schedule = false;
+        flag
+    }
+
+    /// Get the SPI controller for scheduler operations
+    pub fn spi(&mut self) -> &mut SpiController {
+        &mut self.spi
     }
 
     /// Determine which memory region an address maps to
@@ -799,11 +814,15 @@ impl Bus {
 
                 // CEmu: sched_set_clock() converts cycles when CPU speed changes
                 // Conversion: new_cycles = old_cycles * new_rate / old_rate
-                // For 48MHz -> 6MHz: divisor = 8, so cycles /= 8
-                let (speed_written, divisor) = self.ports.control.cpu_speed_changed();
-                if speed_written && divisor > 1 {
+                // For 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
+                // For 6MHz -> 48MHz: new_cycles = old_cycles * 48 / 6 = old_cycles * 8
+                let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
+                if speed_written && new_rate != old_rate {
                     let total = self.cycles + self.mem_cycles;
-                    let converted = total / divisor as u64;
+                    // CEmu: muldiv_floor(cpu.cycles, old_tick_unit, new_tick_unit)
+                    // = cpu.cycles * (base/old_rate) / (base/new_rate)
+                    // = cpu.cycles * new_rate / old_rate
+                    let converted = total * new_rate as u64 / old_rate as u64;
                     self.cycles = converted;
                     self.mem_cycles = 0;
                     // After conversion, rewind from converted cycles
@@ -1099,10 +1118,10 @@ impl Bus {
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
                 // CEmu: sched_set_clock() converts cycles when CPU speed changes
-                let (speed_written, divisor) = self.ports.control.cpu_speed_changed();
-                if speed_written && divisor > 1 {
+                let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
+                if speed_written && new_rate != old_rate {
                     let total = self.cycles + self.mem_cycles;
-                    let converted = total / divisor as u64;
+                    let converted = total * new_rate as u64 / old_rate as u64;
                     self.cycles = converted;
                     self.mem_cycles = 0;
                 }
@@ -1186,17 +1205,20 @@ impl Bus {
             0xD => {
                 // SPI - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
-                self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
+                let needs_schedule = self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
+                if needs_schedule {
+                    self.spi_needs_schedule = true;
+                }
             }
             0xF => {
                 // Control ports alternate - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
                 // CEmu: sched_set_clock() converts cycles when CPU speed changes
-                let (speed_written, divisor) = self.ports.control.cpu_speed_changed();
-                if speed_written && divisor > 1 {
+                let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
+                if speed_written && new_rate != old_rate {
                     let total = self.cycles + self.mem_cycles;
-                    let converted = total / divisor as u64;
+                    let converted = total * new_rate as u64 / old_rate as u64;
                     self.cycles = converted;
                     self.mem_cycles = 0;
                 }
