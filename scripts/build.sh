@@ -147,6 +147,40 @@ fi
 build_android() {
     if [ "$BUILD_RUST" = true ]; then
         echo "==> Building Rust core for Android..."
+
+        # Find Android NDK and add toolchain to PATH
+        if [ -z "$ANDROID_NDK_HOME" ]; then
+            # Try common locations
+            if [ -n "$ANDROID_HOME" ]; then
+                # Find the highest version NDK in the ndk directory
+                NDK_DIR=$(ls -d "$ANDROID_HOME"/ndk/*/ 2>/dev/null | sort -V | tail -1)
+                if [ -n "$NDK_DIR" ]; then
+                    export ANDROID_NDK_HOME="${NDK_DIR%/}"
+                fi
+            fi
+        fi
+
+        if [ -z "$ANDROID_NDK_HOME" ]; then
+            echo "Error: ANDROID_NDK_HOME not set and couldn't find NDK automatically."
+            echo "Please set ANDROID_NDK_HOME to your Android NDK path."
+            exit 1
+        fi
+
+        # Add NDK toolchain to PATH
+        NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-x86_64/bin"
+        if [ ! -d "$NDK_TOOLCHAIN" ]; then
+            # Try darwin-aarch64 for Apple Silicon
+            NDK_TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/darwin-aarch64/bin"
+        fi
+
+        if [ ! -d "$NDK_TOOLCHAIN" ]; then
+            echo "Error: Could not find NDK toolchain at $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/"
+            exit 1
+        fi
+
+        export PATH="$NDK_TOOLCHAIN:$PATH"
+        echo "    NDK: $ANDROID_NDK_HOME"
+
         cd core
 
         if [ "$ALL_ABIS" = true ]; then
@@ -206,8 +240,10 @@ build_android() {
     echo "    APK: android/$APK_PATH"
 
     if [ "$INSTALL" = true ]; then
+        echo "==> Uninstalling existing app..."
+        adb uninstall com.calc.emulator 2>/dev/null || true
         echo "==> Installing APK..."
-        adb install -r "android/$APK_PATH"
+        adb install "android/$APK_PATH"
         echo "==> Installed!"
     fi
 }

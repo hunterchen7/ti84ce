@@ -27,6 +27,15 @@ const LOAD_PENDING: u8 = 255;
 /// Delay in 32kHz ticks before RTC latch event fires (hardware-specific magic number from CEmu)
 pub const LATCH_TICK_OFFSET: u64 = 16429;
 
+/// RTC operating mode (matches CEmu's rtc_mode enum)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RtcMode {
+    /// Waiting for next LATCH event (normal mode, no load pending)
+    Latch,
+    /// Processing load ticks (after LATCH fired with load pending)
+    LoadTick,
+}
+
 /// RTC Controller
 #[derive(Debug, Clone)]
 pub struct RtcController {
@@ -49,6 +58,8 @@ pub struct RtcController {
     load_start_cycle: Option<u64>,
     /// Total access count for step-based timing approximation
     access_count: u64,
+    /// Current RTC mode
+    mode: RtcMode,
 }
 
 impl RtcController {
@@ -68,6 +79,7 @@ impl RtcController {
             load_ticks_processed: LOAD_TOTAL_TICKS, // Load complete initially
             load_start_cycle: None,
             access_count: 0,
+            mode: RtcMode::Latch, // Start in LATCH mode like CEmu
         }
     }
 
@@ -82,6 +94,7 @@ impl RtcController {
         self.load_ticks_processed = LOAD_TOTAL_TICKS; // Load complete
         self.load_start_cycle = None;
         self.access_count = 0;
+        self.mode = RtcMode::Latch; // Start in LATCH mode like CEmu
     }
 
     /// Read a register byte
@@ -189,6 +202,9 @@ impl RtcController {
                         // Previous load is finished when load_ticks_processed >= RTC_DATETIME_BITS
                         if self.load_ticks_processed >= RTC_DATETIME_BITS {
                             self.load_ticks_processed = LOAD_PENDING;
+                            // Reset to Latch mode to ensure proper event handling
+                            // The next LATCH event will process this load
+                            self.mode = RtcMode::Latch;
                             // Record when load started for timing calculation
                             self.load_start_cycle = Some(current_cycles);
                         }
@@ -221,13 +237,83 @@ impl RtcController {
 
     // === Scheduler integration methods ===
 
+    /// Get current RTC mode
+    pub fn mode(&self) -> RtcMode {
+        self.mode
+    }
+
     /// Check if a load operation was just triggered and needs scheduling
     /// Returns true if load_ticks_processed == LOAD_PENDING
     pub fn needs_load_scheduled(&self) -> bool {
         self.load_ticks_processed == LOAD_PENDING
     }
 
-    /// Advance the load operation by one 32kHz tick
+    /// Process a scheduler event. Returns the delay (in 32kHz ticks) until the next event.
+    ///
+    /// This handles the RTC state machine:
+    /// - In LATCH mode: Check if load pending, transition to LoadTick if so
+    /// - In LOAD_TICK mode: Advance load ticks
+    ///
+    /// ticks_per_second: 32768 (from scheduler::TICKS_PER_SECOND)
+    /// latch_offset: LATCH_TICK_OFFSET (16429)
+    pub fn process_event(&mut self, ticks_per_second: u64, latch_offset: u64) -> u64 {
+        match self.mode {
+            RtcMode::Latch => {
+                // LATCH event fired
+                if self.load_ticks_processed == LOAD_PENDING {
+                    // Load is pending - transition to tick mode
+                    self.load_ticks_processed = 0;
+                    self.mode = RtcMode::LoadTick;
+                    // Next event is 1 tick later (to process load ticks)
+                    1
+                } else {
+                    // No load pending - stay in LATCH mode, wait for next second
+                    // Next LATCH is TICKS_PER_SECOND - LATCH_TICK_OFFSET + LATCH_TICK_OFFSET = TICKS_PER_SECOND
+                    // But we're AT the LATCH point, so we want to wait until the LATCH point next second
+                    ticks_per_second
+                }
+            }
+            RtcMode::LoadTick => {
+                // Processing load ticks
+                if self.load_ticks_processed < LOAD_TOTAL_TICKS {
+                    self.load_ticks_processed += 1;
+
+                    // Check if datetime bits are all loaded (matches CEmu's timing)
+                    // Load bit is cleared at 40 ticks (RTC_DATETIME_BITS), not 51
+                    if self.load_ticks_processed >= RTC_DATETIME_BITS {
+                        self.control &= !0x40;
+                    }
+
+                    if self.load_ticks_processed < LOAD_TOTAL_TICKS {
+                        // More ticks needed
+                        1
+                    } else {
+                        // Load complete - return to LATCH mode
+                        self.mode = RtcMode::Latch;
+                        // Schedule next LATCH event
+                        // We're at tick (latch_offset + LOAD_TOTAL_TICKS) into the second
+                        // Next LATCH is at tick latch_offset of the NEXT second
+                        // Remaining this second: ticks_per_second - (latch_offset + LOAD_TOTAL_TICKS)
+                        // Plus latch_offset in next second
+                        let position = latch_offset + LOAD_TOTAL_TICKS as u64;
+                        if position < ticks_per_second {
+                            // Still in same second, wait until next second's LATCH
+                            ticks_per_second - position + latch_offset
+                        } else {
+                            // Already in next second (shouldn't happen but handle it)
+                            latch_offset
+                        }
+                    }
+                } else {
+                    // Load already complete (shouldn't happen but handle it)
+                    self.mode = RtcMode::Latch;
+                    ticks_per_second
+                }
+            }
+        }
+    }
+
+    /// Legacy method for compatibility - advance the load operation by one 32kHz tick
     /// Called by the scheduler when an RTC event fires
     pub fn advance_load(&mut self) {
         if self.load_ticks_processed == LOAD_PENDING {

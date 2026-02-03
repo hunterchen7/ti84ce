@@ -35,6 +35,29 @@ Project-specific guidelines for Claude Code when working on this TI-84 Plus CE e
   cargo t         # Run tests
   ```
   For more options: `cargo run --release --example debug -- <command>`
+
+- **Full trace comparison with CEmu** - For detailed parity debugging:
+  ```bash
+  # Generate our trace (JSON with I/O ops)
+  cd core
+  cargo run --release --example debug -- fulltrace 1000
+
+  # Generate CEmu trace (requires patched CEmu in cemu-ref/)
+  cd ../cemu-ref
+  ./test/fulltrace "../TI-84 CE.rom" 1000 /tmp/cemu_trace.json
+
+  # Compare traces and report divergences
+  cd ../core
+  cargo run --release --example debug -- fullcompare ../traces/fulltrace_*.json /tmp/cemu_trace.json
+  ```
+  The comparison shows: PC/opcode mismatches, cycle differences, register state divergences, and I/O operation differences.
+- **Verify parity after every change** - After making any change to CPU, bus, peripherals, or timing code:
+  1. Run boot test: `cargo run --release --example debug -- boot`
+  2. Generate trace: `cargo run --release --example debug -- trace 100000`
+  3. Compare with CEmu trace to verify no regressions
+
+  If divergence is found, investigate immediately before continuing other work.
+
 - **Minimize Grep tool usage** - Prefer Read tool with specific line ranges when possible, as Grep requires manual approval. Use Read to examine specific file sections rather than searching.
 - **Update milestones when completing features** - After implementing a feature from [docs/milestones.md](docs/milestones.md), mark it as complete (`[x]`) and update the test count and status section.
 - **Document interesting findings** - When discovering esoteric behavior or surprising implementation details, add them to [docs/findings.md](docs/findings.md). This includes:
@@ -86,6 +109,11 @@ CEmu is the primary reference emulator for TI-84 Plus CE hardware behavior.
 **Debug:**
 
 - `debug/` - Debugger and disassembler utilities
+
+**Trace Integration (our additions):**
+
+- `trace.c/h` - Full trace generation with JSON output (added for parity testing)
+- `../test/fulltrace.c` - Standalone trace generator tool
 
 ### Implementation Status
 
@@ -179,21 +207,44 @@ Key differences from standard Z80 that affect emulation:
 
 ## Key Lessons Learned
 
-### Scheduler Parity Not Required
+### Exact Scheduler Parity Required
 
-Exact scheduler timing parity with CEmu is **not required** for correct emulation. The scheduler is an implementation detail - what matters is:
-- Peripheral reads/writes return correct values
-- Interrupts fire when expected
-- Polling loops eventually complete
+Exact cycle timing parity with CEmu is **required**. Every instruction should execute with identical cycle counts. Key areas to verify:
 
-The ROM handles timing variations gracefully through polling loops. Different iteration counts don't affect correctness.
+- **Register parity**: AF, BC, DE, HL, IX, IY, SP must match at every PC
+- **Cycle parity**: Total cycles must match CEmu at each instruction
+- **Memory timing**: Flash wait states, RAM cycles, port write delays must match
+
+Known cycle timing differences to fix:
+- **ED39 (OUT0)**: CPU speed port writes show ~28K cycle difference due to clock conversion
+- **Branch instructions**: DJNZ costs 23-29 cycles (should be 37-43 like CEmu)
+- **JR NZ/JR Z**: ~188/107 cycle difference per call
+
+Use `cargo trace` and compare against CEmu traces to verify parity.
 
 ### Trace Comparison Strategy
 
-1. **PC parity ≠ full parity** - Matching PC doesn't mean registers match
+Use `fulltrace` and `fullcompare` commands for detailed JSON traces with I/O operations:
+
+1. **Check cycle deltas** - Compare per-instruction cycle costs, not just totals
 2. **Check AF (flags)** - Flag differences often reveal CPU bugs
-3. **Run longer traces** - Many bugs only appear after 100K+ steps
-4. **Use sparse traces** - Log every Nth step for long runs to save space
+3. **Account for suffix opcodes** - CEmu logs 40/49/52/5B as separate steps, we combine them
+4. **Run longer traces** - Many bugs only appear after 100K+ steps
+5. **Analyze by opcode** - Group cycle drift by instruction type to find systematic issues
+
+**JSON Trace Format** (both emulators produce):
+```json
+{
+  "step": 0, "cycle": 0, "pc": "0x000000",
+  "opcode": {"bytes": "F3", "mnemonic": "DI"},
+  "regs_before": {"A": "0x00", "F": "0x00", "BC": "0x000000", ...},
+  "io_ops": [{"type": "write", "target": "ram", "addr": "0xD00000", "new": "0xFF"}]
+}
+```
+
+**CEmu Trace Tool** (`cemu-ref/test/fulltrace`):
+- Built from patched CEmu with trace hooks in cpu.c and mem.c
+- Rebuild: `cd cemu-ref/core && make && cd .. && gcc -I core -o test/fulltrace test/fulltrace.c -L core -lcemucore -lm`
 
 ### Critical Instructions for Boot
 

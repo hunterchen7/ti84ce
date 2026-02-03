@@ -244,6 +244,7 @@ fn test_adl_jp_indirect_24bit() {
 
     // JP (HL) (E9)
     bus.poke_byte(0, 0xE9);
+    cpu.init_prefetch(&mut bus); // Load first byte into prefetch
     cpu.step(&mut bus);
 
     assert_eq!(cpu.pc, 0x123456, "JP (HL) should jump to 24-bit address");
@@ -281,12 +282,13 @@ fn test_adl_rst_pushes_24bit() {
 fn test_z80_mode_jp_uses_mbase() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
-    setup_z80_mode(&mut cpu);
 
     // JP 0x200 (C3 00 02)
     bus.poke_byte(0xD00100, 0xC3);
     bus.poke_byte(0xD00101, 0x00);
     bus.poke_byte(0xD00102, 0x02);
+    // Setup AFTER poking so prefetch loads the instruction
+    setup_z80_mode_with_prefetch(&mut cpu, &mut bus);
     cpu.step(&mut bus);
 
     // Should jump to MBASE:0x0200 = 0xD00200
@@ -923,12 +925,13 @@ fn test_z80_mode_jp_hl_16bit() {
     // JP (HL) should use 16-bit HL value without MBASE in Z80 mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
-    setup_z80_mode(&mut cpu);
 
     cpu.hl = 0x1234;
 
     // E9 - JP (HL)
     bus.poke_byte(0xD00100, 0xE9);
+    // Setup AFTER poking so prefetch loads the instruction
+    setup_z80_mode_with_prefetch(&mut cpu, &mut bus);
     cpu.step(&mut bus);
 
     // PC should be 0x1234, not 0xD01234
@@ -940,13 +943,14 @@ fn test_z80_mode_jp_ix_16bit() {
     // JP (IX) should use 16-bit IX value in Z80 mode
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
-    setup_z80_mode(&mut cpu);
 
     cpu.ix = 0x5678;
 
     // DD E9 - JP (IX)
     bus.poke_byte(0xD00100, 0xDD);
     bus.poke_byte(0xD00101, 0xE9);
+    // Setup AFTER poking so prefetch loads the instruction
+    setup_z80_mode_with_prefetch(&mut cpu, &mut bus);
     step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.pc, 0x5678, "JP (IX) should set PC to IX value (16-bit)");

@@ -102,10 +102,10 @@ impl SpiController {
     }
 
     /// Transfer duration in 24 MHz ticks
-    fn transfer_ticks(&self, include_plus_one: bool) -> u64 {
+    /// CEmu always uses (divider + 1) for all transfers
+    fn transfer_ticks(&self) -> u64 {
         let bit_count = self.transfer_bit_count() as u64;
-        let base_divider = (self.cr1 & 0xFFFF) as u64;
-        let divider = base_divider + if include_plus_one { 1 } else { 0 };
+        let divider = (self.cr1 & 0xFFFF) as u64 + 1;
         bit_count * divider.max(1)
     }
 
@@ -160,8 +160,8 @@ impl SpiController {
         }
         self.transfer_bits = self.transfer_bit_count();
 
-        // RX-only transfers (no TX data) use the divider without +1 to match CEmu loop phase.
-        let ticks = self.transfer_ticks(tx_available);
+        // CEmu always uses (divider + 1) for transfer timing
+        let ticks = self.transfer_ticks();
         let next_cycle = self.next_event_cycle(base_cycle, cpu_speed, ticks, tx_available);
         self.next_event_cycle = Some(next_cycle);
 
@@ -308,19 +308,21 @@ impl SpiController {
 
     /// Write to SPI port
     /// addr is the offset within the SPI port range (masked to 0x7F)
-    pub fn write(&mut self, addr: u32, value: u8, current_cycles: u64, cpu_speed: u8) {
-        self.update(current_cycles, cpu_speed);
+    /// Returns true if SPI state changed in a way that may need scheduler update
+    pub fn write(&mut self, addr: u32, value: u8, _current_cycles: u64, _cpu_speed: u8) -> bool {
+        // Note: We no longer call update() here - timing is driven by scheduler
 
         let shift = (addr & 3) << 3;
         let value32 = (value as u32) << shift;
         let mask = !(0xFF_u32 << shift);
+        let mut state_changed = false;
 
         match addr >> 2 {
             // CR0 (0x00-0x03)
             0 => {
                 let new_value = (self.cr0 & mask) | (value32 & 0xFFFF);
                 if Self::trace_enabled() && new_value != self.cr0 {
-                    eprintln!("[spi] cr0 write cycle={} value=0x{:04X}", current_cycles, new_value);
+                    eprintln!("[spi] cr0 write value=0x{:04X}", new_value);
                 }
                 self.cr0 = new_value;
             }
@@ -328,12 +330,13 @@ impl SpiController {
             1 => {
                 let new_value = (self.cr1 & mask) | (value32 & 0x7FFFFF);
                 if Self::trace_enabled() && new_value != self.cr1 {
-                    eprintln!("[spi] cr1 write cycle={} value=0x{:06X}", current_cycles, new_value);
+                    eprintln!("[spi] cr1 write value=0x{:06X}", new_value);
                 }
                 self.cr1 = new_value;
             }
             // CR2 (0x08-0x0B)
             2 => {
+                let old_cr2 = self.cr2;
                 let mut masked_value = value32;
                 // Bit 2: Reset RX FIFO
                 if masked_value & (1 << 2) != 0 {
@@ -349,9 +352,16 @@ impl SpiController {
                 masked_value &= 0xF83;
                 let new_value = (self.cr2 & mask) | masked_value;
                 if Self::trace_enabled() && new_value != self.cr2 {
-                    eprintln!("[spi] cr2 write cycle={} value=0x{:03X}", current_cycles, new_value);
+                    eprintln!("[spi] cr2 write value=0x{:03X}", new_value);
                 }
                 self.cr2 = new_value;
+
+                // Check if state changed in a way that affects scheduling
+                // CEmu: if ((spi.cr2 ^ value) & ~mask & (1 << 8 | 1 << 7 | 1 << 0)) stateChanged = true
+                let relevant_bits = (1 << 8) | (1 << 7) | (1 << 0); // TX_EN, RX_EN, SPI_EN
+                if (old_cr2 ^ new_value) & relevant_bits != 0 {
+                    state_changed = true;
+                }
             }
             // INTCTRL (0x10-0x13)
             4 => {
@@ -362,10 +372,10 @@ impl SpiController {
                 if shift == 0 && self.tfve < SPI_TXFIFO_DEPTH {
                     // Add to TX FIFO (only on byte 0 write)
                     self.tfve += 1;
+                    state_changed = true; // May need to start transfer
                     if Self::trace_enabled() {
                         eprintln!(
-                            "[spi] data write cycle={} tfve={} cr2=0x{:03X}",
-                            current_cycles,
+                            "[spi] data write tfve={} cr2=0x{:03X}",
                             self.tfve,
                             self.cr2
                         );
@@ -374,20 +384,107 @@ impl SpiController {
             }
             _ => {}
         }
-        self.update(current_cycles, cpu_speed);
+        state_changed
     }
 }
 
-// === Scheduler integration stub methods ===
-// Note: SPI timing is currently handled internally via cycle-based update()
-// These methods are stubs for future scheduler integration
+// === Scheduler integration methods ===
+// These methods allow the scheduler to drive SPI timing precisely,
+// matching CEmu's sched_set(SCHED_SPI, ticks) approach.
 
 impl SpiController {
-    /// Advance one SPI transfer (scheduler callback)
-    /// This is a stub - SPI currently uses internal cycle-based timing
-    pub fn advance_transfer(&mut self) {
-        // SPI timing is handled internally via update()
-        // This stub exists for future scheduler integration
+    /// Complete a transfer and try to start the next one.
+    /// Returns Some(ticks) if a new transfer was started, None otherwise.
+    /// Called by scheduler when SPI event fires.
+    pub fn complete_transfer_and_continue(&mut self) -> Option<u64> {
+        if Self::trace_enabled() {
+            eprintln!(
+                "[spi] sched_complete queued={} transfer_bits={}",
+                self.tfve,
+                self.transfer_bits
+            );
+        }
+
+        // Complete current transfer
+        if self.transfer_bits != 0 {
+            self.transfer_bits = 0;
+            self.next_event_cycle = None;
+
+            // Add to RX FIFO if RX enabled
+            if self.rx_enabled() && self.rfve < SPI_RXFIFO_DEPTH {
+                self.rfve = self.rfve.saturating_add(1);
+                self.rfvi = self.rfvi.wrapping_add(1);
+            }
+        }
+
+        // Try to start next transfer
+        self.try_start_transfer_for_scheduler()
+    }
+
+    /// Try to start a transfer. Returns Some(ticks) if successful.
+    /// Called after enabling SPI or after a transfer completes.
+    pub fn try_start_transfer_for_scheduler(&mut self) -> Option<u64> {
+        if self.transfer_bits != 0 || !self.spi_enabled() {
+            return None;
+        }
+
+        let tx_enabled = self.tx_enabled();
+        let rx_enabled = self.rx_enabled();
+        let tx_available = tx_enabled && self.tfve != 0;
+
+        if rx_enabled {
+            if !self.flash_enabled() && tx_enabled && self.tfve == 0 {
+                return None;
+            }
+            let rfve_limit = if self.tfve == 0 {
+                SPI_RXFIFO_DEPTH.saturating_sub(1)
+            } else {
+                SPI_RXFIFO_DEPTH
+            };
+            if self.rfve >= rfve_limit {
+                return None;
+            }
+        } else if !tx_available {
+            return None;
+        }
+
+        // Consume from TX FIFO
+        let queued_before = self.tfve;
+        if tx_available {
+            self.tfve = self.tfve.saturating_sub(1);
+            self.tfvi = self.tfvi.wrapping_add(1);
+        }
+
+        self.transfer_bits = self.transfer_bit_count();
+
+        // Calculate ticks for scheduler (24 MHz clock)
+        // CEmu: bitCount * ((spi.cr1 & 0xFFFF) + 1)
+        let ticks = self.transfer_ticks();
+
+        if Self::trace_enabled() {
+            eprintln!(
+                "[spi] sched_start queued_before={} queued_after={} bits={} ticks={} tx={} rx={}",
+                queued_before,
+                self.tfve,
+                self.transfer_bits,
+                ticks,
+                tx_enabled as u8,
+                rx_enabled as u8
+            );
+        }
+
+        Some(ticks)
+    }
+
+    /// Called when SPI is disabled - clears any pending transfer state
+    pub fn cancel_transfer(&mut self) {
+        self.transfer_bits = 0;
+        self.next_event_cycle = None;
+    }
+
+    /// Check if there's an active transfer in progress
+    pub fn is_transfer_active(&self) -> bool {
+        self.transfer_bits != 0
     }
 
     /// Check if there are pending transfers for scheduler

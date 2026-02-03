@@ -90,6 +90,34 @@ loop {
 
 **Source**: CEmu's cpu.c suffix handling in the main execution loop.
 
+### Prefetch Mechanism for Cycle Parity
+
+CEmu uses a prefetch mechanism where each instruction fetch also prefetches the **next** byte. This charges memory access cycles for the next instruction's first byte as part of the current instruction.
+
+```c
+// CEmu's cpu_fetch_byte()
+static uint8_t cpu_fetch_byte(void) {
+    uint8_t value = cpu.prefetch;  // Return previously prefetched byte
+    cpu_prefetch(cpu.registers.PC + 1, cpu.ADL);  // Prefetch NEXT byte
+    return value;
+}
+```
+
+**Key implementation details**:
+1. `cpu_inst_start()` is called at the start of `cpu_execute()` to prefetch byte at PC=0
+2. Each `fetch_byte()` returns the prefetched value, then prefetches PC+1
+3. This means each instruction pays for prefetching the next instruction's first byte
+
+**Impact**: Without this mechanism, our emulator showed ~50% fewer cycles per instruction (10 vs 20 for flash reads). The prefetch adds the memory access cost for the next byte during each fetch, matching CEmu's cycle accounting.
+
+**Our implementation**:
+- Added `prefetch: u8` field to CPU state
+- `init_prefetch()` called after reset to prefetch first byte (charges startup cycles)
+- `fetch_byte()` returns prefetched byte, then prefetches PC+1
+- `emu.total_cycles` set to bus.total_cycles() after init_prefetch for trace parity
+
+**Source**: CEmu's cpu.c `cpu_fetch_byte()` and `cpu_prefetch()` functions.
+
 ### BIT Preserves F3/F5 (Undocumented) Flags
 
 For CB-prefixed BIT instructions, CEmu preserves F3/F5 from the **previous** F register instead of deriving them from the tested operand or address.
@@ -479,6 +507,25 @@ CEmu uses a scheduler with a base clock rate of **7,680,000,000 Hz (7.68 GHz)**.
 The formula: `base_ticks_per_tick = 7,680,000,000 / clock_rate`
 
 **Why this matters**: Using a common base clock avoids floating-point arithmetic and rounding errors in timing calculations. All timing conversions are exact integer divisions.
+
+### CPU Clock Speed Changes and Cycle Conversion
+
+When writing to the CPU speed port (0x01), CEmu's `sched_set_clock` converts the current cycle count to the equivalent at the new clock rate:
+
+```c
+// CEmu: sched_set_clock converts cycles when clock rate changes
+// new_cycles = old_cycles * new_rate / old_rate
+// For 48MHz -> 6MHz: divisor = 8, so cycles /= 8
+```
+
+The port write timing in CEmu follows this sequence:
+1. Add `PORT_WRITE_DELAY = 4` cycles before the write
+2. Execute port write (may trigger clock conversion via `sched_set_clock`)
+3. Rewind by `PORT_WRITE_DELAY - port_write_cycles[port_range]` (typically 2)
+
+**Critical insight**: Don't reset cycles to 0 on clock changes. Instead, convert cycles proportionally to maintain timing relationships. The ROM starts at 48MHz and typically changes to 6MHz early in boot (writing 0x44 to port 0x01), so cycles get divided by 8.
+
+**Impact**: After implementing proper cycle conversion, instruction timing deltas match CEmu exactly (e.g., both show 38 cycles for a CALL, 16 cycles for a 2-byte fetch at 6MHz, etc.). The absolute cycle counts may differ due to the conversion calculation, but relative timing is correct.
 
 ### RTC Load Timing
 
@@ -1344,6 +1391,38 @@ Added `rawtrace` command and setter methods to match CEmu's trace_gen initializa
 
 **Conclusion:** The MathPrint vs Classic mode difference may not exist in actual CEmu execution. The trace_gen tool appears to have timing issues that make direct comparison unreliable. The emulator boots correctly in Classic mode, which is the default when RAM is zeroed.
 
+**Further Investigation (2026-02-02): USB Status and MathPrint Source**
+
+Investigated why USB status 0x40 (CEmu's default) causes boot failure while 0xC0 works:
+
+1. **MathPrint source value (0xD01171):** After 70M cycles of boot, the value at 0xD01171 is 0x00. This is where the ROM loads the MathPrint flag from before writing to 0xD000C4. Both addresses contain 0x00 (Classic mode).
+
+2. **USB Status Bit 7 is Power Detection:**
+   - ROM at 0x0F64-0x0F6D checks bit 7 of USB status (port 0x0F)
+   - `IN0 A,(0x0F)` + `BIT 7,A` + `JR NZ,$+10`
+   - Bit 7 = 0x80 = VBUS/SESS valid (USB power connected)
+   - Bit 6 = 0x40 = ROLE_D (device mode, always set at reset)
+
+3. **Boot failure path with 0x40:**
+   - With bit 7 clear, ROM calls 0x0035FB (USB polling loop)
+   - Eventually leads to power-down sequence at 0x13A8-0x13B3:
+     - `DI` → `OUT0 (0x00),0xC0` → `OUT0 (0x09),0xD4` → `HALT`
+   - CPU halts with interrupts disabled at PC=0x13B3
+
+4. **CEmu's usb_status() behavior:**
+   - At reset: `otgcsr = 0x00310E20` → returns 0x40 (ROLE_D only, no VBUS)
+   - With USB plugged in: `usb_plug_b()` sets VBUS bits → returns 0xC0
+   - CEmu GUI may have USB "connected" by default or in testing
+
+5. **Resolution:** Our emulator returns 0xC0 (simulating USB power connected) because:
+   - Real calculators typically have either battery or USB power
+   - With no power source, ROM enters power-down HALT
+   - 0xC0 simulates "USB power present" which allows boot to proceed
+
+**Impact:** The MathPrint flag difference is **not caused by USB status**. With USB status 0xC0, boot completes successfully but still boots to Classic mode. The MathPrint flag is determined by what's stored at 0xD01171, which is 0x00 (Classic) when RAM is zeroed.
+
+_Investigation update: 2026-02-02 - USB status controls power detection, not MathPrint mode_
+
 ### RTC Load Timing Critical for Boot Flow
 
 The RTC (Real-Time Clock) load operation timing affects boot flow significantly. When the ROM reads RTC offset 0x40 (load status), the returned value determines whether polling loops continue or exit.
@@ -1376,3 +1455,517 @@ fn update_load(&mut self, current_cycles: u64, cpu_speed: u8) {
 **Result:** After the fix, the poll loop correctly runs 432 iterations (vs 1 before), matching CEmu's behavior more closely. Boot still completes successfully.
 
 **Source:** CEmu's realclock.c uses `rtc_update_load()` which calculates elapsed ticks from `sched_ticks_remaining(SCHED_RTC)` during every port read.
+
+---
+
+## CEmu Parity Research (2026-02-02)
+
+Comprehensive analysis of differences between our Rust core and CEmu reference implementation. This research was conducted by 8 parallel subagents investigating each category in `cemu_core_comparison.md`.
+
+### CPU Execution Model Gaps
+
+#### 1. Prefetch Pipeline (LOW PRIORITY)
+CEmu uses a 1-byte prefetch pipeline in `cpu.c` - the prefetch is always one byte ahead of execution. Our implementation fetches directly via `bus.fetch_byte()`. This affects flash unlock detection timing but boot works fine.
+
+#### 2. Cycle Accounting (MODERATE PRIORITY)
+**Gap:** CEmu tracks `cpu.cycles` and updates it with internal instruction cycles. Our implementation only counts memory access cycles via `bus.cycles` - the internal cycle counts returned by `execute_*` functions are never applied.
+
+**Impact:** Affects timing-dependent polling loops and scheduler event timing, but absorbed by polling loop tolerance.
+
+**CEmu code:**
+```c
+cpu.cycles += internalCycles;  // Applied during instruction execution
+```
+
+#### 3. Protection Enforcement (LOW for boot, HIGH for security)
+**Gap:** CEmu enforces unprivileged behavior:
+- `IN` from protected port returns 0
+- `OUT` to protected port triggers NMI
+- Protected memory reads return 0
+- Protected memory writes trigger NMI
+
+Our implementation tracks protection boundaries but doesn't enforce them in CPU/bus paths. Not needed for boot (ROM runs as privileged code).
+
+#### 4. CPU Signals (LOW PRIORITY)
+CEmu uses atomic signals: `CPU_SIGNAL_RESET`, `CPU_SIGNAL_EXIT`, `CPU_SIGNAL_ON_KEY`, `CPU_SIGNAL_ANY_KEY`. We have `on_key_wake`/`any_key_wake` flags but lack RESET and EXIT signals.
+
+#### 5. IM3 Mode (LOW PRIORITY)
+CEmu supports IM3 with vectored interrupts via `asic.im2` flag. We map IM3 to Mode2 (both jump to 0x38). TI-OS doesn't use IM3 vectored mode.
+
+### Bus/Memory/Flash Gaps
+
+#### 1. Flash Cache (MODERATE for serial mode)
+**Gap:** CEmu has a 2-way set-associative flash cache for serial flash mode with 128 sets. Returns 2/3/197 cycles based on hit/miss. We use constant `FLASH_READ_CYCLES = 10` for parallel mode.
+
+**Serial flash features missing:**
+- Cache structures (tags, MRU/LRU)
+- `flash_touch_cache()` for hit/miss detection
+- `flash_flush_cache()` for invalidation
+
+#### 2. Dynamic Wait States (MODERATE)
+CEmu uses `flash.waitStates` to calculate actual timing. We cache wait states but use constant cycles.
+
+#### 3. Flash Command Set (LOW PRIORITY)
+**Missing parallel commands:**
+- CFI query mode (0x98)
+- Chip erase (0x10)
+- Deep power down (0xB9)
+- IPB/DPB protection modes (0xC0, 0xE0)
+
+Basic sector erase and byte program work, which is sufficient for boot.
+
+#### 4. LCD Palette/Cursor Memory (LOW PRIORITY)
+CEmu maps 0xE30200-0xE307FF to palette (512 bytes) and 0xE30800-0xE30BFF to cursor image (1024 bytes). We don't implement these. TI-OS uses 16bpp direct color, so palette is unused.
+
+#### 5. Port I/O Scheduler Processing (MODERATE)
+**Gap:** CEmu calls `sched_process_pending_events()` during port I/O, processes scheduler mid-instruction, and uses write delay + rewind mechanism. We add fixed cycles immediately.
+
+### Scheduler Gaps
+
+#### 1. Missing Event Types
+| Event | CEmu | Ours | Priority |
+|-------|------|------|----------|
+| SCHED_TIMER_DELAY | ✓ | ✗ | MODERATE |
+| SCHED_KEYPAD | ✓ | ✗ | MODERATE |
+| SCHED_WATCHDOG | ✓ | ✗ | MODERATE |
+| SCHED_SECOND | ✓ | ✗ | LOW |
+| SCHED_LCD_DMA | ✓ | ✗ | LOW |
+| SCHED_USB* | ✓ | ✗ | LOW |
+
+#### 2. Timer Delay Event
+CEmu has a 2-cycle delay (`SCHED_TIMER_DELAY`) before timer match/interrupt updates. This ensures proper ordering. We fire interrupts immediately.
+
+### Interrupt Controller / Timer Gaps
+
+#### 1. Timer Global Registers (MODERATE PRIORITY)
+**Gap:** CEmu has global registers at 0x30-0x3F:
+- 0x30: Global control (32-bit, 3 bits per timer)
+- 0x34: Global status (9 bits: match1/match2/overflow per timer)
+- 0x38: Interrupt mask
+- 0x3C: Revision (0x00010801)
+
+We have per-timer control bytes at 0x30, 0x34, 0x38 instead.
+
+#### 2. Delayed Interrupt Delivery
+CEmu uses `gpt_delay()` with `delayStatus` and `delayIntrpt` to fire timer interrupts 2 cycles after match event. We fire immediately.
+
+#### 3. Raw Status Register (index 2/10)
+We return `self.raw` for interrupt reads at index 2/10. CEmu returns 0 (falls through to default). Low impact - TI-OS doesn't read this.
+
+### RTC Gaps
+
+#### 1. Time Ticking (MODERATE PRIORITY)
+**Gap:** CEmu advances `rtc.counter.sec/min/hour/day` every second via `RTC_TICK` event. Our counter never advances - time shows 00:00:00 forever.
+
+**CEmu state machine:**
+- `RTC_TICK`: Advances time, checks alarm
+- `RTC_LATCH`: Copies counter to latched
+- `RTC_LOAD_LATCH`: Copies load to latched after load operation
+
+#### 2. Latch Mechanism
+CEmu updates `latched` from `counter` on LATCH event when control bit 7 set. Our latched values are static.
+
+#### 3. Alarm Functionality (LOW PRIORITY)
+CEmu has alarm registers at 0x10-0x18 with match checking. Ours are stubs returning 0. TI-OS doesn't use alarms during normal operation.
+
+### Keypad Gaps
+
+#### 1. Control Register Packing (LOW-MODERATE PRIORITY)
+CEmu packs mode (2 bits) + rowWait (14 bits) + scanWait (16 bits) into single 32-bit register at 0x00. We have separate registers.
+
+#### 2. Mode 2/3 Behavior
+CEmu Mode 2 is single scan (returns to idle after completion). Our Mode 2 is continuous. Mode 3 is continuous in both.
+
+#### 3. Ghosting (LOW PRIORITY)
+CEmu implements key ghosting matrix multiplication for multi-key scenarios. We don't implement ghosting. Disabled by default in CEmu anyway.
+
+#### 4. GPIO Registers (LOW PRIORITY)
+CEmu has gpioEnable at 0x40 and gpioStatus at 0x44 (always 0). We don't implement these.
+
+### LCD Gaps
+
+#### 1. Timing Registers (LOW PRIORITY)
+**Gap:** CEmu parses timing0-3 registers to calculate frame duration dynamically. We store them but use fixed 60Hz (800,000 cycles at 48MHz).
+
+**CEmu timing calculation:**
+- Parses PPL, HSW, HFP, HBP, LPP, VSW, VFP, VBP, PCD, CPL
+- Calculates `cycles_per_frame = cycles_per_line * total_lines`
+
+TI-OS programs 60Hz timing, so fixed 60Hz is correct.
+
+#### 2. DMA System (LOW PRIORITY)
+CEmu has `SCHED_LCD_DMA` with FIFO buffer (64 words), watermark config, `upcurr` register tracking DMA position. We render by directly reading VRAM. Same visual result.
+
+#### 3. Compare Interrupts
+CEmu has 4 compare modes (front porch, sync, back porch, active video). We only have VBLANK (front porch). TI-OS uses VBLANK only.
+
+### SPI Gaps (MODERATE PRIORITY)
+
+#### 1. No FIFO Data Storage
+CEmu has `rxFifo[16]` and `txFifo[16]` arrays with real data. We track FIFO counts only.
+
+#### 2. No Device Abstraction
+CEmu uses `device_select`, `device_peek`, `device_transfer` function pointers to communicate with LCD panel or coprocessor. We have no device backend.
+
+#### 3. Null Device for Coprocessor
+CEmu returns `0xC3` for coprocessor reads ("Hack to make OS 5.7.0 happy"). We don't have this.
+
+### SHA256 Gaps (LOW PRIORITY)
+
+**Gap:** CEmu implements full SHA256 compression function with K constants and 64 rounds. We're a stub - no actual hash computation.
+
+Control writes only work when `flash_unlocked()` is true in CEmu.
+
+### Watchdog Gaps (LOW PRIORITY)
+
+**Gap:** CEmu has full state machine:
+- `WATCHDOG_COUNTER`: Normal countdown
+- `WATCHDOG_PULSE`: Pulse generation
+- `WATCHDOG_EXPIRED`: Counter reached zero
+- `WATCHDOG_RELOAD`: Reload in progress
+
+With scheduler integration, multiple clock sources (CPU/32K), and reset/NMI triggers. We're a stub that never counts down.
+
+### Backlight Gaps (LOW PRIORITY)
+
+CEmu maintains `ports[0x100]` array with reset defaults and calculates gamma factor `(310 - brightness) / 160.0f`. We track brightness only.
+
+### Summary
+
+**All boot and basic TI-OS operation work correctly with current implementation.** The gaps are primarily:
+
+1. **Timing precision** - cycle accounting, scheduler mid-instruction processing
+2. **Advanced features** - RTC time display, indexed color modes, serial flash
+3. **Security** - protection enforcement for untrusted code
+4. **Newer OS** - SPI coprocessor for OS 5.7.0+
+
+_Research completed: 2026-02-02_
+
+---
+
+## Full Trace Comparison System (2026-02-02)
+
+### Tooling Created
+
+Built comprehensive trace comparison infrastructure for exact parity debugging:
+
+**Our Emulator (`core/examples/debug.rs`):**
+- `fulltrace [steps]` - Generate JSON trace with full I/O operations
+- `fullcompare <ours> <cemu>` - Compare two JSON traces and report divergences
+
+**CEmu Integration (`cemu-ref/`):**
+- `core/trace.c/h` - Trace state management and JSON output
+- `test/fulltrace.c` - Standalone trace generator
+- Patched `cpu.c` with `trace_inst_start()` / `trace_inst_end()` hooks
+- Patched `mem.c` with `trace_mem_write()` for RAM/flash/MMIO writes
+
+**JSON Trace Format (both emulators):**
+```json
+{
+  "step": 0, "cycle": 0, "type": "instruction",
+  "pc": "0x000000",
+  "opcode": {"bytes": "F3", "mnemonic": "DI"},
+  "regs_before": {"A": "0x00", "F": "0x00", "BC": "0x000000", ...},
+  "io_ops": [{"type": "write", "target": "ram", "addr": "0xD00000", ...}]
+}
+```
+
+### Initial Comparison Results (1000 instructions)
+
+| Metric | Our Emulator | CEmu | Difference |
+|--------|--------------|------|------------|
+| Initial cycle | 0 | 20 | CEmu prefetches during reset |
+| DI (F3) cycle cost | 10 | 20 | Prefetch adds next-byte cycles |
+| F after XOR A | 0x44 | 0x44 | ✓ Both correct |
+| BC at step 5 | 0x000000 | 0x001005 | Trace sync difference |
+
+### Key Divergences Identified
+
+1. **Cycle offset**: CEmu starts execution at cycle 20 (counting reset cycles), we start at 0
+2. **Instruction timing**: Systematic 2x differences in per-instruction cycle costs
+3. **XOR A flags**: ~~F register shows 0x00 vs 0x44~~ (Both show 0x44, was trace comparison artifact)
+4. **Suffix opcode display**: CEmu shows "5B C3" (includes next byte), we show "5B"
+5. **I/O tracking**: Our traces include I/O ops, CEmu's hooks only capture RAM/flash writes
+
+### Root Cause: Prefetch Cycle Accounting
+
+**Discovery:** The systematic 2x cycle timing difference is due to CEmu's **prefetch mechanism**.
+
+**CEmu's cpu_fetch_byte() in cpu.c:**
+```c
+static uint8_t cpu_fetch_byte(void) {
+    uint8_t value = cpu.prefetch;  // Return previously prefetched byte
+    cpu_prefetch(cpu.registers.PC + 1, cpu.ADL);  // Prefetch NEXT byte (adds cycles!)
+    return value;
+}
+```
+
+**Impact:** Each instruction fetch charges flash wait cycles for the NEXT byte, not the current byte:
+- At reset: `cpu_flush()` calls `cpu_prefetch(0)` → adds 10 cycles, prefetches 0xF3 (DI opcode)
+- DI executes: `cpu_fetch_byte()` returns 0xF3, then prefetches byte at 0x01 → adds another 10 cycles
+- Total for DI: **20 cycles** (CEmu) vs **10 cycles** (our emulator)
+
+**Our implementation:** Fetches current byte and adds cycles for THAT read, without prefetching ahead.
+
+**To achieve exact parity:** Would need to implement prefetch mechanism where:
+1. Reset prefetches PC=0
+2. Each fetch_byte returns prefetched value and prefetches PC+1
+3. This "shifts" cycle accounting by one instruction
+
+**Note:** This is a fundamental architectural difference. Boot succeeds with our current implementation, but cycle counts won't match CEmu exactly. For most purposes, the relative timing is correct; the absolute offset is different.
+
+_Root cause identified: 2026-02-02_
+
+### Usage
+
+```bash
+# Generate our trace
+cd core && cargo run --release --example debug -- fulltrace 10000
+
+# Generate CEmu trace (rebuild if needed)
+cd ../cemu-ref && ./test/fulltrace "../TI-84 CE.rom" 10000 /tmp/cemu.json
+
+# Compare
+cd ../core && cargo run --release --example debug -- fullcompare ../traces/*.json /tmp/cemu.json
+```
+
+### CEmu Build (one-time setup)
+
+```bash
+cd cemu-ref/core
+make clean && make
+cd ..
+gcc -I core -o test/fulltrace test/fulltrace.c -L core -lcemucore -lm
+```
+
+_Tooling created: 2026-02-02_
+
+---
+
+## SPI Timing Divergence Analysis (2026-02-02)
+
+### Summary
+
+Comprehensive trace comparison revealed a divergence at **step 418749** caused by SPI STATUS register returning different values:
+- **Our emulator**: A=0x20 (tfve=2 in STATUS)
+- **CEmu**: A=0x00 (tfve=0 in STATUS)
+
+This causes a `JR NZ` branch to behave differently, leading to execution path divergence.
+
+### Root Cause
+
+The SPI TX FIFO valid entry count (`tfve`) differs between emulators at the same step:
+
+| Time | Our Emulator | CEmu |
+|------|--------------|------|
+| Step 418722-418730 | Write 3 bytes to DATA, tfve=3 | Same |
+| Step 418738 | Enable SPI (CR2=0x0101) | Same |
+| Step 418749 | STATUS read returns tfve=2 | STATUS read returns tfve=0 |
+
+Our SPI only completed 1 transfer (3→2), while CEmu completed all 3 (3→0).
+
+### Technical Details
+
+**Port Access:** `IN A,(C)` with BC=0x00D00D reads SPI STATUS register offset 0x0D (byte 1 of STATUS).
+
+**STATUS Register Format:**
+- Bits 12-15: tfve (TX FIFO valid entries)
+- Bits 4-7: rfve (RX FIFO valid entries)
+- Bit 2: transfer in progress
+- Bit 1: TX FIFO not full
+- Bit 0: RX FIFO full
+
+Reading byte 1 (offset 0x0D) returns `(STATUS >> 8) & 0xFF`, so tfve=2 returns 0x20.
+
+### Cause Analysis
+
+**CEmu's approach:** Uses a scheduler that fires `spi_event()` at precise cycle times. Transfers complete automatically even without port access.
+
+**Our approach:** Uses lazy evaluation - SPI state only updates during port reads/writes via `update()` function.
+
+**The gap:** Between SPI enable (step 418738) and STATUS read (step 418749), there are ~279 cycles. CEmu's scheduler processes all 3 transfers (each ~72 cycles). Our lazy approach only processes transfers when `update()` is called, which happens on the STATUS read.
+
+### Why Lazy Evaluation Falls Short
+
+Our `update()` function does process pending transfers:
+```rust
+while let Some(next_cycle) = self.next_event_cycle {
+    if current_cycles < next_cycle { break; }
+    // Complete transfer and start next...
+}
+```
+
+However, the issue may be:
+1. The `next_event_cycle` calculation differs from CEmu's scheduler timing
+2. The transfer completion chaining doesn't match CEmu's event-driven model
+3. CPU speed changes or cycle accounting drift affects the comparison
+
+### Recommended Fix
+
+Integrate SPI with the main scheduler (already stubbed as `EventId::Spi`):
+1. When transfer starts, schedule completion event: `scheduler.set(EventId::Spi, ticks)`
+2. In event handler, complete transfer and potentially schedule next
+3. Remove lazy `update()` loop
+
+This matches CEmu's architecture where `sched_set(SCHED_SPI, ticks)` precisely schedules `spi_event()`.
+
+### Impact
+
+- **Boot**: Completes successfully (divergence at step 418K is late in boot)
+- **Correctness**: Execution paths diverge after step ~700K
+- **Risk**: Programs relying on precise SPI timing may behave differently
+
+### Verification Commands
+
+```bash
+# Generate trace with SPI logging
+cd core && SPI_TRACE=1 cargo run --release --example debug -- trace 420000 2>&1 | grep '^\[spi\]'
+
+# Compare at divergence point
+python3 -c "
+# ... trace comparison script ...
+"
+```
+
+_Analysis completed: 2026-02-02_
+
+---
+
+## Cycle Parity Achievement and Remaining Issues (2026-02-02)
+
+### Summary
+
+Achieved **exact cycle parity with CEmu through 700K+ boot steps** after fixing:
+
+1. **LCD Write Delay** (bus.rs): Added `lcd_write_ctrl_delay()` matching CEmu's timing for LCD controller writes. At 48MHz with non-serial flash, also includes `cycles |= 1` alignment.
+
+2. **SPI Transfer Timing** (spi.rs): Fixed to always use `(divider + 1)` for transfer tick calculation. Previously RX-only transfers incorrectly used just `divider`.
+
+### Remaining Issue: Keypad INT_STATUS Divergence
+
+At step **702259**, execution diverges due to keypad INT_STATUS read returning different values:
+- **Our emulator**: A=0x04 (ANY_KEY bit set)
+- **CEmu**: A=0x00 (status clear)
+
+This causes a `RET Z` instruction to behave differently:
+- CEmu: Z flag set (A=0), RET executes, returns to 0x000F7B
+- Ours: Z flag clear (A=4), RET not taken, falls through to 0x0037ED
+
+### Technical Details
+
+**Sequence leading to divergence:**
+
+| Step | Action | Our State | CEmu State |
+|------|--------|-----------|------------|
+| 702239 | Write 0x01 to CONTROL (mode=1) | Mode 1 | Mode 1 |
+| 702245 | Write 0x04 to INT_ACK (mask) | Mask=0x04 | Mask=0x04 |
+| 702251 | Write 0xFF to INT_STATUS (clear) | Status should be 0 | Status=0 |
+| 702259 | Read INT_STATUS | Returns 0x04 | Returns 0x00 |
+
+**The mystery:** Writing 0xFF to INT_STATUS should clear all bits (write-1-to-clear). Then reading should return 0. But we return 0x04 (ANY_KEY bit set).
+
+### Suspected Cause
+
+When INT_STATUS is written, our code sets `needs_any_key_check = true` and calls `any_key_check()`. If `any_key_check()` sees any key state (even stale edge flags), it sets `int_status |= ANY_KEY`.
+
+Possible issues:
+1. Edge flags not properly cleared from earlier operations
+2. `any_key_check()` running when it shouldn't
+3. Different timing of status bit operations vs CEmu
+
+### Impact
+
+- **Boot completes successfully** - divergence at 700K+ steps is during OS initialization
+- **Keys work correctly** - the actual key input path is functional
+- **Future debugging needed** - for applications requiring exact behavioral parity
+
+### Verification
+
+```bash
+# Generate 1M step trace
+cd core && cargo run --release --example debug -- fulltrace 1000000
+
+# Compare with CEmu trace
+python3 << 'EOF'
+# ... comparison script showing first register divergence ...
+EOF
+```
+
+_Analysis completed: 2026-02-02_
+
+---
+
+## Scheduler CPU Speed Conversion Fix (2026-02-03)
+
+### Summary
+
+Fixed a critical bug where **scheduler events (RTC, timers) fired at wrong times** due to incorrect cycle conversion when CPU speed changes.
+
+### The Bug
+
+When CPU speed changes (e.g., 48MHz → 6MHz), CEmu converts its cycle counter:
+```
+new_cycles = old_cycles * new_rate / old_rate
+```
+
+Our bus.rs did this correctly, but the **scheduler's internal `cpu_cycles` wasn't being converted**. This caused `advance()` to compute incorrect deltas:
+
+```rust
+pub fn advance(&mut self, cpu_cycles: u64) {
+    // BUG: When bus.total_cycles() decreases (speed change), delta becomes 0!
+    let delta_cycles = cpu_cycles.saturating_sub(self.cpu_cycles);
+    self.cpu_cycles = cpu_cycles;
+    self.base_ticks += self.cpu_cycles_to_base_ticks(delta_cycles);
+}
+```
+
+**Example trace:**
+1. Before speed change: bus.total_cycles() = 1000, scheduler.cpu_cycles = 1000
+2. Instruction writes to port 0x01 (48MHz → 6MHz)
+3. Bus converts cycles: 1000 * 6/48 = 125, plus instruction cost → 133
+4. `advance(133)` called: delta = 133 - 1000 = **0** (saturating_sub)
+5. base_ticks doesn't advance!
+
+### Impact
+
+- **RTC LATCH events fired ~480K cycles early** (about 10ms at 48MHz)
+- At step ~2.9M, RTC port 0x40 returned 0xE8 instead of 0xF8
+- Caused boot to take different code path (Classic mode vs MathPrint mode)
+
+### The Fix
+
+Added `convert_cpu_cycles()` to scheduler and call it when CPU speed changes:
+
+**scheduler.rs:**
+```rust
+/// Convert the internal cpu_cycles counter when CPU speed changes.
+pub fn convert_cpu_cycles(&mut self, new_rate_mhz: u32, old_rate_mhz: u32) {
+    if old_rate_mhz > 0 && new_rate_mhz != old_rate_mhz {
+        self.cpu_cycles = self.cpu_cycles * new_rate_mhz as u64 / old_rate_mhz as u64;
+    }
+}
+```
+
+**emu.rs (in step/run_cycles):**
+```rust
+// Check for CPU speed change BEFORE advancing scheduler
+let new_cpu_speed = self.bus.ports.control.cpu_speed();
+if new_cpu_speed != cpu_speed {
+    let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+    let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+    self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+    self.scheduler.set_cpu_speed(new_cpu_speed);
+}
+```
+
+### Result
+
+- **No divergence through 4 million steps** (previously diverged at ~2.06M)
+- RTC timing now matches CEmu exactly
+- Boot behavior is identical to CEmu
+
+### Key Lesson
+
+When cycle counters are converted on speed changes, **all components tracking cycles must be converted together**. The bus, scheduler, and any other timing-dependent subsystems must stay synchronized.
+
+_Fixed: 2026-02-03_

@@ -437,6 +437,7 @@ fn test_jp() {
     bus.poke_byte(1, 0x34);
     bus.poke_byte(2, 0x12);
     bus.poke_byte(3, 0x00);
+    cpu.init_prefetch(&mut bus); // Load first byte into prefetch
 
     cpu.step(&mut bus);
     assert_eq!(cpu.pc, 0x001234);
@@ -1110,9 +1111,10 @@ fn test_ldir() {
     assert_eq!(cpu.hl, 0xD00103); // Source pointer advanced
     assert_eq!(cpu.de, 0xD00203); // Dest pointer advanced
 
-    // Cycles: 2 flash fetches (ED B0) + 3 iterations * (RAM read + RAM write)
-    // = 10+10 + 3*(4+2) = 20 + 18 = 38
-    assert_eq!(cycles, 38);
+    // Cycles: 2 flash fetches (ED B0) + 3 iterations * (RAM read + RAM write + internal)
+    // = 10+10 + 3*(4+2+1) = 20 + 21 = 41
+    // CEmu: cpu.cycles += internalCycles (1 per iteration) for block instructions
+    assert_eq!(cycles, 41);
 
     // Check memory was copied
     assert_eq!(bus.peek_byte(0xD00200), 0x11);
@@ -1419,6 +1421,7 @@ fn test_jp_ix() {
     // JP (IX) (DD E9)
     bus.poke_byte(0, 0xDD);
     bus.poke_byte(1, 0xE9);
+    cpu.init_prefetch(&mut bus); // Load first byte into prefetch
 
     step_full(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x001234);
@@ -1643,10 +1646,11 @@ fn test_ld_a_hl_uses_read_byte() {
     let cycles = cpu.step(&mut bus);
 
     assert_eq!(cpu.a, 0x42, "LD A,(HL) should read value from memory");
-    // Cycles: 1 flash fetch (10) + 1 RAM read (4) = 14
+    // Cycles: 1 flash fetch (10) + 1 RAM read (4) + 1 internal (HL) operand cycle = 15
+    // CEmu: cpu.cycles += z == 6 || y == 6 for (HL) operand
     assert_eq!(
-        cycles, 14,
-        "LD A,(HL) should take 14 cycles (flash fetch + RAM read)"
+        cycles, 15,
+        "LD A,(HL) should take 15 cycles (flash fetch + RAM read + (HL) operand)"
     );
 }
 
@@ -1666,8 +1670,9 @@ fn test_add_a_hl_uses_read_byte() {
     let cycles = cpu.step(&mut bus);
 
     assert_eq!(cpu.a, 0x15, "ADD A,(HL) should add value from memory");
-    // Cycles: 1 flash fetch (10) + 1 RAM read (4) = 14
-    assert_eq!(cycles, 14, "ADD A,(HL) should take 14 cycles (flash fetch + RAM read)");
+    // Cycles: 1 flash fetch (10) + 1 RAM read (4) + 1 internal (HL) operand cycle = 15
+    // CEmu: cpu.cycles += z == 6 for (HL) operand in ALU operations
+    assert_eq!(cycles, 15, "ADD A,(HL) should take 15 cycles (flash fetch + RAM read + (HL) operand)");
 }
 
 #[test]
@@ -2037,8 +2042,9 @@ fn test_inc_hl_indirect_cycle_count() {
     let cycles = cpu.step(&mut bus);
 
     assert_eq!(bus.peek_byte(0xD00100), 0x42);
-    // Cycles: 1 flash fetch (10) + 1 RAM read (4) + 1 RAM write (2) = 16
-    assert_eq!(cycles, 16, "INC (HL) should take 16 cycles (flash fetch + RAM read + RAM write)");
+    // Cycles: 1 flash fetch (10) + 1 RAM read (4) + 1 internal (HL) cycle + 1 RAM write (2) = 17
+    // CEmu: cpu.cycles += context.y == 6 for (HL) operand in INC/DEC
+    assert_eq!(cycles, 17, "INC (HL) should take 17 cycles (flash fetch + RAM read + (HL) operand + RAM write)");
 }
 
 #[test]
@@ -2056,8 +2062,9 @@ fn test_dec_hl_indirect_cycle_count() {
     let cycles = cpu.step(&mut bus);
 
     assert_eq!(bus.peek_byte(0xD00100), 0x41);
-    // Cycles: 1 flash fetch (10) + 1 RAM read (4) + 1 RAM write (2) = 16
-    assert_eq!(cycles, 16, "DEC (HL) should take 16 cycles (flash fetch + RAM read + RAM write)");
+    // Cycles: 1 flash fetch (10) + 1 RAM read (4) + 1 internal (HL) cycle + 1 RAM write (2) = 17
+    // CEmu: cpu.cycles += context.y == 6 for (HL) operand in INC/DEC
+    assert_eq!(cycles, 17, "DEC (HL) should take 17 cycles (flash fetch + RAM read + (HL) operand + RAM write)");
 }
 
 // ========== ZEXALL-Style Comprehensive Flag Tests ==========

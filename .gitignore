@@ -53,4 +53,4 @@ Thumbs.db
 /core/examples/trace_*.rs
 
 # Claude Code local settings
-.claude/
+.claude/traces/

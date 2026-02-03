@@ -164,8 +164,9 @@ impl Flash {
     /// * `addr` - Address relative to flash start
     /// * `value` - Byte to write
     pub fn write_direct(&mut self, addr: u32, value: u8) {
+        // Allocate flash if needed (for testing convenience)
         if self.data.is_empty() {
-            return; // Flash not initialized
+            self.data = vec![0xFF; addr::FLASH_SIZE];
         }
         let offset = (addr & (addr::FLASH_SIZE as u32 - 1)) as usize;
         self.data[offset] = value;
@@ -384,6 +385,9 @@ impl Ram {
     ///
     /// Returns a slice of the VRAM region (0xD40000-0xD657FF relative to RAM start)
     pub fn vram(&self) -> &[u8] {
+        if self.data.is_empty() {
+            return &[];
+        }
         let start = (addr::VRAM_START - addr::RAM_START) as usize;
         let end = start + addr::VRAM_SIZE;
         &self.data[start..end]
@@ -391,6 +395,9 @@ impl Ram {
 
     /// Get mutable VRAM slice
     pub fn vram_mut(&mut self) -> &mut [u8] {
+        if self.data.is_empty() {
+            return &mut [];
+        }
         let start = (addr::VRAM_START - addr::RAM_START) as usize;
         let end = start + addr::VRAM_SIZE;
         &mut self.data[start..end]
@@ -531,7 +538,9 @@ mod tests {
 
         #[test]
         fn test_vram_size() {
-            let ram = Ram::new();
+            let mut ram = Ram::new();
+            // Force RAM allocation by writing to it
+            ram.write(0, 0);
             assert_eq!(ram.vram().len(), addr::VRAM_SIZE);
         }
 

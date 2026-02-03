@@ -20,7 +20,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
 
-use emu_core::Emu;
+use emu_core::{Emu, StepInfo, IoTarget, IoOpType, disassemble};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -56,6 +56,17 @@ fn main() {
         "mathprint" => cmd_mathprint_trace(),
         "watchpoint" => cmd_watchpoint_mathprint(),
         "ports" => cmd_ports(),
+        "fulltrace" => {
+            let steps = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1000);
+            cmd_fulltrace(steps);
+        }
+        "fullcompare" => {
+            if args.len() < 4 {
+                eprintln!("Usage: debug fullcompare <ours.json> <cemu.json>");
+                return;
+            }
+            cmd_fullcompare(&args[2], &args[3]);
+        }
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -102,6 +113,14 @@ Commands:
   ports             Dump control port values after boot
                     Useful for comparing with CEmu
 
+  fulltrace [steps] Generate comprehensive trace with I/O operations
+                    Default: 1000 steps
+                    Output: JSON with full instruction and I/O details
+
+  fullcompare <ours> <cemu>
+                    Compare two JSON trace files and report divergence
+                    Reports first difference in PC, registers, or I/O ops
+
   help              Show this help message
 
 Environment Variables:
@@ -135,9 +154,17 @@ fn load_rom() -> Option<Vec<u8>> {
 }
 
 fn create_emu() -> Option<Emu> {
+    // Check environment variable for flash mode
+    // Default is parallel flash (Bus::new() default), set SERIAL_FLASH=1 for serial flash
+    let serial_flash = std::env::var("SERIAL_FLASH").map(|v| v == "1").unwrap_or(false);
+    create_emu_with_serial_flash(serial_flash)
+}
+
+fn create_emu_with_serial_flash(serial_flash: bool) -> Option<Emu> {
     let rom_data = load_rom()?;
     let mut emu = Emu::new();
     emu.load_rom(&rom_data).expect("Failed to load ROM");
+    emu.set_serial_flash(serial_flash);
     // Power on the calculator (required before run_cycles will execute)
     emu.press_on_key();
     Some(emu)
@@ -156,30 +183,68 @@ fn cmd_boot() {
     println!("{}", emu.dump_registers());
 
     let chunk_size = 1_000_000;
-    let max_cycles = 100_000_000u64;
+    let max_cycles = 300_000_000u64;
     let mut total_executed = 0u64;
 
     println!("\nBooting...");
 
+    // Track how many times we see the idle loop address
+    let mut idle_loop_count = 0;
+    const IDLE_LOOP_THRESHOLD: u32 = 3;
+
     while total_executed < max_cycles {
         let executed = emu.run_cycles(chunk_size);
         total_executed += executed as u64;
+
+        let pc = emu.pc();
+
 
         // Progress every 10M cycles
         if total_executed % 10_000_000 < chunk_size as u64 {
             println!(
                 "[{:.1}M cycles] PC={:06X} SP={:06X} halted={}",
                 total_executed as f64 / 1_000_000.0,
-                emu.pc(),
+                pc,
                 emu.sp(),
                 emu.is_halted()
             );
         }
 
+        // Check for idle loop - TI-OS idle is at 085B7D-085B80 (EI; NOP; HALT; PUSH HL)
+        // The CPU continuously wakes from HALT due to interrupts, so we detect
+        // boot completion by seeing this PC range repeatedly with LCD enabled.
+        if (0x085B7D..=0x085B80).contains(&pc) {
+            idle_loop_count += 1;
+            let lcd = emu.lcd_snapshot();
+            if idle_loop_count >= IDLE_LOOP_THRESHOLD && lcd.control & 1 != 0 {
+                println!(
+                    "\nBoot complete: Reached idle loop at PC={:06X} after {:.2}M cycles",
+                    pc,
+                    total_executed as f64 / 1_000_000.0
+                );
+                break;
+            }
+        }
+        // Don't reset idle_loop_count - PC can be at other addresses during interrupt handling
+
+        // Check for HALT - but don't break if we're in the idle loop area
+        // The TI-OS idle loop (EI; NOP; HALT) continuously halts and wakes
         if emu.is_halted() {
+            // If we've hit the idle loop at least once with LCD enabled, this is normal
+            // operation - boot is complete. Check for LCD enabled.
+            let lcd = emu.lcd_snapshot();
+            if (0x085B7D..=0x085B80).contains(&pc) && lcd.control & 1 != 0 {
+                println!(
+                    "\nBoot complete: CPU halted at idle loop PC={:06X} after {:.2}M cycles",
+                    pc,
+                    total_executed as f64 / 1_000_000.0
+                );
+                break;
+            }
+            // Otherwise, unexpected HALT - report and break
             println!(
                 "\nHALT at PC={:06X} after {:.2}M cycles",
-                emu.pc(),
+                pc,
                 total_executed as f64 / 1_000_000.0
             );
             break;
@@ -224,34 +289,675 @@ fn cmd_trace(max_steps: u64) {
     println!("=== Trace Generation ({} steps) ===", max_steps);
     println!("Output: {}", output_path);
 
-    // Log initial state
-    log_trace_line(&mut writer, &mut emu, 0, 0);
+    let mut step_count = 0u64;
 
-    let mut step = 0u64;
-    let mut total_cycles = 0u64;
+    while step_count < max_steps {
+        // Execute one instruction and get pre-execution state
+        let step_info = match emu.step() {
+            Some(info) => info,
+            None => break,
+        };
 
-    while step < max_steps {
-        let cycles_used = emu.run_cycles(1) as u64;
-        step += 1;
-        total_cycles += cycles_used;
+        // Log the step with pre-execution PC/opcode but post-execution registers
+        // This matches CEmu's trace format where registers show the result of execution
+        log_step_info_post(&mut writer, step_count, &step_info, &emu);
 
-        log_trace_line(&mut writer, &mut emu, step, total_cycles);
+        // Debug: print detailed info for early steps
+        if step_count < 10 {
+            let pc_after = emu.pc();
+            eprintln!("Step {}: PC {:06X} -> {:06X}, cycles {} (delta {})",
+                     step_count, step_info.pc, pc_after, step_info.total_cycles, step_info.cycles);
+        }
 
-        if step % 100_000 == 0 {
-            eprintln!("Progress: {} steps ({:.1}%)", step, 100.0 * step as f64 / max_steps as f64);
+        step_count += 1;
+
+        if step_count % 100_000 == 0 {
+            eprintln!("Progress: {} steps ({:.1}%)", step_count, 100.0 * step_count as f64 / max_steps as f64);
         }
 
         if emu.is_halted() {
-            eprintln!("HALT at step {} / cycle {}", step, total_cycles);
+            eprintln!("HALT at step {} / cycle {}", step_count, step_info.total_cycles);
             break;
         }
     }
 
     writer.flush().expect("Failed to flush output");
-    println!("Trace complete: {} steps / {} cycles", step, total_cycles);
+    println!("Trace complete: {} steps", step_count);
     println!("Saved to: {}", output_path);
 }
 
+/// Generate comprehensive trace with I/O operations (JSON format)
+/// NOTE: To match CEmu's format, "regs_before" actually contains the state AFTER
+/// the instruction executes (CEmu's naming is misleading).
+fn cmd_fulltrace(max_steps: u64) {
+    let mut emu = match create_emu() {
+        Some(e) => e,
+        None => return,
+    };
+
+    // Enable full I/O tracing
+    emu.enable_full_trace();
+
+    // Create traces directory
+    fs::create_dir_all("../traces").ok();
+    fs::create_dir_all("traces").ok();
+
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let output_path = format!("../traces/fulltrace_{}.json", timestamp);
+    let file = File::create(&output_path).expect("Failed to create output file");
+    let mut writer = BufWriter::new(file);
+
+    println!("=== Full Trace Generation ({} steps) ===", max_steps);
+    println!("Output: {}", output_path);
+
+    // Write JSON array start
+    writeln!(writer, "[").expect("Failed to write");
+
+    let mut step_count = 0u64;
+    let mut first_entry = true;
+
+    // Buffer to hold previous step's info - we write prev step with current regs
+    // This matches CEmu's format where "regs_before" is actually post-execution state
+    let mut prev_step: Option<StepInfo> = None;
+
+    while step_count < max_steps {
+        // Execute one instruction and get state with I/O ops
+        let step_info = match emu.step() {
+            Some(info) => info,
+            None => break,
+        };
+
+        // Write the PREVIOUS step's entry using CURRENT registers (post-execution)
+        if let Some(prev) = prev_step.take() {
+            if !first_entry {
+                writeln!(writer, ",").expect("Failed to write");
+            }
+            first_entry = false;
+
+            // Write prev step's PC/opcode but current step's registers (post-execution state)
+            write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &step_info);
+        }
+
+        step_count += 1;
+        prev_step = Some(step_info.clone());
+
+        if step_count % 10_000 == 0 {
+            eprintln!("Progress: {} steps ({:.1}%)", step_count, 100.0 * step_count as f64 / max_steps as f64);
+        }
+
+        if emu.is_halted() {
+            eprintln!("HALT at step {} / cycle {}", step_count, step_info.total_cycles);
+            // Write final step - use current emulator state as post-execution registers
+            if let Some(prev) = prev_step.take() {
+                if !first_entry {
+                    writeln!(writer, ",").expect("Failed to write");
+                }
+                // Create pseudo StepInfo with current state
+                let final_regs = StepInfo {
+                    pc: emu.pc(),
+                    sp: emu.sp(),
+                    a: emu.a(),
+                    f: emu.f(),
+                    bc: emu.bc(),
+                    de: emu.de(),
+                    hl: emu.hl(),
+                    ix: emu.ix(),
+                    iy: emu.iy(),
+                    adl: emu.adl(),
+                    iff1: emu.iff1(),
+                    iff2: emu.iff2(),
+                    im: emu.interrupt_mode(),
+                    halted: emu.is_halted(),
+                    opcode: [0; 4],
+                    opcode_len: 0,
+                    cycles: 0,
+                    total_cycles: emu.total_cycles(),
+                    io_ops: vec![],
+                };
+                write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &final_regs);
+            }
+            break;
+        }
+    }
+
+    // Write final step if we didn't hit HALT
+    // For the last step, we need to capture current emulator state as post-execution registers
+    if let Some(prev) = prev_step {
+        if !first_entry {
+            writeln!(writer, ",").expect("Failed to write");
+        }
+        // Create a pseudo StepInfo with current emulator state for the final entry's registers
+        let final_regs = StepInfo {
+            pc: emu.pc(),
+            sp: emu.sp(),
+            a: emu.a(),
+            f: emu.f(),
+            bc: emu.bc(),
+            de: emu.de(),
+            hl: emu.hl(),
+            ix: emu.ix(),
+            iy: emu.iy(),
+            adl: emu.adl(),
+            iff1: emu.iff1(),
+            iff2: emu.iff2(),
+            im: emu.interrupt_mode(),
+            halted: emu.is_halted(),
+            opcode: [0; 4],
+            opcode_len: 0,
+            cycles: 0,
+            total_cycles: emu.total_cycles(),
+            io_ops: vec![],
+        };
+        write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &final_regs);
+    }
+
+    // Write JSON array end
+    writeln!(writer, "\n]").expect("Failed to write");
+
+    writer.flush().expect("Failed to flush output");
+    println!("Full trace complete: {} steps", step_count);
+    println!("Saved to: {}", output_path);
+}
+
+/// Write trace entry using previous step's PC/opcode but current step's registers
+/// This matches CEmu's format where "regs_before" is actually post-execution state
+fn write_fulltrace_json_with_post_regs(
+    writer: &mut BufWriter<File>,
+    step: u64,
+    prev_info: &StepInfo,
+    curr_info: &StepInfo,
+) {
+    // Disassemble the instruction
+    let disasm = disassemble(&prev_info.opcode[..prev_info.opcode_len], prev_info.adl);
+
+    // Format opcode bytes
+    let opcode_hex = prev_info.opcode[..prev_info.opcode_len]
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // CEmu reports cpu.cycles which is cycles AFTER instruction execution
+    // Use total_cycles directly to match CEmu's format
+    let cycles_after = prev_info.total_cycles;
+
+    // Start JSON object
+    write!(writer, "  {{\n").expect("Failed to write");
+    write!(writer, "    \"step\": {},\n", step).expect("Failed to write");
+    write!(writer, "    \"cycle\": {},\n", cycles_after).expect("Failed to write");
+    write!(writer, "    \"type\": \"instruction\",\n").expect("Failed to write");
+    write!(writer, "    \"pc\": \"0x{:06X}\",\n", prev_info.pc).expect("Failed to write");
+
+    // Opcode info
+    write!(writer, "    \"opcode\": {{\n").expect("Failed to write");
+    write!(writer, "      \"bytes\": \"{}\",\n", opcode_hex).expect("Failed to write");
+    write!(writer, "      \"mnemonic\": \"{}\"\n", escape_json(&disasm.mnemonic)).expect("Failed to write");
+    write!(writer, "    }},\n").expect("Failed to write");
+
+    // Registers - use CURRENT step's pre-state (which is prev step's post-state)
+    write!(writer, "    \"regs_before\": {{\n").expect("Failed to write");
+    write!(writer, "      \"A\": \"0x{:02X}\",\n", curr_info.a).expect("Failed to write");
+    write!(writer, "      \"F\": \"0x{:02X}\",\n", curr_info.f).expect("Failed to write");
+    write!(writer, "      \"BC\": \"0x{:06X}\",\n", curr_info.bc).expect("Failed to write");
+    write!(writer, "      \"DE\": \"0x{:06X}\",\n", curr_info.de).expect("Failed to write");
+    write!(writer, "      \"HL\": \"0x{:06X}\",\n", curr_info.hl).expect("Failed to write");
+    write!(writer, "      \"IX\": \"0x{:06X}\",\n", curr_info.ix).expect("Failed to write");
+    write!(writer, "      \"IY\": \"0x{:06X}\",\n", curr_info.iy).expect("Failed to write");
+    write!(writer, "      \"SP\": \"0x{:06X}\",\n", curr_info.sp).expect("Failed to write");
+    write!(writer, "      \"IFF1\": {},\n", curr_info.iff1).expect("Failed to write");
+    write!(writer, "      \"IFF2\": {},\n", curr_info.iff2).expect("Failed to write");
+    write!(writer, "      \"IM\": \"{:?}\",\n", curr_info.im).expect("Failed to write");
+    write!(writer, "      \"ADL\": {},\n", curr_info.adl).expect("Failed to write");
+    write!(writer, "      \"halted\": {}\n", curr_info.halted).expect("Failed to write");
+    write!(writer, "    }},\n").expect("Failed to write");
+
+    // I/O operations from the previous step
+    write!(writer, "    \"io_ops\": [\n").expect("Failed to write");
+    for (i, io_op) in prev_info.io_ops.iter().enumerate() {
+        let target_str = match io_op.target {
+            IoTarget::Ram => "ram",
+            IoTarget::Flash => "flash",
+            IoTarget::MmioPort => "mmio",
+            IoTarget::CpuPort => "port",
+        };
+        let op_type_str = match io_op.op_type {
+            IoOpType::Read => "read",
+            IoOpType::Write => "write",
+        };
+
+        write!(writer, "      {{\n").expect("Failed to write");
+        write!(writer, "        \"type\": \"{}\",\n", op_type_str).expect("Failed to write");
+        write!(writer, "        \"target\": \"{}\",\n", target_str).expect("Failed to write");
+        write!(writer, "        \"addr\": \"0x{:06X}\",\n", io_op.addr).expect("Failed to write");
+        if matches!(io_op.op_type, IoOpType::Write) {
+            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value).expect("Failed to write");
+            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+        } else {
+            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+        }
+        if i < prev_info.io_ops.len() - 1 {
+            write!(writer, "      }},\n").expect("Failed to write");
+        } else {
+            write!(writer, "      }}\n").expect("Failed to write");
+        }
+    }
+    write!(writer, "    ],\n").expect("Failed to write");
+
+    // Cycles used by this instruction
+    write!(writer, "    \"cycles\": {}\n", prev_info.cycles).expect("Failed to write");
+    write!(writer, "  }}").expect("Failed to write");
+}
+
+/// Write a single trace entry in JSON format
+fn write_fulltrace_json(writer: &mut BufWriter<File>, step: u64, info: &StepInfo) {
+    // Disassemble the instruction
+    let disasm = disassemble(&info.opcode[..info.opcode_len], info.adl);
+
+    // Format opcode bytes
+    let opcode_hex = info.opcode[..info.opcode_len]
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // CEmu reports cpu.cycles which is cycles AFTER instruction execution
+    // Use total_cycles directly to match CEmu's format
+    let cycles_after = info.total_cycles;
+
+    // Start JSON object
+    write!(writer, "  {{\n").expect("Failed to write");
+    write!(writer, "    \"step\": {},\n", step).expect("Failed to write");
+    write!(writer, "    \"cycle\": {},\n", cycles_after).expect("Failed to write");
+    write!(writer, "    \"type\": \"instruction\",\n").expect("Failed to write");
+    write!(writer, "    \"pc\": \"0x{:06X}\",\n", info.pc).expect("Failed to write");
+
+    // Opcode info
+    write!(writer, "    \"opcode\": {{\n").expect("Failed to write");
+    write!(writer, "      \"bytes\": \"{}\",\n", opcode_hex).expect("Failed to write");
+    write!(writer, "      \"mnemonic\": \"{}\"\n", escape_json(&disasm.mnemonic)).expect("Failed to write");
+    write!(writer, "    }},\n").expect("Failed to write");
+
+    // Registers before
+    write!(writer, "    \"regs_before\": {{\n").expect("Failed to write");
+    write!(writer, "      \"A\": \"0x{:02X}\",\n", info.a).expect("Failed to write");
+    write!(writer, "      \"F\": \"0x{:02X}\",\n", info.f).expect("Failed to write");
+    write!(writer, "      \"BC\": \"0x{:06X}\",\n", info.bc).expect("Failed to write");
+    write!(writer, "      \"DE\": \"0x{:06X}\",\n", info.de).expect("Failed to write");
+    write!(writer, "      \"HL\": \"0x{:06X}\",\n", info.hl).expect("Failed to write");
+    write!(writer, "      \"IX\": \"0x{:06X}\",\n", info.ix).expect("Failed to write");
+    write!(writer, "      \"IY\": \"0x{:06X}\",\n", info.iy).expect("Failed to write");
+    write!(writer, "      \"SP\": \"0x{:06X}\",\n", info.sp).expect("Failed to write");
+    write!(writer, "      \"IFF1\": {},\n", info.iff1).expect("Failed to write");
+    write!(writer, "      \"IFF2\": {},\n", info.iff2).expect("Failed to write");
+    write!(writer, "      \"IM\": \"{:?}\",\n", info.im).expect("Failed to write");
+    write!(writer, "      \"ADL\": {},\n", info.adl).expect("Failed to write");
+    write!(writer, "      \"halted\": {}\n", info.halted).expect("Failed to write");
+    write!(writer, "    }},\n").expect("Failed to write");
+
+    // I/O operations
+    write!(writer, "    \"io_ops\": [\n").expect("Failed to write");
+    for (i, io_op) in info.io_ops.iter().enumerate() {
+        let target_str = match io_op.target {
+            IoTarget::Ram => "ram",
+            IoTarget::Flash => "flash",
+            IoTarget::MmioPort => "mmio",
+            IoTarget::CpuPort => "port",
+        };
+        let op_type_str = match io_op.op_type {
+            IoOpType::Read => "read",
+            IoOpType::Write => "write",
+        };
+
+        write!(writer, "      {{\n").expect("Failed to write");
+        write!(writer, "        \"type\": \"{}\",\n", op_type_str).expect("Failed to write");
+        write!(writer, "        \"target\": \"{}\",\n", target_str).expect("Failed to write");
+        write!(writer, "        \"addr\": \"0x{:06X}\",\n", io_op.addr).expect("Failed to write");
+        if matches!(io_op.op_type, IoOpType::Write) {
+            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value).expect("Failed to write");
+            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+        } else {
+            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+        }
+        if i < info.io_ops.len() - 1 {
+            write!(writer, "      }},\n").expect("Failed to write");
+        } else {
+            write!(writer, "      }}\n").expect("Failed to write");
+        }
+    }
+    write!(writer, "    ],\n").expect("Failed to write");
+
+    // Cycles used by this instruction
+    write!(writer, "    \"cycles\": {}\n", info.cycles).expect("Failed to write");
+    write!(writer, "  }}").expect("Failed to write");
+}
+
+/// Escape special characters for JSON string
+fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\")
+     .replace('"', "\\\"")
+     .replace('\n', "\\n")
+     .replace('\r', "\\r")
+     .replace('\t', "\\t")
+}
+
+/// Compare two fulltrace JSON files and report divergence
+fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
+    println!("=== Full Trace Comparison ===");
+    println!("Our trace:  {}", ours_path);
+    println!("CEmu trace: {}", cemu_path);
+
+    // Read both files
+    let ours_content = match fs::read_to_string(ours_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read our trace: {}", e);
+            return;
+        }
+    };
+
+    let cemu_content = match fs::read_to_string(cemu_path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read CEmu trace: {}", e);
+            return;
+        }
+    };
+
+    // Parse JSON entries (simple regex-based parsing for key values)
+    let ours_entries = parse_trace_entries(&ours_content);
+    let cemu_entries = parse_trace_entries(&cemu_content);
+
+    println!("\nOur trace:  {} entries", ours_entries.len());
+    println!("CEmu trace: {} entries", cemu_entries.len());
+
+    let min_entries = ours_entries.len().min(cemu_entries.len());
+    let mut first_divergence: Option<usize> = None;
+    let mut divergence_count = 0;
+
+    println!("\nComparing {} entries...\n", min_entries);
+
+    for i in 0..min_entries {
+        let ours = &ours_entries[i];
+        let cemu = &cemu_entries[i];
+
+        let mut diffs = Vec::new();
+
+        // Compare step
+        if ours.step != cemu.step {
+            diffs.push(format!("step: {} vs {}", ours.step, cemu.step));
+        }
+
+        // Compare PC
+        if ours.pc != cemu.pc {
+            diffs.push(format!("PC: 0x{:06X} vs 0x{:06X}", ours.pc, cemu.pc));
+        }
+
+        // Compare registers
+        if ours.a != cemu.a { diffs.push(format!("A: 0x{:02X} vs 0x{:02X}", ours.a, cemu.a)); }
+        if ours.f != cemu.f { diffs.push(format!("F: 0x{:02X} vs 0x{:02X}", ours.f, cemu.f)); }
+        if ours.bc != cemu.bc { diffs.push(format!("BC: 0x{:06X} vs 0x{:06X}", ours.bc, cemu.bc)); }
+        if ours.de != cemu.de { diffs.push(format!("DE: 0x{:06X} vs 0x{:06X}", ours.de, cemu.de)); }
+        if ours.hl != cemu.hl { diffs.push(format!("HL: 0x{:06X} vs 0x{:06X}", ours.hl, cemu.hl)); }
+        if ours.ix != cemu.ix { diffs.push(format!("IX: 0x{:06X} vs 0x{:06X}", ours.ix, cemu.ix)); }
+        if ours.iy != cemu.iy { diffs.push(format!("IY: 0x{:06X} vs 0x{:06X}", ours.iy, cemu.iy)); }
+        if ours.sp != cemu.sp { diffs.push(format!("SP: 0x{:06X} vs 0x{:06X}", ours.sp, cemu.sp)); }
+
+        // Compare flags
+        if ours.adl != cemu.adl { diffs.push(format!("ADL: {} vs {}", ours.adl, cemu.adl)); }
+        if ours.iff1 != cemu.iff1 { diffs.push(format!("IFF1: {} vs {}", ours.iff1, cemu.iff1)); }
+        if ours.iff2 != cemu.iff2 { diffs.push(format!("IFF2: {} vs {}", ours.iff2, cemu.iff2)); }
+
+        // Compare cycle count
+        if ours.cycle != cemu.cycle {
+            diffs.push(format!("cycles: {} vs {}", ours.cycle, cemu.cycle));
+        }
+
+        // Compare I/O operations count
+        if ours.io_ops_count != cemu.io_ops_count {
+            diffs.push(format!("io_ops: {} vs {}", ours.io_ops_count, cemu.io_ops_count));
+        }
+
+        if !diffs.is_empty() {
+            divergence_count += 1;
+            if first_divergence.is_none() {
+                first_divergence = Some(i);
+            }
+
+            // Only print first 10 divergences in detail
+            if divergence_count <= 10 {
+                println!("=== DIVERGENCE at step {} ===", i);
+                println!("Our PC:  0x{:06X}  Opcode: {}", ours.pc, ours.opcode);
+                println!("CEmu PC: 0x{:06X}  Opcode: {}", cemu.pc, cemu.opcode);
+                println!("Differences:");
+                for diff in &diffs {
+                    println!("  - {}", diff);
+                }
+                println!();
+            }
+        }
+    }
+
+    // Summary
+    println!("=== Summary ===");
+    println!("Entries compared: {}", min_entries);
+    println!("Divergences: {}", divergence_count);
+
+    if let Some(idx) = first_divergence {
+        println!("First divergence at step: {}", idx);
+    } else {
+        println!("No divergences found!");
+    }
+
+    if ours_entries.len() != cemu_entries.len() {
+        println!("Warning: Different number of entries ({} vs {})",
+                 ours_entries.len(), cemu_entries.len());
+    }
+}
+
+/// Parsed trace entry
+#[derive(Default)]
+struct TraceEntry {
+    step: u64,
+    cycle: u64,
+    pc: u32,
+    a: u8,
+    f: u8,
+    bc: u32,
+    de: u32,
+    hl: u32,
+    ix: u32,
+    iy: u32,
+    sp: u32,
+    adl: bool,
+    iff1: bool,
+    iff2: bool,
+    opcode: String,
+    io_ops_count: usize,
+}
+
+/// Parse trace entries from JSON content (simple regex-based parsing)
+fn parse_trace_entries(content: &str) -> Vec<TraceEntry> {
+    let mut entries = Vec::new();
+    let mut current = TraceEntry::default();
+    let mut in_io_ops = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+
+        if line.starts_with("{") && !line.contains("io_ops") {
+            current = TraceEntry::default();
+        } else if line.starts_with("}") && !in_io_ops {
+            entries.push(std::mem::take(&mut current));
+        }
+
+        // Parse fields
+        if let Some(v) = extract_json_u64(line, "\"step\"") {
+            current.step = v;
+        }
+        if let Some(v) = extract_json_u64(line, "\"cycle\"") {
+            current.cycle = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"pc\"") {
+            current.pc = v;
+        }
+        if let Some(v) = extract_json_hex8(line, "\"A\"") {
+            current.a = v;
+        }
+        if let Some(v) = extract_json_hex8(line, "\"F\"") {
+            current.f = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"BC\"") {
+            current.bc = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"DE\"") {
+            current.de = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"HL\"") {
+            current.hl = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"IX\"") {
+            current.ix = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"IY\"") {
+            current.iy = v;
+        }
+        if let Some(v) = extract_json_hex32(line, "\"SP\"") {
+            current.sp = v;
+        }
+        if line.contains("\"ADL\"") {
+            current.adl = line.contains("true");
+        }
+        if line.contains("\"IFF1\"") {
+            current.iff1 = line.contains("true");
+        }
+        if line.contains("\"IFF2\"") {
+            current.iff2 = line.contains("true");
+        }
+        if let Some(v) = extract_json_string(line, "\"bytes\"") {
+            current.opcode = v;
+        }
+
+        // Track I/O ops count
+        if line.contains("\"io_ops\"") {
+            in_io_ops = true;
+        }
+        if in_io_ops && line.contains("\"type\"") {
+            current.io_ops_count += 1;
+        }
+        if in_io_ops && line.starts_with("]") {
+            in_io_ops = false;
+        }
+    }
+
+    entries
+}
+
+fn extract_json_u64(line: &str, key: &str) -> Option<u64> {
+    if !line.contains(key) {
+        return None;
+    }
+    let rest = line.split(':').nth(1)?;
+    let value = rest.trim().trim_end_matches(',');
+    value.parse().ok()
+}
+
+fn extract_json_hex32(line: &str, key: &str) -> Option<u32> {
+    if !line.contains(key) {
+        return None;
+    }
+    let rest = line.split(':').nth(1)?;
+    let value = rest.trim().trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    let hex_str = value.trim_start_matches("0x").trim_start_matches("0X");
+    u32::from_str_radix(hex_str, 16).ok()
+}
+
+fn extract_json_hex8(line: &str, key: &str) -> Option<u8> {
+    if !line.contains(key) {
+        return None;
+    }
+    let rest = line.split(':').nth(1)?;
+    let value = rest.trim().trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    let hex_str = value.trim_start_matches("0x").trim_start_matches("0X");
+    u8::from_str_radix(hex_str, 16).ok()
+}
+
+fn extract_json_string(line: &str, key: &str) -> Option<String> {
+    if !line.contains(key) {
+        return None;
+    }
+    let rest = line.split(':').nth(1)?;
+    let value = rest.trim().trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    Some(value.to_string())
+}
+
+/// Log a step using pre-execution PC/opcode but post-execution registers
+/// This matches CEmu's trace behavior where:
+/// - PC and opcode are captured BEFORE execution (shows what instruction ran)
+/// - Registers are captured AFTER execution (shows the result)
+fn log_step_info_post(writer: &mut BufWriter<File>, step: u64, info: &StepInfo, emu: &Emu) {
+    // Use POST-execution register values from emu (like CEmu does)
+    let af = ((emu.a() as u16) << 8) | (emu.f() as u16);
+
+    // Format opcode bytes (from pre-execution state)
+    let op_str = match info.opcode_len {
+        4 => format!("{:02X}{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]),
+        3 => format!("{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2]),
+        2 => format!("{:02X}{:02X}", info.opcode[0], info.opcode[1]),
+        _ => format!("{:02X}", info.opcode[0]),
+    };
+
+    let im = emu.interrupt_mode();
+    let im_str = format!("{:?}", im).replace("IM", "Mode");
+
+    // Use total_cycles after execution
+    let cycles_after = info.total_cycles;
+
+    writeln!(
+        writer,
+        "{:06} {:08} {:06X} {:06X} {:04X} {:06X} {:06X} {:06X} {:06X} {:06X} {} {} {} {} {} {}",
+        step, cycles_after, info.pc, emu.sp(), af, emu.bc(), emu.de(), emu.hl(), emu.ix(), emu.iy(),
+        if emu.adl() { 1 } else { 0 },
+        if emu.iff1() { 1 } else { 0 },
+        if emu.iff2() { 1 } else { 0 },
+        im_str,
+        if emu.is_halted() { 1 } else { 0 },
+        op_str
+    ).expect("Failed to write trace line");
+}
+
+/// Log a step using pre-execution state from StepInfo (legacy, for compatibility)
+#[allow(dead_code)]
+fn log_step_info(writer: &mut BufWriter<File>, step: u64, info: &StepInfo) {
+    let af = ((info.a as u16) << 8) | (info.f as u16);
+
+    // Format opcode bytes
+    let op_str = match info.opcode_len {
+        4 => format!("{:02X}{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]),
+        3 => format!("{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2]),
+        2 => format!("{:02X}{:02X}", info.opcode[0], info.opcode[1]),
+        _ => format!("{:02X}", info.opcode[0]),
+    };
+
+    let im_str = format!("{:?}", info.im).replace("IM", "Mode");
+
+    // Use total_cycles - cycles to get cycles BEFORE this instruction (for step 0 parity)
+    let cycles_before = info.total_cycles.saturating_sub(info.cycles as u64);
+
+    writeln!(
+        writer,
+        "{:06} {:08} {:06X} {:06X} {:04X} {:06X} {:06X} {:06X} {:06X} {:06X} {} {} {} {} {} {}",
+        step, cycles_before, info.pc, info.sp, af, info.bc, info.de, info.hl, info.ix, info.iy,
+        if info.adl { 1 } else { 0 },
+        if info.iff1 { 1 } else { 0 },
+        if info.iff2 { 1 } else { 0 },
+        im_str,
+        if info.halted { 1 } else { 0 },
+        op_str
+    ).expect("Failed to write trace line");
+}
+
+/// Legacy log function for compatibility (uses current emu state)
+#[allow(dead_code)]
 fn log_trace_line(writer: &mut BufWriter<File>, emu: &mut Emu, step: u64, cycles: u64) {
     let pc = emu.pc();
     let sp = emu.sp();
@@ -851,6 +1557,20 @@ fn cmd_mathprint_trace() {
                 addr, count, emu.peek_byte(addr));
         }
     }
+
+    // Check the source of MathPrint value
+    let mp_source = 0xD01171u32;
+    println!("\n=== MathPrint Source Address ===");
+    println!("0xD01171 (source of MathPrint value): 0x{:02X}", emu.peek_byte(mp_source));
+    println!("  This value is loaded and written to 0xD000C4 by ROM code at 0x0008AED0");
+
+    // Check if there's anything interesting around 0xD01170
+    println!("\n=== Memory around 0xD01170 ===");
+    for offset in 0..16u32 {
+        let addr = 0xD01170 + offset;
+        print!("{:02X} ", emu.peek_byte(addr));
+    }
+    println!();
 }
 
 // === Control Port Dump ===

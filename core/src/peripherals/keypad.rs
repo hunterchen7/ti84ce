@@ -170,6 +170,12 @@ impl KeypadController {
     /// the key press until it's queried.
     pub fn set_key_edge(&mut self, row: usize, col: usize, pressed: bool) {
         if row < KEYPAD_ROWS && col < KEYPAD_COLS {
+            // Skip ON key (row 2, col 0) - CEmu stores it separately from keyMap
+            // The ON key has its own interrupt handling (INT_ON) and doesn't
+            // participate in normal keypad scanning/any_key_check
+            if row == 2 && col == 0 {
+                return;
+            }
             if pressed {
                 // Set edge on press, not on release (CEmu behavior)
                 self.key_edge_flags[row][col] = true;
@@ -347,6 +353,12 @@ impl KeypadController {
 
         if row < KEYPAD_ROWS {
             for col in 0..KEYPAD_COLS {
+                // Skip ON key (row 2, col 0) - CEmu stores it separately from keyMap
+                // The ON key has its own interrupt handling and doesn't participate
+                // in normal keypad scanning/any_key_check
+                if row == 2 && col == 0 {
+                    continue;
+                }
                 // Combine current state with edge flag (CEmu: data | data >> 8)
                 if key_state[row][col] || self.key_edge_flags[row][col] {
                     result |= 1 << col;
@@ -624,10 +636,17 @@ impl KeypadController {
         let data_mask: u16 = (1 << col_limit) - 1;
         any &= data_mask;
 
-        // Log when we actually detect keys (debug only)
-        // if any != 0 {
-        //     crate::emu::log_event(&format!("KEYPAD_CHECK: detected keys! any=0x{:04X}", any));
-        // }
+        // Debug: log any_key_check results
+        static mut ANY_KEY_CHECK_COUNT: u32 = 0;
+        unsafe {
+            ANY_KEY_CHECK_COUNT += 1;
+            if any != 0 || ANY_KEY_CHECK_COUNT % 10000 == 1 {
+                eprintln!(
+                    "ANY_KEY_CHECK #{}: any=0x{:04X} mask=0x{:04X} int_status=0x{:02X}",
+                    ANY_KEY_CHECK_COUNT, any, self.mask, self.int_status
+                );
+            }
+        }
 
         // CEmu: Store combined 'any' in ALL rows that are in the mask
         // This is the critical behavior for TI-OS key detection!

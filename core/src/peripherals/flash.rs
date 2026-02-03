@@ -70,7 +70,8 @@ impl FlashController {
             // Cached values will be set by recalculate_mapping
             mapping_enabled: false,
             cached_mapped_bytes: 0,
-            cached_total_wait_cycles: 0,
+            // Initialize to match wait_states (base 6 + 4 = 10)
+            cached_total_wait_cycles: 10,
         };
         controller.recalculate_mapping();
         controller

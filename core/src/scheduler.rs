@@ -7,6 +7,9 @@
 /// This is the LCM of all hardware clocks, allowing integer division for conversions.
 pub const SCHED_BASE_CLOCK_RATE: u64 = 7_680_000_000;
 
+/// Number of 32kHz ticks per second
+pub const TICKS_PER_SECOND: u64 = 32_768;
+
 /// Clock identifiers for different hardware components
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -172,6 +175,19 @@ impl Scheduler {
         self.cpu_speed
     }
 
+    /// Convert the internal cpu_cycles counter when CPU speed changes.
+    /// This must be called when the bus converts its cycle counter to keep
+    /// the scheduler's delta calculations correct.
+    ///
+    /// CEmu's sched_set_clock() converts: new_cycles = old_cycles * new_rate / old_rate
+    /// - 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
+    /// - 6MHz -> 48MHz: new_cycles = old_cycles * 48 / 6 = old_cycles * 8
+    pub fn convert_cpu_cycles(&mut self, new_rate_mhz: u32, old_rate_mhz: u32) {
+        if old_rate_mhz > 0 && new_rate_mhz != old_rate_mhz {
+            self.cpu_cycles = self.cpu_cycles * new_rate_mhz as u64 / old_rate_mhz as u64;
+        }
+    }
+
     /// Convert CPU cycles to base ticks
     fn cpu_cycles_to_base_ticks(&self, cycles: u64) -> u64 {
         // base_ticks = cycles * (SCHED_BASE_CLOCK_RATE / cpu_rate)
@@ -279,6 +295,31 @@ impl Scheduler {
         // Sort by timestamp (earliest first)
         events.sort_by_key(|(_, t)| *t);
         events.into_iter().map(|(e, _)| e).collect()
+    }
+
+    /// Calculate ticks until the next RTC LATCH point in the 1-second cycle.
+    ///
+    /// CEmu's RTC runs on a 1-second cycle from boot, with LATCH events
+    /// firing at a fixed point (LATCH_TICK_OFFSET) in each second.
+    /// This function calculates how many 32kHz ticks until the next LATCH.
+    ///
+    /// latch_offset: The LATCH_TICK_OFFSET constant (16429)
+    pub fn ticks_until_next_latch(&self, latch_offset: u64) -> u64 {
+        // Get current position in 32kHz ticks
+        let base_ticks_per_32k = ClockId::Clock32K.base_ticks_per_tick(self.cpu_speed); // 234,375
+        let current_32k_tick = self.base_ticks / base_ticks_per_32k;
+
+        // Position within the current 1-second cycle
+        let position_in_second = current_32k_tick % TICKS_PER_SECOND;
+
+        // Calculate ticks until next LATCH point
+        if position_in_second < latch_offset {
+            // LATCH hasn't happened yet this second
+            latch_offset - position_in_second
+        } else {
+            // LATCH already happened, wait for next second
+            TICKS_PER_SECOND - position_in_second + latch_offset
+        }
     }
 }
 

@@ -2,3 +2,17 @@
 # Start with 16MB initial, grow to 256MB as needed
 # dlmalloc handles growth better than large upfront allocations
 rustflags = ["-C", "link-args=--initial-memory=16777216 --max-memory=268435456"]
+
+# Android NDK linker configuration
+# Uses cargo-ndk or direct NDK clang linker
+[target.aarch64-linux-android]
+linker = "aarch64-linux-android21-clang"
+
+[target.armv7-linux-androideabi]
+linker = "armv7a-linux-androideabi21-clang"
+
+[target.x86_64-linux-android]
+linker = "x86_64-linux-android21-clang"
+
+[target.i686-linux-android]
+linker = "i686-linux-android21-clang"

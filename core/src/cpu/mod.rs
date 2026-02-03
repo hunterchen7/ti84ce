@@ -135,6 +135,11 @@ pub struct Cpu {
     /// When set, the next step() will execute an indexed instruction
     /// This matches CEmu's behavior where prefixes count as separate steps
     prefix: u8,
+    /// Prefetch buffer - holds the byte that was prefetched during the previous fetch
+    /// CEmu prefetches the NEXT byte during each fetch, which charges cycles for
+    /// the next instruction's first byte as part of the current instruction.
+    /// This is essential for cycle parity with CEmu.
+    pub prefetch: u8,
 }
 
 impl Cpu {
@@ -186,6 +191,8 @@ impl Cpu {
             suffix: false,
             madl: false,
             prefix: 0,
+            // Prefetch starts at 0 - will be initialized by reset() with bus access
+            prefetch: 0,
         }
     }
 
@@ -235,6 +242,19 @@ impl Cpu {
         self.suffix = false;
         self.madl = false;
         self.prefix = 0;
+        // Prefetch will be initialized by init_prefetch() when bus is available
+        self.prefetch = 0;
+    }
+
+    /// Initialize the prefetch buffer after reset
+    /// Must be called after reset() when the bus is available.
+    /// CEmu prefetches the first byte at PC during cpu_prefetch(0, cpu.ADL) at init.
+    pub fn init_prefetch(&mut self, bus: &mut Bus) {
+        // Prefetch the first byte at PC=0 (with MBASE applied if in Z80 mode)
+        let effective_pc = self.mask_addr_instr(self.pc);
+        // Read the byte and store it in prefetch buffer
+        // This charges cycles for the first instruction's first byte
+        self.prefetch = bus.fetch_byte(effective_pc, self.pc);
     }
 
     // ========== Instruction Execution ==========
@@ -246,7 +266,21 @@ impl Cpu {
     /// CPU processing cycles. This matches CEmu's cycle counting behavior.
     pub fn step(&mut self, bus: &mut Bus) -> u32 {
         // Track cycles at start - we return the delta at the end
-        let start_cycles = bus.cycles();
+        // Use total_cycles() to include both CPU internal cycles and memory timing
+        let start_cycles = bus.total_cycles();
+
+        /// Helper to compute cycle delta, handling the case where the cycle counter
+        /// was reset mid-instruction (e.g., when CPU speed changes via port 0x01 write).
+        /// In that case, end_cycles < start_cycles, so we return end_cycles (cycles since reset).
+        #[inline(always)]
+        fn cycle_delta(start: u64, end: u64) -> u32 {
+            if end >= start {
+                (end - start) as u32
+            } else {
+                // Cycle counter was reset - return cycles accumulated since reset
+                end as u32
+            }
+        }
 
         // Process EI delay - interrupts enable AFTER the instruction following EI
         // This happens BEFORE we check for interrupts, so that:
@@ -265,14 +299,14 @@ impl Cpu {
         if self.nmi_pending {
             self.nmi_pending = false;
             self.handle_nmi(bus);
-            return (bus.cycles() - start_cycles) as u32;
+            return cycle_delta(start_cycles, bus.total_cycles());
         }
 
         // Check for maskable interrupt
         if self.irq_pending && self.iff1 {
             self.irq_pending = false;
             self.handle_irq(bus);
-            return (bus.cycles() - start_cycles) as u32;
+            return cycle_delta(start_cycles, bus.total_cycles());
         }
 
         // Check for ON key wake - can wake CPU even with interrupts disabled
@@ -299,7 +333,7 @@ impl Cpu {
             if self.halted {
                 self.halted = false;
                 bus.add_cycles(4); // Wake from halt cycle cost
-                return (bus.cycles() - start_cycles) as u32;
+                return cycle_delta(start_cycles, bus.total_cycles());
             }
             // If not halted, CPU is running in powered-off loop - interrupts now enabled,
             // so ON_KEY interrupt will fire on next iteration
@@ -313,7 +347,7 @@ impl Cpu {
                 self.any_key_wake = false;
                 self.halted = false;
                 bus.add_cycles(4); // Wake from halt cycle cost
-                return (bus.cycles() - start_cycles) as u32;
+                return cycle_delta(start_cycles, bus.total_cycles());
             }
             // Clear the flag even if not halted - signal has been processed
             self.any_key_wake = false;
@@ -323,7 +357,7 @@ impl Cpu {
             // CPU is halted, just consume cycles
             // Interrupts can wake it (handled above on next call)
             bus.add_cycles(4); // Halted NOP cycle cost
-            return (bus.cycles() - start_cycles) as u32;
+            return cycle_delta(start_cycles, bus.total_cycles());
         }
 
         // eZ80 per-instruction mode handling:
@@ -335,13 +369,8 @@ impl Cpu {
         }
         self.suffix = false;
 
-        // Check for pending DD/FD prefix from previous step
-        // CEmu counts DD/FD prefixes as separate instruction steps
-        if self.prefix != 0 {
-            let use_ix = self.prefix == 2; // 2=DD (IX), 3=FD (IY)
-            self.prefix = 0;
-            return self.execute_index(bus, use_ix);
-        }
+        // Note: DD/FD prefixes are now executed immediately in execute_x3,
+        // not deferred to the next step. This matches CEmu's trace behavior.
 
         // Opcode fetch loop - handles suffix opcodes that modify the following instruction
         // eZ80 suffix opcodes (.SIS, .LIS, .SIL, .LIL) are NOT separate instructions;
@@ -386,15 +415,18 @@ impl Cpu {
                 1 => {
                     if y == 6 && z == 6 {
                         // HALT
+                        bus.add_cycles(1); // CEmu: cpu.cycles++ before cpu_halt()
                         self.halted = true;
                     } else {
-                        // LD r,r'
+                        // LD r,r' - CEmu's cpu_read_write_reg does NOT add extra cycles
+                        // Memory timing for (HL) operands comes from mem_read/mem_write
                         let val = self.get_reg8(z, bus);
                         self.set_reg8(y, val, bus);
                     }
                 }
                 2 => {
-                    // ALU A,r
+                    // ALU A,r - CEmu's cpu_execute_alu does NOT add extra cycles
+                    // Memory timing for (HL) operands comes from mem_read_cpu
                     let val = self.get_reg8(z, bus);
                     self.execute_alu(y, val);
                 }
@@ -405,7 +437,7 @@ impl Cpu {
             break;
         }
 
-        (bus.cycles() - start_cycles) as u32
+        cycle_delta(start_cycles, bus.total_cycles())
     }
 
     /// Handle maskable interrupt (IRQ)
@@ -422,12 +454,14 @@ impl Cpu {
                 // Mode 0: Execute instruction on data bus
                 // Typically RST 38H on TI calculators
                 self.push_addr(bus, self.pc);
+                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
                 self.pc = 0x38;
                 13
             }
             InterruptMode::Mode1 => {
                 // Mode 1: Fixed call to 0x0038
                 self.push_addr(bus, self.pc);
+                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
                 self.pc = 0x38;
                 13
             }
@@ -437,6 +471,7 @@ impl Cpu {
                 // The vectored interrupt mode (using I register) is only used in IM 3
                 // with the asic.im2 flag, which the TI-84 CE doesn't use.
                 self.push_addr(bus, self.pc);
+                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
                 self.pc = 0x38;
                 13
             }
@@ -454,6 +489,7 @@ impl Cpu {
 
         // Jump to NMI handler at 0x0066
         self.push_addr(bus, self.pc);
+        self.prefetch(bus, 0x66); // Reload prefetch at NMI handler address
         self.pc = 0x66;
         11
     }
@@ -523,6 +559,7 @@ impl Cpu {
         if self.madl { mode_flags |= 1 << 3; }
         buf[pos] = mode_flags; pos += 1;
         buf[pos] = self.prefix; pos += 1;
+        buf[pos] = self.prefetch; pos += 1;
 
         // Padding to SNAPSHOT_SIZE
         let _ = pos; // Unused beyond here
@@ -588,7 +625,8 @@ impl Cpu {
         self.il = mode_flags & (1 << 1) != 0;
         self.suffix = mode_flags & (1 << 2) != 0;
         self.madl = mode_flags & (1 << 3) != 0;
-        self.prefix = buf[pos];
+        self.prefix = buf[pos]; pos += 1;
+        self.prefetch = buf[pos];
 
         Ok(())
     }

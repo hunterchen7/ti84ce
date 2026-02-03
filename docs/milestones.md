@@ -282,3 +282,53 @@ cargo run --release --example debug -- compare <cemu_trace>  # Compare traces
 - [ ] Speed toggle (normal/turbo)
 - [ ] Debug overlay (optional)
 - [ ] Accurate keypad layout
+
+## Milestone 12: CEmu Parity (Research Complete)
+
+**Goal:** Achieve closer logical parity with CEmu reference emulator.
+
+**Research Status:** Complete (2026-02-02)
+
+8 parallel research agents analyzed all difference categories in [cemu_core_comparison.md](cemu_core_comparison.md).
+
+### Priority Assessment
+
+| Area | Gap | Priority | Boot Impact |
+|------|-----|----------|-------------|
+| CPU Cycle Accounting | Internal cycles not applied | MODERATE | None |
+| CPU Protection Enforcement | No unprivileged checks | LOW (boot) / HIGH (security) | None |
+| Flash Cache/Serial Mode | Not implemented | MODERATE | None (parallel works) |
+| Scheduler Events | Missing TIMER_DELAY, KEYPAD, WATCHDOG | MODERATE | None |
+| Timer Global Registers | Missing 0x34/0x38 registers | MODERATE | None |
+| RTC Time Ticking | Counter never advances | MODERATE | Clock shows 00:00 |
+| Keypad Control Packing | Different register layout | LOW | None |
+| LCD Timing Registers | Stored but ignored (fixed 60Hz) | LOW | None |
+| SPI Device Abstraction | No FIFO data, no devices | MODERATE | None |
+| SHA256 | No hash computation | LOW | None |
+| Watchdog | No countdown/state machine | LOW | None |
+
+### Key Finding: Boot and TI-OS Work Correctly
+
+All research agents confirmed that **boot and basic TI-OS operation work correctly** with current implementation. The gaps are refinements for:
+- Advanced features (time display, indexed color modes, newer OS versions)
+- Edge cases (security enforcement, cycle-exact timing)
+- Unused peripherals (SHA256, full watchdog)
+
+### Recommended Implementation Order (if needed)
+
+1. **Timer Global Registers** - Easy add, enables app compatibility
+2. **RTC Time Ticking** - Enables clock display in status bar
+3. **CPU Cycle Accounting** - Improves timing accuracy
+4. **SPI Device Abstraction** - Needed for OS 5.7.0+ coprocessor
+
+### Research Reports
+
+Full research reports from 8 subagents cover:
+- CPU execution model (prefetch, cycles, protection, signals, IM3)
+- Bus/memory/flash (cache, wait states, flash commands, MMIO)
+- Scheduler (event coverage, CPU integration, base clock)
+- Interrupt/timer (global registers, delayed delivery, OS timer)
+- RTC (time ticking, latch mechanism, alarm)
+- Keypad (control packing, scan modes, ghosting, GPIO)
+- LCD (timing registers, palette/cursor, DMA, panel)
+- SPI/SHA256/Backlight/Watchdog (FIFO, hash, port state)
