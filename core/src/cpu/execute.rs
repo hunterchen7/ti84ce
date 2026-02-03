@@ -410,12 +410,16 @@ impl Cpu {
             2 => {
                 // JP cc,nn
                 // Fetch uses IL mode, then ADL becomes IL if jump is taken
-                let nn = self.fetch_addr(bus);
+                // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
+                    let nn = self.fetch_addr_no_prefetch(bus);
                     bus.add_cycles(1); // CEmu: cpu.cycles++ for jump taken
                     self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
                     self.adl = self.il;
+                } else {
+                    // When not taken, use regular fetch which maintains prefetch correctly
+                    let _ = self.fetch_addr(bus);
                 }
                 10
             }
@@ -424,8 +428,9 @@ impl Cpu {
                     0 => {
                         // JP nn
                         // Fetch uses IL mode (set by suffix), then ADL becomes IL
+                        // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
                         bus.add_cycles(1); // CEmu: cpu.cycles++ for JP nn
-                        let target = self.fetch_addr(bus);
+                        let target = self.fetch_addr_no_prefetch(bus);
                         self.prefetch(bus, target); // Reload prefetch at target
                         self.pc = target;
                         self.adl = self.il;
@@ -493,8 +498,9 @@ impl Cpu {
             4 => {
                 // CALL cc,nn
                 // Fetch uses IL mode, push uses L mode, then ADL becomes IL if call is taken
-                let nn = self.fetch_addr(bus);
+                // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
+                    let nn = self.fetch_addr_no_prefetch(bus);
                     // CEmu: cpu.cycles += !cpu.SUFFIX && !cpu.ADL (only in Z80 mode)
                     if !self.suffix && !self.adl {
                         bus.add_cycles(1);
@@ -509,6 +515,8 @@ impl Cpu {
                         17
                     }
                 } else {
+                    // When not taken, use regular fetch which maintains prefetch correctly
+                    let _ = self.fetch_addr(bus);
                     if self.adl {
                         13
                     } else {
@@ -532,7 +540,8 @@ impl Cpu {
                         0 => {
                             // CALL nn
                             // Fetch uses IL mode, push uses L mode, then ADL becomes IL
-                            let nn = self.fetch_addr(bus);
+                            // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
+                            let nn = self.fetch_addr_no_prefetch(bus);
                             self.push_addr(bus, self.pc);
                             self.prefetch(bus, nn); // Reload prefetch at target
                             self.pc = nn;
@@ -2168,11 +2177,15 @@ impl Cpu {
             }
             2 => {
                 // JP cc,nn - not affected by prefix but needs prefetch
-                let nn = self.fetch_addr(bus);
+                // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
+                    let nn = self.fetch_addr_no_prefetch(bus);
                     self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
                     self.adl = self.il;
+                } else {
+                    // When not taken, use regular fetch which maintains prefetch correctly
+                    let _ = self.fetch_addr(bus);
                 }
                 10
             }
@@ -2180,7 +2193,8 @@ impl Cpu {
                 match y {
                     0 => {
                         // JP nn - not affected by prefix but needs prefetch
-                        let target = self.fetch_addr(bus);
+                        // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
+                        let target = self.fetch_addr_no_prefetch(bus);
                         self.prefetch(bus, target); // Reload prefetch at target
                         self.pc = target;
                         self.adl = self.il;
@@ -2219,8 +2233,9 @@ impl Cpu {
             }
             4 => {
                 // CALL cc,nn - not affected by prefix but needs prefetch
-                let nn = self.fetch_addr(bus);
+                // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
+                    let nn = self.fetch_addr_no_prefetch(bus);
                     self.push_addr(bus, self.pc);
                     self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
@@ -2231,6 +2246,8 @@ impl Cpu {
                         17
                     }
                 } else {
+                    // When not taken, use regular fetch which maintains prefetch correctly
+                    let _ = self.fetch_addr(bus);
                     if self.adl {
                         13
                     } else {
@@ -2260,7 +2277,8 @@ impl Cpu {
                     match p {
                         0 => {
                             // CALL nn - not affected by prefix but needs prefetch
-                            let nn = self.fetch_addr(bus);
+                            // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
+                            let nn = self.fetch_addr_no_prefetch(bus);
                             self.push_addr(bus, self.pc);
                             self.prefetch(bus, nn); // Reload prefetch at target
                             self.pc = nn;

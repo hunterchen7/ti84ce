@@ -404,6 +404,48 @@ impl Cpu {
         }
     }
 
+    /// Fetch address at PC without prefetching the byte after the address.
+    /// This matches CEmu's cpu_fetch_word_no_prefetch() which is used for branch targets.
+    ///
+    /// CEmu's approach:
+    /// 1. fetch_byte() returns prefetched byte (low), prefetches mid
+    /// 2. Use prefetch buffer directly for mid (no new flash read)
+    /// 3. If IL mode: fetch_byte() returns mid, prefetches high
+    /// 4. Use prefetch buffer directly for high (no new flash read)
+    /// 5. Manually advance PC
+    ///
+    /// The final byte is NOT prefetched because cpu_jump() will do cpu_prefetch()
+    /// at the target address anyway.
+    #[inline]
+    pub fn fetch_addr_no_prefetch(&mut self, bus: &mut Bus) -> u32 {
+        // Fetch low byte (this prefetches the mid/high byte)
+        let b0 = self.fetch_byte(bus) as u32;
+        // Use the prefetch buffer directly for the mid byte
+        let b1 = self.prefetch as u32;
+
+        if self.il {
+            // Fetch mid byte (this prefetches the high byte)
+            let _ = self.fetch_byte(bus); // Discards b1, loads b2 into prefetch
+            let b2 = self.prefetch as u32;
+            // Manually advance PC past the high byte (don't prefetch beyond)
+            self.pc = if self.adl {
+                self.pc.wrapping_add(1) & 0xFFFFFF
+            } else {
+                self.pc.wrapping_add(1) & 0xFFFF
+            };
+            b0 | (b1 << 8) | (b2 << 16)
+        } else {
+            // Z80 mode: 16-bit address
+            // Manually advance PC past the high byte
+            self.pc = if self.adl {
+                self.pc.wrapping_add(1) & 0xFFFFFF
+            } else {
+                self.pc.wrapping_add(1) & 0xFFFF
+            };
+            b0 | (b1 << 8)
+        }
+    }
+
     /// Prefetch byte at target address and update prefetch buffer
     ///
     /// CEmu's cpu_prefetch() reads the byte at the target address and stores it
