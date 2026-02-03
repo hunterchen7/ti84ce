@@ -2,7 +2,7 @@
 //!
 //! Coordinates the CPU, bus, and peripherals to run the TI-84 Plus CE.
 
-use crate::bus::Bus;
+use crate::bus::{Bus, IoRecord};
 use crate::cpu::{Cpu, InterruptMode};
 use crate::peripherals::rtc::LATCH_TICK_OFFSET;
 use crate::scheduler::{EventId, Scheduler};
@@ -179,6 +179,50 @@ pub enum StopReason {
     BusFault(u32),
 }
 
+/// Information about a single instruction step (for trace comparison)
+/// Captures state BEFORE execution to match CEmu's trace format
+#[derive(Debug, Clone)]
+pub struct StepInfo {
+    /// PC before instruction execution
+    pub pc: u32,
+    /// SP before execution
+    pub sp: u32,
+    /// A register before execution
+    pub a: u8,
+    /// F (flags) register before execution
+    pub f: u8,
+    /// BC register before execution
+    pub bc: u32,
+    /// DE register before execution
+    pub de: u32,
+    /// HL register before execution
+    pub hl: u32,
+    /// IX register before execution
+    pub ix: u32,
+    /// IY register before execution
+    pub iy: u32,
+    /// ADL mode before execution
+    pub adl: bool,
+    /// IFF1 (interrupt flip-flop 1) before execution
+    pub iff1: bool,
+    /// IFF2 (interrupt flip-flop 2) before execution
+    pub iff2: bool,
+    /// Interrupt mode before execution
+    pub im: InterruptMode,
+    /// Whether CPU was halted before this step
+    pub halted: bool,
+    /// Opcode bytes at PC (up to 4 bytes)
+    pub opcode: [u8; 4],
+    /// Number of valid opcode bytes
+    pub opcode_len: usize,
+    /// Cycles used by this instruction
+    pub cycles: u32,
+    /// Total cycles after this instruction
+    pub total_cycles: u64,
+    /// I/O operations performed by this instruction (when full trace enabled)
+    pub io_ops: Vec<IoRecord>,
+}
+
 /// Main emulator state
 pub struct Emu {
     /// eZ80 CPU
@@ -289,6 +333,14 @@ impl Emu {
         self.halt_logged = false;
         self.boot_init_done = false;
         self.powered_on = false; // Require ON key press to power on again
+
+        // Initialize CPU prefetch buffer - charges cycles for first instruction's first byte
+        // This matches CEmu's cpu_inst_start() call at the beginning of cpu_execute()
+        self.cpu.init_prefetch(&mut self.bus);
+
+        // Account for init_prefetch cycles in total_cycles for trace parity with CEmu
+        // CEmu's cycle counter includes the prefetch cost before the first instruction
+        self.total_cycles = self.bus.total_cycles();
 
         // Clear framebuffer to black
         for pixel in &mut self.framebuffer {
@@ -453,6 +505,115 @@ impl Emu {
         }
 
         (self.total_cycles - start_cycles) as u32
+    }
+
+    /// Execute exactly one instruction and return detailed step information.
+    ///
+    /// This captures state BEFORE execution to match CEmu's trace format.
+    /// Use this for accurate trace comparison with CEmu.
+    pub fn step(&mut self) -> Option<StepInfo> {
+        if !self.rom_loaded || !self.powered_on {
+            return None;
+        }
+
+        // Sync scheduler with CPU speed setting
+        let cpu_speed = self.bus.ports.control.cpu_speed();
+        self.scheduler.set_cpu_speed(cpu_speed);
+
+        // Capture state BEFORE execution
+        let pc = self.cpu.pc;
+        let sp = self.cpu.sp;
+        let a = self.cpu.a;
+        let f = self.cpu.f;
+        let bc = self.cpu.bc;
+        let de = self.cpu.de;
+        let hl = self.cpu.hl;
+        let ix = self.cpu.ix;
+        let iy = self.cpu.iy;
+        let adl = self.cpu.adl;
+        let iff1 = self.cpu.iff1;
+        let iff2 = self.cpu.iff2;
+        let im = self.cpu.im;
+        let was_halted = self.cpu.halted;
+
+        // Read opcode bytes at PC
+        let (opcode, opcode_len) = self.peek_opcode(pc);
+
+        // Clear I/O ops buffer and set instruction context for tracing
+        self.bus.clear_instruction_io_ops();
+        self.bus.set_instruction_context(pc, &opcode[..opcode_len]);
+
+        // Handle CPU_SIGNAL_ANY_KEY equivalent
+        if self.cpu.any_key_wake {
+            let mode = self.bus.ports.keypad.mode();
+            log_event(&format!(
+                "ANY_KEY_CHECK: mode={} halted={} iff1={}",
+                mode, self.cpu.halted, self.cpu.iff1
+            ));
+            let key_state = self.bus.key_state().clone();
+            let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
+            if should_interrupt {
+                log_event("ANY_KEY_CHECK: raising keypad interrupt");
+                use crate::peripherals::interrupt::sources;
+                self.bus.ports.interrupt.raise(sources::KEYPAD);
+            }
+        }
+
+        // Execute one instruction
+        let cycles_used = self.cpu.step(&mut self.bus);
+
+        // Check for wake event
+        check_armed_trace_on_wake(was_halted, self.cpu.halted);
+
+        // Record in history
+        self.history.record(pc, &opcode[..opcode_len]);
+
+        // Update total cycles and advance scheduler
+        self.total_cycles += cycles_used as u64;
+        self.scheduler.advance(self.total_cycles);
+
+        // Process pending scheduler events
+        self.process_scheduler_events();
+
+        // Tick peripherals and check for interrupts
+        let tick_irq = self.bus.ports.tick(cycles_used);
+        if tick_irq {
+            self.cpu.irq_pending = true;
+        }
+
+        // Check if RTC needs a load event scheduled
+        if self.bus.ports.rtc.needs_load_scheduled() && !self.scheduler.is_active(EventId::Rtc) {
+            self.scheduler.set(EventId::Rtc, LATCH_TICK_OFFSET);
+        }
+
+        if self.cpu.halted {
+            self.last_stop = StopReason::Halted;
+        }
+
+        // Collect I/O ops from this instruction
+        let io_ops = self.bus.take_instruction_io_ops();
+
+        Some(StepInfo {
+            pc,
+            sp,
+            a,
+            f,
+            bc,
+            de,
+            hl,
+            ix,
+            iy,
+            adl,
+            iff1,
+            iff2,
+            im,
+            halted: was_halted,
+            opcode,
+            opcode_len,
+            cycles: cycles_used,
+            total_cycles: self.total_cycles,
+            io_ops,
+        })
     }
 
     /// Process any pending scheduler events
@@ -1443,6 +1604,23 @@ impl Emu {
             self.cpu.im,
             self.cpu.mbase,
         )
+    }
+
+    // === Full I/O Trace Methods ===
+
+    /// Enable full I/O tracing (records all memory/port operations per instruction)
+    pub fn enable_full_trace(&mut self) {
+        self.bus.enable_full_trace();
+    }
+
+    /// Disable full I/O tracing
+    pub fn disable_full_trace(&mut self) {
+        self.bus.disable_full_trace();
+    }
+
+    /// Check if full I/O tracing is enabled
+    pub fn is_full_trace_enabled(&self) -> bool {
+        self.bus.is_full_trace_enabled()
     }
 }
 

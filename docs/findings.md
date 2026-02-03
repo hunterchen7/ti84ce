@@ -90,6 +90,34 @@ loop {
 
 **Source**: CEmu's cpu.c suffix handling in the main execution loop.
 
+### Prefetch Mechanism for Cycle Parity
+
+CEmu uses a prefetch mechanism where each instruction fetch also prefetches the **next** byte. This charges memory access cycles for the next instruction's first byte as part of the current instruction.
+
+```c
+// CEmu's cpu_fetch_byte()
+static uint8_t cpu_fetch_byte(void) {
+    uint8_t value = cpu.prefetch;  // Return previously prefetched byte
+    cpu_prefetch(cpu.registers.PC + 1, cpu.ADL);  // Prefetch NEXT byte
+    return value;
+}
+```
+
+**Key implementation details**:
+1. `cpu_inst_start()` is called at the start of `cpu_execute()` to prefetch byte at PC=0
+2. Each `fetch_byte()` returns the prefetched value, then prefetches PC+1
+3. This means each instruction pays for prefetching the next instruction's first byte
+
+**Impact**: Without this mechanism, our emulator showed ~50% fewer cycles per instruction (10 vs 20 for flash reads). The prefetch adds the memory access cost for the next byte during each fetch, matching CEmu's cycle accounting.
+
+**Our implementation**:
+- Added `prefetch: u8` field to CPU state
+- `init_prefetch()` called after reset to prefetch first byte (charges startup cycles)
+- `fetch_byte()` returns prefetched byte, then prefetches PC+1
+- `emu.total_cycles` set to bus.total_cycles() after init_prefetch for trace parity
+
+**Source**: CEmu's cpu.c `cpu_fetch_byte()` and `cpu_prefetch()` functions.
+
 ### BIT Preserves F3/F5 (Undocumented) Flags
 
 For CB-prefixed BIT instructions, CEmu preserves F3/F5 from the **previous** F register instead of deriving them from the tested operand or address.
@@ -1363,6 +1391,38 @@ Added `rawtrace` command and setter methods to match CEmu's trace_gen initializa
 
 **Conclusion:** The MathPrint vs Classic mode difference may not exist in actual CEmu execution. The trace_gen tool appears to have timing issues that make direct comparison unreliable. The emulator boots correctly in Classic mode, which is the default when RAM is zeroed.
 
+**Further Investigation (2026-02-02): USB Status and MathPrint Source**
+
+Investigated why USB status 0x40 (CEmu's default) causes boot failure while 0xC0 works:
+
+1. **MathPrint source value (0xD01171):** After 70M cycles of boot, the value at 0xD01171 is 0x00. This is where the ROM loads the MathPrint flag from before writing to 0xD000C4. Both addresses contain 0x00 (Classic mode).
+
+2. **USB Status Bit 7 is Power Detection:**
+   - ROM at 0x0F64-0x0F6D checks bit 7 of USB status (port 0x0F)
+   - `IN0 A,(0x0F)` + `BIT 7,A` + `JR NZ,$+10`
+   - Bit 7 = 0x80 = VBUS/SESS valid (USB power connected)
+   - Bit 6 = 0x40 = ROLE_D (device mode, always set at reset)
+
+3. **Boot failure path with 0x40:**
+   - With bit 7 clear, ROM calls 0x0035FB (USB polling loop)
+   - Eventually leads to power-down sequence at 0x13A8-0x13B3:
+     - `DI` → `OUT0 (0x00),0xC0` → `OUT0 (0x09),0xD4` → `HALT`
+   - CPU halts with interrupts disabled at PC=0x13B3
+
+4. **CEmu's usb_status() behavior:**
+   - At reset: `otgcsr = 0x00310E20` → returns 0x40 (ROLE_D only, no VBUS)
+   - With USB plugged in: `usb_plug_b()` sets VBUS bits → returns 0xC0
+   - CEmu GUI may have USB "connected" by default or in testing
+
+5. **Resolution:** Our emulator returns 0xC0 (simulating USB power connected) because:
+   - Real calculators typically have either battery or USB power
+   - With no power source, ROM enters power-down HALT
+   - 0xC0 simulates "USB power present" which allows boot to proceed
+
+**Impact:** The MathPrint flag difference is **not caused by USB status**. With USB status 0xC0, boot completes successfully but still boots to Classic mode. The MathPrint flag is determined by what's stored at 0xD01171, which is 0x00 (Classic) when RAM is zeroed.
+
+_Investigation update: 2026-02-02 - USB status controls power detection, not MathPrint mode_
+
 ### RTC Load Timing Critical for Boot Flow
 
 The RTC (Real-Time Clock) load operation timing affects boot flow significantly. When the ROM reads RTC offset 0x40 (load status), the returned value determines whether polling loops continue or exit.
@@ -1580,3 +1640,102 @@ CEmu maintains `ports[0x100]` array with reset defaults and calculates gamma fac
 4. **Newer OS** - SPI coprocessor for OS 5.7.0+
 
 _Research completed: 2026-02-02_
+
+---
+
+## Full Trace Comparison System (2026-02-02)
+
+### Tooling Created
+
+Built comprehensive trace comparison infrastructure for exact parity debugging:
+
+**Our Emulator (`core/examples/debug.rs`):**
+- `fulltrace [steps]` - Generate JSON trace with full I/O operations
+- `fullcompare <ours> <cemu>` - Compare two JSON traces and report divergences
+
+**CEmu Integration (`cemu-ref/`):**
+- `core/trace.c/h` - Trace state management and JSON output
+- `test/fulltrace.c` - Standalone trace generator
+- Patched `cpu.c` with `trace_inst_start()` / `trace_inst_end()` hooks
+- Patched `mem.c` with `trace_mem_write()` for RAM/flash/MMIO writes
+
+**JSON Trace Format (both emulators):**
+```json
+{
+  "step": 0, "cycle": 0, "type": "instruction",
+  "pc": "0x000000",
+  "opcode": {"bytes": "F3", "mnemonic": "DI"},
+  "regs_before": {"A": "0x00", "F": "0x00", "BC": "0x000000", ...},
+  "io_ops": [{"type": "write", "target": "ram", "addr": "0xD00000", ...}]
+}
+```
+
+### Initial Comparison Results (1000 instructions)
+
+| Metric | Our Emulator | CEmu | Difference |
+|--------|--------------|------|------------|
+| Initial cycle | 0 | 20 | CEmu prefetches during reset |
+| DI (F3) cycle cost | 10 | 20 | Prefetch adds next-byte cycles |
+| F after XOR A | 0x44 | 0x44 | ✓ Both correct |
+| BC at step 5 | 0x000000 | 0x001005 | Trace sync difference |
+
+### Key Divergences Identified
+
+1. **Cycle offset**: CEmu starts execution at cycle 20 (counting reset cycles), we start at 0
+2. **Instruction timing**: Systematic 2x differences in per-instruction cycle costs
+3. **XOR A flags**: ~~F register shows 0x00 vs 0x44~~ (Both show 0x44, was trace comparison artifact)
+4. **Suffix opcode display**: CEmu shows "5B C3" (includes next byte), we show "5B"
+5. **I/O tracking**: Our traces include I/O ops, CEmu's hooks only capture RAM/flash writes
+
+### Root Cause: Prefetch Cycle Accounting
+
+**Discovery:** The systematic 2x cycle timing difference is due to CEmu's **prefetch mechanism**.
+
+**CEmu's cpu_fetch_byte() in cpu.c:**
+```c
+static uint8_t cpu_fetch_byte(void) {
+    uint8_t value = cpu.prefetch;  // Return previously prefetched byte
+    cpu_prefetch(cpu.registers.PC + 1, cpu.ADL);  // Prefetch NEXT byte (adds cycles!)
+    return value;
+}
+```
+
+**Impact:** Each instruction fetch charges flash wait cycles for the NEXT byte, not the current byte:
+- At reset: `cpu_flush()` calls `cpu_prefetch(0)` → adds 10 cycles, prefetches 0xF3 (DI opcode)
+- DI executes: `cpu_fetch_byte()` returns 0xF3, then prefetches byte at 0x01 → adds another 10 cycles
+- Total for DI: **20 cycles** (CEmu) vs **10 cycles** (our emulator)
+
+**Our implementation:** Fetches current byte and adds cycles for THAT read, without prefetching ahead.
+
+**To achieve exact parity:** Would need to implement prefetch mechanism where:
+1. Reset prefetches PC=0
+2. Each fetch_byte returns prefetched value and prefetches PC+1
+3. This "shifts" cycle accounting by one instruction
+
+**Note:** This is a fundamental architectural difference. Boot succeeds with our current implementation, but cycle counts won't match CEmu exactly. For most purposes, the relative timing is correct; the absolute offset is different.
+
+_Root cause identified: 2026-02-02_
+
+### Usage
+
+```bash
+# Generate our trace
+cd core && cargo run --release --example debug -- fulltrace 10000
+
+# Generate CEmu trace (rebuild if needed)
+cd ../cemu-ref && ./test/fulltrace "../TI-84 CE.rom" 10000 /tmp/cemu.json
+
+# Compare
+cd ../core && cargo run --release --example debug -- fullcompare ../traces/*.json /tmp/cemu.json
+```
+
+### CEmu Build (one-time setup)
+
+```bash
+cd cemu-ref/core
+make clean && make
+cd ..
+gcc -I core -o test/fulltrace test/fulltrace.c -L core -lcemucore -lm
+```
+
+_Tooling created: 2026-02-02_

@@ -135,6 +135,11 @@ pub struct Cpu {
     /// When set, the next step() will execute an indexed instruction
     /// This matches CEmu's behavior where prefixes count as separate steps
     prefix: u8,
+    /// Prefetch buffer - holds the byte that was prefetched during the previous fetch
+    /// CEmu prefetches the NEXT byte during each fetch, which charges cycles for
+    /// the next instruction's first byte as part of the current instruction.
+    /// This is essential for cycle parity with CEmu.
+    pub prefetch: u8,
 }
 
 impl Cpu {
@@ -186,6 +191,8 @@ impl Cpu {
             suffix: false,
             madl: false,
             prefix: 0,
+            // Prefetch starts at 0 - will be initialized by reset() with bus access
+            prefetch: 0,
         }
     }
 
@@ -235,6 +242,19 @@ impl Cpu {
         self.suffix = false;
         self.madl = false;
         self.prefix = 0;
+        // Prefetch will be initialized by init_prefetch() when bus is available
+        self.prefetch = 0;
+    }
+
+    /// Initialize the prefetch buffer after reset
+    /// Must be called after reset() when the bus is available.
+    /// CEmu prefetches the first byte at PC during cpu_prefetch(0, cpu.ADL) at init.
+    pub fn init_prefetch(&mut self, bus: &mut Bus) {
+        // Prefetch the first byte at PC=0 (with MBASE applied if in Z80 mode)
+        let effective_pc = self.mask_addr_instr(self.pc);
+        // Read the byte and store it in prefetch buffer
+        // This charges cycles for the first instruction's first byte
+        self.prefetch = bus.fetch_byte(effective_pc, self.pc);
     }
 
     // ========== Instruction Execution ==========
@@ -349,13 +369,8 @@ impl Cpu {
         }
         self.suffix = false;
 
-        // Check for pending DD/FD prefix from previous step
-        // CEmu counts DD/FD prefixes as separate instruction steps
-        if self.prefix != 0 {
-            let use_ix = self.prefix == 2; // 2=DD (IX), 3=FD (IY)
-            self.prefix = 0;
-            return self.execute_index(bus, use_ix);
-        }
+        // Note: DD/FD prefixes are now executed immediately in execute_x3,
+        // not deferred to the next step. This matches CEmu's trace behavior.
 
         // Opcode fetch loop - handles suffix opcodes that modify the following instruction
         // eZ80 suffix opcodes (.SIS, .LIS, .SIL, .LIL) are NOT separate instructions;
@@ -445,12 +460,14 @@ impl Cpu {
                 // Mode 0: Execute instruction on data bus
                 // Typically RST 38H on TI calculators
                 self.push_addr(bus, self.pc);
+                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
                 self.pc = 0x38;
                 13
             }
             InterruptMode::Mode1 => {
                 // Mode 1: Fixed call to 0x0038
                 self.push_addr(bus, self.pc);
+                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
                 self.pc = 0x38;
                 13
             }
@@ -460,6 +477,7 @@ impl Cpu {
                 // The vectored interrupt mode (using I register) is only used in IM 3
                 // with the asic.im2 flag, which the TI-84 CE doesn't use.
                 self.push_addr(bus, self.pc);
+                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
                 self.pc = 0x38;
                 13
             }
@@ -477,6 +495,7 @@ impl Cpu {
 
         // Jump to NMI handler at 0x0066
         self.push_addr(bus, self.pc);
+        self.prefetch(bus, 0x66); // Reload prefetch at NMI handler address
         self.pc = 0x66;
         11
     }
@@ -546,6 +565,7 @@ impl Cpu {
         if self.madl { mode_flags |= 1 << 3; }
         buf[pos] = mode_flags; pos += 1;
         buf[pos] = self.prefix; pos += 1;
+        buf[pos] = self.prefetch; pos += 1;
 
         // Padding to SNAPSHOT_SIZE
         let _ = pos; // Unused beyond here
@@ -611,7 +631,8 @@ impl Cpu {
         self.il = mode_flags & (1 << 1) != 0;
         self.suffix = mode_flags & (1 << 2) != 0;
         self.madl = mode_flags & (1 << 3) != 0;
-        self.prefix = buf[pos];
+        self.prefix = buf[pos]; pos += 1;
+        self.prefetch = buf[pos];
 
         Ok(())
     }

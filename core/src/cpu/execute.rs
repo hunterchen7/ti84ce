@@ -348,7 +348,9 @@ impl Cpu {
                 // Uses L mode for stack operations, then ADL becomes L
                 bus.add_cycles(1); // CEmu: cpu.cycles++ before condition check
                 if self.check_cc(y) {
-                    self.pc = self.pop_addr(bus);
+                    let target = self.pop_addr(bus);
+                    self.prefetch(bus, target); // Reload prefetch at return address
+                    self.pc = target;
                     self.adl = self.l;
                     if self.adl {
                         12
@@ -377,7 +379,9 @@ impl Cpu {
                             // RET
                             // Uses L mode for stack operations, then ADL becomes L
                             bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
-                            self.pc = self.pop_addr(bus);
+                            let target = self.pop_addr(bus);
+                            self.prefetch(bus, target); // Reload prefetch at return address
+                            self.pc = target;
                             self.adl = self.l;
                             10
                         }
@@ -389,7 +393,9 @@ impl Cpu {
                         2 => {
                             // JP (HL)
                             self.adl = self.l;
-                            self.pc = self.wrap_pc(self.hl);
+                            let target = self.wrap_pc(self.hl);
+                            self.prefetch(bus, target); // Reload prefetch at target
+                            self.pc = target;
                             4
                         }
                         3 => {
@@ -407,6 +413,7 @@ impl Cpu {
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
                     bus.add_cycles(1); // CEmu: cpu.cycles++ for jump taken
+                    self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
                     self.adl = self.il;
                 }
@@ -418,7 +425,9 @@ impl Cpu {
                         // JP nn
                         // Fetch uses IL mode (set by suffix), then ADL becomes IL
                         bus.add_cycles(1); // CEmu: cpu.cycles++ for JP nn
-                        self.pc = self.fetch_addr(bus);
+                        let target = self.fetch_addr(bus);
+                        self.prefetch(bus, target); // Reload prefetch at target
+                        self.pc = target;
                         self.adl = self.il;
                         10
                     }
@@ -491,6 +500,7 @@ impl Cpu {
                         bus.add_cycles(1);
                     }
                     self.push_addr(bus, self.pc);
+                    self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
                     self.adl = self.il;
                     if self.adl {
@@ -524,6 +534,7 @@ impl Cpu {
                             // Fetch uses IL mode, push uses L mode, then ADL becomes IL
                             let nn = self.fetch_addr(bus);
                             self.push_addr(bus, self.pc);
+                            self.prefetch(bus, nn); // Reload prefetch at target
                             self.pc = nn;
                             self.adl = self.il;
                             if self.adl {
@@ -534,19 +545,13 @@ impl Cpu {
                         }
                         1 => {
                             // DD prefix (IX instructions)
-                            // CEmu counts prefixes as separate instruction steps
-                            // Set prefix flag and return - execute_index() will be called on next step()
+                            // Execute the indexed instruction in the same step (not deferred)
                             // If next byte is ED, CEmu ignores DD and executes ED in the same step
                             let next = bus.peek_byte_fetch(self.mask_addr_instr(self.pc));
                             if next == 0xED {
                                 self.execute_ed(bus)
                             } else {
-                                // Preserve suffix modes (L/IL) for the indexed instruction
-                                // See findings.md: suffix opcodes should apply to the entire
-                                // next instruction including any DD/FD prefixes
-                                self.suffix = true;
-                                self.prefix = 2;
-                                4
+                                self.execute_index(bus, true)
                             }
                         }
                         2 => {
@@ -555,18 +560,13 @@ impl Cpu {
                         }
                         3 => {
                             // FD prefix (IY instructions)
-                            // CEmu counts prefixes as separate instruction steps
+                            // Execute the indexed instruction in the same step (not deferred)
                             // If next byte is ED, CEmu ignores FD and executes ED in the same step
                             let next = bus.peek_byte_fetch(self.mask_addr_instr(self.pc));
                             if next == 0xED {
                                 self.execute_ed(bus)
                             } else {
-                                // Preserve suffix modes (L/IL) for the indexed instruction
-                                // See findings.md: suffix opcodes should apply to the entire
-                                // next instruction including any DD/FD prefixes
-                                self.suffix = true;
-                                self.prefix = 3;
-                                4
+                                self.execute_index(bus, false)
                             }
                         }
                         _ => 4,
@@ -584,7 +584,9 @@ impl Cpu {
                 bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_rst()
                 self.push_addr(bus, self.pc);
                 self.adl = self.l;
-                self.pc = (y as u32) * 8;
+                let target = (y as u32) * 8;
+                self.prefetch(bus, target); // Reload prefetch at target
+                self.pc = target;
                 11
             }
             _ => 4,
@@ -1097,14 +1099,18 @@ impl Cpu {
                         // RETN - Uses L mode for stack operations, then ADL becomes L
                         bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
                         self.iff1 = self.iff2;
-                        self.pc = self.pop_addr(bus);
+                        let target = self.pop_addr(bus);
+                        self.prefetch(bus, target); // Reload prefetch at return address
+                        self.pc = target;
                         self.adl = self.l;
                         14
                     }
                     1 => {
                         // RETI - Uses L mode for stack operations, then ADL becomes L
                         bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
-                        self.pc = self.pop_addr(bus);
+                        let target = self.pop_addr(bus);
+                        self.prefetch(bus, target); // Reload prefetch at return address
+                        self.pc = target;
                         self.adl = self.l;
                         14
                     }
@@ -2090,7 +2096,9 @@ impl Cpu {
             0 => {
                 // RET cc - not affected
                 if self.check_cc(y) {
-                    self.pc = self.pop_addr(bus);
+                    let target = self.pop_addr(bus);
+                    self.prefetch(bus, target); // Reload prefetch at return address
+                    self.pc = target;
                     self.adl = self.l;
                     if self.adl {
                         12
@@ -2128,7 +2136,9 @@ impl Cpu {
                     match p {
                         0 => {
                             // RET
-                            self.pc = self.pop_addr(bus);
+                            let target = self.pop_addr(bus);
+                            self.prefetch(bus, target); // Reload prefetch at return address
+                            self.pc = target;
                             self.adl = self.l;
                             10
                         }
@@ -2141,7 +2151,9 @@ impl Cpu {
                             // JP (IX)/(IY)
                             let index_reg = if use_ix { self.ix } else { self.iy };
                             self.adl = self.l;
-                            self.pc = self.wrap_pc(index_reg);
+                            let target = self.wrap_pc(index_reg);
+                            self.prefetch(bus, target); // Reload prefetch at target
+                            self.pc = target;
                             8
                         }
                         3 => {
@@ -2155,9 +2167,10 @@ impl Cpu {
                 }
             }
             2 => {
-                // JP cc,nn - not affected
+                // JP cc,nn - not affected by prefix but needs prefetch
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
+                    self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
                     self.adl = self.il;
                 }
@@ -2166,8 +2179,10 @@ impl Cpu {
             3 => {
                 match y {
                     0 => {
-                        // JP nn - not affected
-                        self.pc = self.fetch_addr(bus);
+                        // JP nn - not affected by prefix but needs prefetch
+                        let target = self.fetch_addr(bus);
+                        self.prefetch(bus, target); // Reload prefetch at target
+                        self.pc = target;
                         self.adl = self.il;
                         10
                     }
@@ -2203,10 +2218,11 @@ impl Cpu {
                 }
             }
             4 => {
-                // CALL cc,nn - not affected
+                // CALL cc,nn - not affected by prefix but needs prefetch
                 let nn = self.fetch_addr(bus);
                 if self.check_cc(y) {
                     self.push_addr(bus, self.pc);
+                    self.prefetch(bus, nn); // Reload prefetch at target
                     self.pc = nn;
                     self.adl = self.il;
                     if self.adl {
@@ -2243,9 +2259,10 @@ impl Cpu {
                 } else {
                     match p {
                         0 => {
-                            // CALL nn - not affected
+                            // CALL nn - not affected by prefix but needs prefetch
                             let nn = self.fetch_addr(bus);
                             self.push_addr(bus, self.pc);
+                            self.prefetch(bus, nn); // Reload prefetch at target
                             self.pc = nn;
                             self.adl = self.il;
                             if self.adl {
@@ -2273,11 +2290,13 @@ impl Cpu {
                 7
             }
             7 => {
-                // RST - not affected
+                // RST - not affected by prefix but needs prefetch
                 bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_rst()
                 self.push_addr(bus, self.pc);
                 self.adl = self.l;
-                self.pc = (y as u32) * 8;
+                let target = (y as u32) * 8;
+                self.prefetch(bus, target); // Reload prefetch at target
+                self.pc = target;
                 11
             }
             _ => 8,

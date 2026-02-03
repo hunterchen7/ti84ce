@@ -346,19 +346,37 @@ impl Cpu {
     // ========== Instruction Fetch ==========
 
     /// Fetch byte at PC and increment PC
+    ///
+    /// Uses CEmu's prefetch mechanism for cycle parity:
+    /// - Returns the previously prefetched byte (from current PC)
+    /// - Prefetches the NEXT byte at PC+1 (charges cycles for next instruction's first byte)
+    /// - Then increments PC
+    ///
+    /// This means each instruction pays for prefetching the next instruction's first byte,
+    /// and init_prefetch() must be called at startup to charge for the first byte.
     #[inline]
     pub fn fetch_byte(&mut self, bus: &mut Bus) -> u8 {
-        // Apply MBASE for actual memory access in Z80 instruction mode
-        let effective_pc = self.mask_addr_instr(self.pc);
-        // Use fetch_byte which tracks instruction bytes for flash unlock sequence detection
-        let byte = bus.fetch_byte(effective_pc, self.pc);
-        // PC stays as 16-bit in Z80 mode, 24-bit in ADL mode (no MBASE added)
-        self.pc = if self.adl {
+        // Return the previously prefetched byte (which is the byte at current PC)
+        let byte = self.prefetch;
+
+        // Calculate next PC address (before incrementing)
+        let next_pc = if self.adl {
             self.pc.wrapping_add(1) & 0xFFFFFF
         } else {
             self.pc.wrapping_add(1) & 0xFFFF
         };
+
+        // Prefetch the NEXT byte at PC+1 (this charges memory access cycles)
+        // CEmu: cpu_prefetch(cpu.registers.PC + 1, cpu.ADL)
+        let effective_next_pc = self.mask_addr_instr(next_pc);
+        self.prefetch = bus.fetch_byte(effective_next_pc, next_pc);
+
+        // Now increment PC to next_pc
+        self.pc = next_pc;
+
+        // Update R register (7-bit counter, bit 7 preserved)
         self.r = (self.r & 0x80) | ((self.r.wrapping_add(1)) & 0x7F);
+
         byte
     }
 
@@ -386,14 +404,16 @@ impl Cpu {
         }
     }
 
-    /// Prefetch byte at target address (for branch/jump cycle cost)
-    /// CEmu's cpu_prefetch() reads the byte at the target address to add memory timing.
-    /// This simulates that behavior without consuming the byte.
+    /// Prefetch byte at target address and update prefetch buffer
+    ///
+    /// CEmu's cpu_prefetch() reads the byte at the target address and stores it
+    /// in the prefetch buffer. This is critical after branches/jumps to ensure
+    /// the next fetch_byte() returns the correct byte at the new PC.
     #[inline]
     pub fn prefetch(&mut self, bus: &mut Bus, addr: u32) {
         let effective_addr = self.mask_addr_instr(addr);
-        // Just read to add cycle cost, discard the value
-        let _ = bus.fetch_byte(effective_addr, addr);
+        // Read and store in prefetch buffer for the next fetch_byte() call
+        self.prefetch = bus.fetch_byte(effective_addr, addr);
     }
 
     // ========== Stack Operations ==========

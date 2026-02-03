@@ -105,6 +105,7 @@ const FETCH_BUFFER_SIZE: usize = 32;
 const MAX_TRACKED_WRITES: usize = 10000;
 
 /// A single recorded write operation for detailed tracing
+/// Simple write record (for backward compatibility with existing tracing)
 #[derive(Debug, Clone, Copy)]
 pub struct WriteRecord {
     /// Address written to (absolute, in RAM range 0xD00000-0xD657FF)
@@ -113,6 +114,49 @@ pub struct WriteRecord {
     pub value: u8,
     /// Bus cycle when write occurred
     pub cycle: u64,
+}
+
+/// I/O operation target type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoTarget {
+    /// RAM write (0xD00000-0xD657FF)
+    Ram,
+    /// Flash write (0x000000-0x3FFFFF)
+    Flash,
+    /// Memory-mapped I/O port (0xE00000+)
+    MmioPort,
+    /// CPU I/O port (via IN/OUT instructions)
+    CpuPort,
+}
+
+/// I/O operation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IoOpType {
+    Read,
+    Write,
+}
+
+/// Comprehensive I/O operation record with instruction context
+#[derive(Debug, Clone)]
+pub struct IoRecord {
+    /// Type of operation
+    pub op_type: IoOpType,
+    /// Target type
+    pub target: IoTarget,
+    /// Address (memory or port address)
+    pub addr: u32,
+    /// Value before operation (for writes) or value read
+    pub old_value: u8,
+    /// Value after operation (for writes, same as old_value for reads)
+    pub new_value: u8,
+    /// Bus cycle when operation occurred
+    pub cycle: u64,
+    /// PC of instruction that caused this operation
+    pub pc: u32,
+    /// Opcode bytes of instruction
+    pub opcode: [u8; 4],
+    /// Number of valid opcode bytes
+    pub opcode_len: u8,
 }
 
 /// Write tracer for debugging RAM writes during boot
@@ -430,6 +474,18 @@ pub struct Bus {
     serial_flash: bool,
     /// Flash cache for serial flash timing simulation
     flash_cache: FlashCache,
+
+    // === Comprehensive I/O tracing fields ===
+    /// Whether full I/O tracing is enabled
+    full_trace_enabled: bool,
+    /// Current instruction PC (set before instruction execution)
+    current_pc: u32,
+    /// Current instruction opcode bytes
+    current_opcode: [u8; 4],
+    /// Number of valid opcode bytes
+    current_opcode_len: u8,
+    /// I/O operations from the current instruction
+    instruction_io_ops: Vec<IoRecord>,
 }
 
 impl Bus {
@@ -477,6 +533,12 @@ impl Bus {
             write_tracer: WriteTracer::new(),
             serial_flash: false,  // Default to parallel flash (10 cycles, more compatible)
             flash_cache: FlashCache::new(),
+            // I/O tracing fields
+            full_trace_enabled: false,
+            current_pc: 0,
+            current_opcode: [0; 4],
+            current_opcode_len: 0,
+            instruction_io_ops: Vec::new(),
         }
     }
 
@@ -531,7 +593,7 @@ impl Bus {
     pub fn read_byte(&mut self, addr: u32) -> u8 {
         let addr = addr & addr::ADDR_MASK;
 
-        match Self::decode_address(addr) {
+        let (value, target) = match Self::decode_address(addr) {
             MemoryRegion::Flash => {
                 // Serial flash uses cache timing, parallel flash uses dynamic wait states
                 if self.serial_flash {
@@ -541,11 +603,11 @@ impl Bus {
                     // This is dynamically set by ROM via port 0xE10005 writes
                     self.mem_cycles += self.ports.flash.cached_total_wait_cycles() as u64;
                 }
-                self.flash.read(addr)
+                (self.flash.read(addr), Some(IoTarget::Flash))
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.mem_cycles += Self::RAM_READ_CYCLES;
-                self.ram.read(addr - addr::RAM_START)
+                (self.ram.read(addr - addr::RAM_START), Some(IoTarget::Ram))
             }
             MemoryRegion::Ports => {
                 // Use port-specific timing like CEmu's port_read_byte()
@@ -553,7 +615,7 @@ impl Bus {
                 let port_range = (port_offset >> 12) & 0xF;
                 self.mem_cycles += Self::PORT_READ_CYCLES[port_range as usize];
                 let keys = *self.ports.key_state();
-                self.ports.read(port_offset, &keys, self.cycles)
+                (self.ports.read(port_offset, &keys, self.cycles), Some(IoTarget::MmioPort))
             }
             MemoryRegion::Unmapped => {
                 // CEmu: 258 cycles for parallel mode, 2 for serial mode
@@ -562,9 +624,16 @@ impl Bus {
                 } else {
                     self.mem_cycles += Self::UNMAPPED_PARALLEL_CYCLES;
                 }
-                self.rng.next()
+                (self.rng.next(), None)  // Don't record unmapped reads
             }
+        };
+
+        // Record for comprehensive I/O tracing
+        if let Some(target) = target {
+            self.record_io_op(IoOpType::Read, target, addr, value, value);
         }
+
+        value
     }
 
     /// Fetch a byte for instruction execution
@@ -689,17 +758,24 @@ impl Bus {
                     // Use flash controller's configured wait states
                     self.mem_cycles += self.ports.flash.cached_total_wait_cycles() as u64;
                     if self.ports.control.flash_unlocked() {
+                        // Record flash write with old value
+                        let old_value = self.flash.read(addr);
                         self.flash.write_cpu(addr, value);
+                        self.record_io_op(IoOpType::Write, IoTarget::Flash, addr, old_value, value);
                     }
                 }
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
                 self.mem_cycles += Self::RAM_WRITE_CYCLES;
-                // Record write for tracing (before actually writing)
+                // Get old value for tracing
+                let old_value = self.ram.read(addr - addr::RAM_START);
+                // Record write for simple tracing (before actually writing)
                 if self.write_tracer.is_enabled() {
                     self.write_tracer.record(addr, value, self.cycles);
                 }
                 self.ram.write(addr - addr::RAM_START, value);
+                // Record for comprehensive I/O tracing
+                self.record_io_op(IoOpType::Write, IoTarget::Ram, addr, old_value, value);
             }
             MemoryRegion::Ports => {
                 // CEmu's port_write_byte timing:
@@ -713,7 +789,13 @@ impl Bus {
                 // Add delay before port write (like CEmu)
                 self.mem_cycles += PORT_WRITE_DELAY;
 
+                // Get old value for tracing (read without side effects if possible)
+                // Note: some ports have read side effects, so we may not get the true old value
+                let keys = *self.ports.key_state();
+                let old_value = self.ports.read(port_offset, &keys, self.cycles);
                 self.ports.write(port_offset, value, self.cycles);
+                // Record for comprehensive I/O tracing
+                self.record_io_op(IoOpType::Write, IoTarget::MmioPort, addr, old_value, value);
 
                 // CEmu: sched_set_clock() converts cycles when CPU speed changes
                 // Conversion: new_cycles = old_cycles * new_rate / old_rate
@@ -914,7 +996,7 @@ impl Bus {
         self.mem_cycles += Self::PORT_READ_CYCLES[range as usize];
         let keys = *self.ports.key_state();
 
-        match range {
+        let value = match range {
             0x0 => {
                 // Control ports - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
@@ -993,7 +1075,13 @@ impl Bus {
             }
             // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => 0x00,
-        }
+        };
+
+        // Record for comprehensive I/O tracing (CPU port read)
+        let addr = 0xFF0000 | (port as u32);
+        self.record_io_op(IoOpType::Read, IoTarget::CpuPort, addr, value, value);
+
+        value
     }
 
     /// Write to I/O port (for OUT instructions)
@@ -1001,6 +1089,9 @@ impl Bus {
         let range = (port >> 12) & 0xF;
         // Note: port write cycles are added at the END of this function
         // so they're counted after any potential cycle reset
+
+        // Get old value for tracing (read before write)
+        let old_value = self.port_read_for_trace(port);
 
         match range {
             0x0 => {
@@ -1115,6 +1206,81 @@ impl Bus {
         }
         // Add port write cycles AFTER potential reset so they're counted
         self.mem_cycles += Self::PORT_WRITE_CYCLES[range as usize];
+
+        // Record for comprehensive I/O tracing (CPU port write)
+        let addr = 0xFF0000 | (port as u32);
+        self.record_io_op(IoOpType::Write, IoTarget::CpuPort, addr, old_value, value);
+    }
+
+    /// Read a port value for tracing purposes (without affecting timing)
+    /// This is used to get the old value before a port write
+    fn port_read_for_trace(&mut self, port: u16) -> u8 {
+        let range = (port >> 12) & 0xF;
+        let keys = *self.ports.key_state();
+
+        match range {
+            0x0 | 0xF => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.control.read(offset)
+            }
+            0x1 => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.flash.read(offset)
+            }
+            0x2 => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.sha256.read(offset)
+            }
+            0x4 => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.lcd.read(offset)
+            }
+            0x5 => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.interrupt.read(offset)
+            }
+            0x6 => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.watchdog.read(offset)
+            }
+            0x7 => {
+                let offset = (port & 0x7F) as u32;
+                if offset >= 0x30 {
+                    match offset {
+                        0x30 => self.ports.timer1.read_control(),
+                        0x34 => self.ports.timer2.read_control(),
+                        0x38 => self.ports.timer3.read_control(),
+                        _ => 0x00,
+                    }
+                } else {
+                    let timer_idx = offset / 0x10;
+                    let reg_offset = offset % 0x10;
+                    match timer_idx {
+                        0 => self.ports.timer1.read(reg_offset),
+                        1 => self.ports.timer2.read(reg_offset),
+                        2 => self.ports.timer3.read(reg_offset),
+                        _ => 0x00,
+                    }
+                }
+            }
+            0x8 => {
+                // RTC - can't read without cycle parameter, return 0
+                0x00
+            }
+            0xA => {
+                let offset = (port & 0x7F) as u32;
+                self.ports.keypad.read(offset, &keys)
+            }
+            0xB => {
+                let offset = (port & 0xFF) as u32;
+                self.ports.backlight.read(offset)
+            }
+            0xD => {
+                // SPI - can't read without cycle parameter, return 0
+                0x00
+            }
+            _ => 0x00,
+        }
     }
 
     /// Reset bus and all memory to initial state
@@ -1123,12 +1289,19 @@ impl Bus {
         self.ports.reset();
         self.spi.reset();
         self.cycles = 0;
+        self.mem_cycles = 0;
         self.rng = BusRng::new();
         self.fetch_buffer = [0; FETCH_BUFFER_SIZE];
         self.fetch_index = 0;
         self.write_tracer.reset();
+        // Reset I/O tracing state but preserve enabled flag
+        self.current_pc = 0;
+        self.current_opcode = [0; 4];
+        self.current_opcode_len = 0;
+        self.instruction_io_ops.clear();
         // Note: Flash is NOT reset - ROM data is preserved
         // Note: Write tracer enabled state is preserved across reset
+        // Note: full_trace_enabled is preserved across reset
     }
 
     /// Set key state for peripheral reads
@@ -1150,6 +1323,65 @@ impl Bus {
     /// Seed the RNG (for deterministic testing)
     pub fn seed_rng(&mut self, s1: u8, s2: u8, s3: u8) {
         self.rng.seed(s1, s2, s3);
+    }
+
+    // === Comprehensive I/O Tracing Methods ===
+
+    /// Enable full I/O tracing (records all memory/port operations with instruction context)
+    pub fn enable_full_trace(&mut self) {
+        self.full_trace_enabled = true;
+    }
+
+    /// Disable full I/O tracing
+    pub fn disable_full_trace(&mut self) {
+        self.full_trace_enabled = false;
+    }
+
+    /// Check if full I/O tracing is enabled
+    pub fn is_full_trace_enabled(&self) -> bool {
+        self.full_trace_enabled
+    }
+
+    /// Set the current instruction context (called before executing an instruction)
+    pub fn set_instruction_context(&mut self, pc: u32, opcode: &[u8]) {
+        self.current_pc = pc;
+        self.current_opcode_len = opcode.len().min(4) as u8;
+        self.current_opcode = [0; 4];
+        for (i, &b) in opcode.iter().take(4).enumerate() {
+            self.current_opcode[i] = b;
+        }
+    }
+
+    /// Clear the per-instruction I/O operations buffer (called before each instruction)
+    pub fn clear_instruction_io_ops(&mut self) {
+        self.instruction_io_ops.clear();
+    }
+
+    /// Take and return the I/O operations from the current instruction
+    pub fn take_instruction_io_ops(&mut self) -> Vec<IoRecord> {
+        std::mem::take(&mut self.instruction_io_ops)
+    }
+
+    /// Get reference to I/O operations from current instruction (without taking ownership)
+    pub fn instruction_io_ops(&self) -> &[IoRecord] {
+        &self.instruction_io_ops
+    }
+
+    /// Record an I/O operation (internal helper)
+    fn record_io_op(&mut self, op_type: IoOpType, target: IoTarget, addr: u32, old_value: u8, new_value: u8) {
+        if self.full_trace_enabled {
+            self.instruction_io_ops.push(IoRecord {
+                op_type,
+                target,
+                addr,
+                old_value,
+                new_value,
+                cycle: self.cycles,
+                pc: self.current_pc,
+                opcode: self.current_opcode,
+                opcode_len: self.current_opcode_len,
+            });
+        }
     }
 }
 

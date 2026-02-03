@@ -26,6 +26,7 @@ pub mod bus;
 pub mod cpu;
 pub mod peripherals;
 pub mod scheduler;
+pub mod disasm;
 mod emu;
 
 #[cfg(target_arch = "wasm32")]
@@ -45,7 +46,9 @@ use std::ptr;
 use std::slice;
 use std::sync::Mutex;
 
-pub use emu::{Emu, LcdSnapshot, TimerSnapshot, log_event};
+pub use emu::{Emu, LcdSnapshot, TimerSnapshot, StepInfo, log_event};
+pub use bus::{IoTarget, IoOpType, IoRecord};
+pub use disasm::{disassemble, DisasmResult};
 
 /// Thread-safe wrapper for the emulator.
 /// All FFI calls go through this mutex to prevent data races between
