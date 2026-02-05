@@ -2,6 +2,9 @@
 
 A cross-platform emulator for TI-84 Plus CE calculators, with native Android, iOS, and Web apps.
 
+![video-thumb](https://github.com/user-attachments/assets/33e55f96-a156-415c-9aed-01f312d3d6c1)
+
+
 ## Project Structure
 
 ```
