@@ -3,20 +3,24 @@
  * Mirrors the StateManager pattern from iOS/Android.
  */
 
-const DB_NAME = 'calc-emulator';
+const DB_NAME = "calc-emulator";
 const DB_VERSION = 1;
-const STORE_ROMS = 'roms';
-const STORE_STATES = 'states';
-const STORE_PREFS = 'preferences';
+const STORE_ROMS = "roms";
+const STORE_STATES = "states";
+const STORE_PREFS = "preferences";
 
 /**
  * Compute SHA-256 hash of data, truncated to 16 hex characters.
  * Matches the iOS/Android StateManager hash format.
  */
 async function computeRomHash(data: Uint8Array): Promise<string> {
-  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  // Create a new ArrayBuffer copy to satisfy crypto.subtle.digest type requirements
+  const buffer = new Uint8Array(data).buffer;
+  const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
-  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  const hashHex = hashArray
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
   return hashHex.substring(0, 16);
 }
 
@@ -54,7 +58,7 @@ function openDatabase(): Promise<IDBDatabase> {
 export interface EmulatorPreferences {
   lastRomHash?: string;
   lastRomName?: string;
-  preferredBackend?: 'rust' | 'cemu';
+  preferredBackend?: "rust" | "cemu";
   autoSaveEnabled?: boolean;
 }
 
@@ -89,10 +93,10 @@ export class StateStorage {
    * Save emulator state for a given ROM.
    */
   async saveState(romHash: string, stateData: Uint8Array): Promise<void> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_STATES], 'readwrite');
+      const transaction = this.db!.transaction([STORE_STATES], "readwrite");
       const store = transaction.objectStore(STORE_STATES);
       const request = store.put(stateData, romHash);
 
@@ -105,10 +109,10 @@ export class StateStorage {
    * Load emulator state for a given ROM.
    */
   async loadState(romHash: string): Promise<Uint8Array | null> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_STATES], 'readonly');
+      const transaction = this.db!.transaction([STORE_STATES], "readonly");
       const store = transaction.objectStore(STORE_STATES);
       const request = store.get(romHash);
 
@@ -130,10 +134,10 @@ export class StateStorage {
    * Delete saved state for a given ROM.
    */
   async deleteState(romHash: string): Promise<void> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_STATES], 'readwrite');
+      const transaction = this.db!.transaction([STORE_STATES], "readwrite");
       const store = transaction.objectStore(STORE_STATES);
       const request = store.delete(romHash);
 
@@ -146,10 +150,10 @@ export class StateStorage {
    * Check if a saved state exists for a given ROM.
    */
   async hasState(romHash: string): Promise<boolean> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_STATES], 'readonly');
+      const transaction = this.db!.transaction([STORE_STATES], "readonly");
       const store = transaction.objectStore(STORE_STATES);
       const request = store.count(romHash);
 
@@ -162,12 +166,12 @@ export class StateStorage {
    * Save preferences.
    */
   async savePreferences(prefs: EmulatorPreferences): Promise<void> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_PREFS], 'readwrite');
+      const transaction = this.db!.transaction([STORE_PREFS], "readwrite");
       const store = transaction.objectStore(STORE_PREFS);
-      const request = store.put(prefs, 'emulator');
+      const request = store.put(prefs, "emulator");
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve();
@@ -178,12 +182,12 @@ export class StateStorage {
    * Load preferences.
    */
   async loadPreferences(): Promise<EmulatorPreferences> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_PREFS], 'readonly');
+      const transaction = this.db!.transaction([STORE_PREFS], "readonly");
       const store = transaction.objectStore(STORE_PREFS);
-      const request = store.get('emulator');
+      const request = store.get("emulator");
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => {
@@ -196,10 +200,10 @@ export class StateStorage {
    * Cache a ROM by its hash.
    */
   async cacheRom(romHash: string, romData: Uint8Array): Promise<void> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_ROMS], 'readwrite');
+      const transaction = this.db!.transaction([STORE_ROMS], "readwrite");
       const store = transaction.objectStore(STORE_ROMS);
       const request = store.put(romData, romHash);
 
@@ -212,10 +216,10 @@ export class StateStorage {
    * Get a cached ROM by its hash.
    */
   async getCachedRom(romHash: string): Promise<Uint8Array | null> {
-    if (!this.db) throw new Error('Storage not initialized');
+    if (!this.db) throw new Error("Storage not initialized");
 
     return new Promise((resolve, reject) => {
-      const transaction = this.db!.transaction([STORE_ROMS], 'readonly');
+      const transaction = this.db!.transaction([STORE_ROMS], "readonly");
       const store = transaction.objectStore(STORE_ROMS);
       const request = store.get(romHash);
 

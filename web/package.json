@@ -10,7 +10,7 @@
     "dev:calc": "npm run wasm && vite",
     "dev:cemu": "npm run cemu && vite",
     "dev:fast": "vite",
-    "build": "npm run wasm && npm run cemu && tsc -b && vite build",
+    "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
     "test:cemu": "node test-cemu.mjs"
