@@ -28,6 +28,9 @@ interface CEmuModule {
   _lcd_get_frame(): number;
   _emu_keypad_event(row: number, col: number, press: boolean): void;
   _sendKey(keyCode: number): void;
+  _emu_save_state_size(): number;
+  _emu_save_state(bufferPtr: number, bufferSize: number): number;
+  _emu_load_state(bufferPtr: number, size: number): number;
   callMain(args: string[]): number;
   ccall(name: string, returnType: string, argTypes: string[], args: unknown[]): unknown;
   cwrap(name: string, returnType: string, argTypes: string[]): (...args: unknown[]) => unknown;

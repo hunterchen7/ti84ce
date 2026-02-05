@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -99,5 +100,89 @@ void EMSCRIPTEN_KEEPALIVE emu_step(unsigned int frames) {
     for (unsigned int i = 0; i < frames; i++) {
         emu_run((uint64_t)1);
     }
+}
+
+/* Forward declarations for save/load state */
+extern bool emu_save(int type, const char *path);
+
+/**
+ * Get the size needed for state buffer.
+ * CEmu state images are approximately 5MB.
+ */
+int EMSCRIPTEN_KEEPALIVE emu_save_state_size(void) {
+    /* CEmu state size is roughly 5MB, return a safe upper bound */
+    return 5 * 1024 * 1024;
+}
+
+/**
+ * Save emulator state to a memory buffer.
+ * Returns 0 on success, non-zero on failure.
+ */
+int EMSCRIPTEN_KEEPALIVE emu_save_state(uint8_t *buffer, int buffer_size) {
+    const char *temp_path = "/tmp/state.img";
+
+    /* Save state to temp file using CEmu's emu_save */
+    if (!emu_save(EMU_DATA_IMAGE, temp_path)) {
+        return -1;
+    }
+
+    /* Read temp file into buffer */
+    FILE *f = fopen(temp_path, "rb");
+    if (!f) {
+        return -2;
+    }
+
+    /* Get file size */
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (size > buffer_size) {
+        fclose(f);
+        return -3; /* Buffer too small */
+    }
+
+    /* Read into buffer */
+    size_t read = fread(buffer, 1, size, f);
+    fclose(f);
+
+    /* Remove temp file */
+    remove(temp_path);
+
+    if (read != (size_t)size) {
+        return -4;
+    }
+
+    return (int)size; /* Return actual state size */
+}
+
+/**
+ * Load emulator state from a memory buffer.
+ * Returns 0 on success, non-zero on failure.
+ */
+int EMSCRIPTEN_KEEPALIVE emu_load_state(const uint8_t *buffer, int size) {
+    const char *temp_path = "/tmp/state.img";
+
+    /* Write buffer to temp file */
+    FILE *f = fopen(temp_path, "wb");
+    if (!f) {
+        return -1;
+    }
+
+    size_t written = fwrite(buffer, 1, size, f);
+    fclose(f);
+
+    if (written != (size_t)size) {
+        remove(temp_path);
+        return -2;
+    }
+
+    /* Load state from temp file using CEmu's emu_load */
+    int result = emu_load(EMU_DATA_IMAGE, temp_path);
+
+    /* Remove temp file */
+    remove(temp_path);
+
+    return (result == EMU_STATE_VALID) ? 0 : -3;
 }
 #endif

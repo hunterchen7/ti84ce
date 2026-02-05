@@ -10,7 +10,7 @@ CFLAGS  = -W -Wall -O3 -flto
 # CFLAGS += -DDEBUG_SUPPORT  # Disabled to avoid debug callback issues in WASM
 
 # Modern Emscripten flags (updated from deprecated ones)
-EMFLAGS := -s TOTAL_MEMORY=33554432 -s WASM=1 -s EXPORT_ES6=1 -s MODULARIZE=1 -s EXPORT_NAME="'WebCEmu'" -s INVOKE_RUN=0 -s NO_EXIT_RUNTIME=1 -s ASSERTIONS=0 -s "EXPORTED_RUNTIME_METHODS=['FS', 'callMain', 'ccall', 'cwrap', 'HEAPU8', 'HEAPU32']" -s "EXPORTED_FUNCTIONS=['_main', '_malloc', '_free']"
+EMFLAGS := -s TOTAL_MEMORY=33554432 -s WASM=1 -s EXPORT_ES6=1 -s MODULARIZE=1 -s EXPORT_NAME="'WebCEmu'" -s INVOKE_RUN=0 -s NO_EXIT_RUNTIME=1 -s ASSERTIONS=0 -s "EXPORTED_RUNTIME_METHODS=['FS', 'callMain', 'ccall', 'cwrap', 'HEAPU8', 'HEAPU32']" -s "EXPORTED_FUNCTIONS=['_main', '_malloc', '_free', '_emu_save_state_size', '_emu_save_state', '_emu_load_state']"
 
 LFLAGS := -flto $(EMFLAGS)
 

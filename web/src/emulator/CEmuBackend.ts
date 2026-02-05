@@ -8,6 +8,7 @@ interface CEmuModule {
     writeFile(path: string, data: Uint8Array): void;
     readdir(path: string): string[];
     chdir(path: string): void;
+    mkdir(path: string): void;
   };
   HEAPU8: Uint8Array;
   HEAPU32: Uint32Array;
@@ -18,6 +19,9 @@ interface CEmuModule {
   _emu_reset(): void;
   _lcd_get_frame(): number;
   _emu_keypad_event(row: number, col: number, press: boolean): void;
+  _emu_save_state_size(): number;
+  _emu_save_state(bufferPtr: number, bufferSize: number): number;
+  _emu_load_state(bufferPtr: number, size: number): number;
 }
 
 export class CEmuBackend implements EmulatorBackend {
@@ -57,6 +61,13 @@ export class CEmuBackend implements EmulatorBackend {
       },
       noExitRuntime: true,
     }) as CEmuModule;
+
+    // Create /tmp directory for state file operations
+    try {
+      this.module.FS.mkdir('/tmp');
+    } catch {
+      // Directory may already exist
+    }
 
     this._isInitialized = true;
   }
@@ -150,5 +161,49 @@ export class CEmuBackend implements EmulatorBackend {
     if (!this.module) return;
     // Use emu_keypad_event which takes row, col directly
     this.module._emu_keypad_event(row, col, down);
+  }
+
+  saveState(): Uint8Array | null {
+    if (!this.module || !this._isRomLoaded) return null;
+
+    const bufferSize = this.module._emu_save_state_size();
+    const bufferPtr = this.module._malloc(bufferSize);
+
+    try {
+      const result = this.module._emu_save_state(bufferPtr, bufferSize);
+      if (result <= 0) {
+        console.error('[CEmu] Failed to save state:', result);
+        return null;
+      }
+
+      // Copy data from WASM memory
+      const stateData = new Uint8Array(result);
+      stateData.set(this.module.HEAPU8.subarray(bufferPtr, bufferPtr + result));
+      return stateData;
+    } finally {
+      this.module._free(bufferPtr);
+    }
+  }
+
+  loadState(data: Uint8Array): boolean {
+    if (!this.module) return false;
+
+    const bufferPtr = this.module._malloc(data.length);
+
+    try {
+      // Copy data to WASM memory
+      this.module.HEAPU8.set(data, bufferPtr);
+
+      const result = this.module._emu_load_state(bufferPtr, data.length);
+      if (result !== 0) {
+        console.error('[CEmu] Failed to load state:', result);
+        return false;
+      }
+
+      this._isRomLoaded = true;
+      return true;
+    } finally {
+      this.module._free(bufferPtr);
+    }
   }
 }

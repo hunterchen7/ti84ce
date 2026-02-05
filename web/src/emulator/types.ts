@@ -24,6 +24,10 @@ export interface EmulatorBackend {
   // Input
   setKey(row: number, col: number, down: boolean): void;
 
+  // State persistence
+  saveState(): Uint8Array | null;
+  loadState(data: Uint8Array): boolean;
+
   // Info
   readonly name: string;
   readonly isInitialized: boolean;

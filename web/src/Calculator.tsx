@@ -5,6 +5,7 @@ import {
   type BackendType,
 } from "./emulator";
 import { Keypad } from "./components/keypad";
+import { getStateStorage, type StateStorage } from "./storage/StateStorage";
 
 // Lazy-load ROM module - not downloaded until needed
 async function loadBundledRom(): Promise<Uint8Array | null> {
@@ -122,6 +123,27 @@ export function Calculator({
   const frameCount = useRef(0);
   const romDataRef = useRef<Uint8Array | null>(null);
   const speedRef = useRef(1); // Ref for use in animation loop
+  const storageRef = useRef<StateStorage | null>(null);
+  const romHashRef = useRef<string | null>(null);
+
+  // Save state helper
+  const saveState = useCallback(async () => {
+    const backend = backendRef.current;
+    const storage = storageRef.current;
+    const romHash = romHashRef.current;
+
+    if (!backend || !storage || !romHash || !romLoaded) return;
+
+    try {
+      const stateData = backend.saveState();
+      if (stateData) {
+        await storage.saveState(romHash, stateData);
+        console.log('[State] Saved state for ROM:', romHash);
+      }
+    } catch (err) {
+      console.error('[State] Failed to save state:', err);
+    }
+  }, [romLoaded]);
 
   // Initialize backend
   useEffect(() => {
@@ -155,6 +177,10 @@ export function Calculator({
       setError(null);
 
       try {
+        // Initialize storage
+        const storage = await getStateStorage();
+        storageRef.current = storage;
+
         const backend = createBackend(backendType);
         await backend.init();
 
@@ -170,9 +196,18 @@ export function Calculator({
 
         // If we had a ROM loaded, reload it
         if (romDataRef.current) {
+          const romHash = await storage.getRomHash(romDataRef.current);
+          romHashRef.current = romHash;
+
           const result = await backend.loadRom(romDataRef.current);
           if (result === 0) {
-            backend.powerOn();
+            // Try to load saved state
+            const savedState = await storage.loadState(romHash);
+            if (savedState && backend.loadState(savedState)) {
+              console.log('[State] Restored state for ROM:', romHash);
+            } else {
+              backend.powerOn();
+            }
             setRomLoaded(true);
             setIsRunning(true); // Auto-start after backend switch
           } else {
@@ -187,9 +222,18 @@ export function Calculator({
             const bundledData = await loadBundledRom();
             if (bundledData) {
               romDataRef.current = bundledData;
+              const romHash = await storage.getRomHash(bundledData);
+              romHashRef.current = romHash;
+
               const result = await backend.loadRom(bundledData);
               if (result === 0) {
-                backend.powerOn();
+                // Try to load saved state
+                const savedState = await storage.loadState(romHash);
+                if (savedState && backend.loadState(savedState)) {
+                  console.log('[State] Restored state for ROM:', romHash);
+                } else {
+                  backend.powerOn();
+                }
                 setRomLoaded(true);
                 setIsRunning(true);
               }
@@ -215,6 +259,27 @@ export function Calculator({
     };
   }, [backendType, useBundledRom]);
 
+  // Auto-save on visibility change and page unload
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        saveState();
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      saveState();
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [saveState]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -231,19 +296,32 @@ export function Calculator({
   // Handle ROM file loading
   const handleRomLoad = useCallback(async (file: File) => {
     const backend = backendRef.current;
-    if (!backend) return;
+    const storage = storageRef.current;
+    if (!backend || !storage) return;
 
     try {
       const buffer = await file.arrayBuffer();
       const data = new Uint8Array(buffer);
       romDataRef.current = data; // Store for backend switching
 
+      // Compute ROM hash for state persistence
+      const romHash = await storage.getRomHash(data);
+      romHashRef.current = romHash;
+
       const result = await backend.loadRom(data);
 
       if (result === 0) {
-        console.log("ROM loaded successfully, calling power_on...");
-        backend.powerOn();
-        console.log("power_on complete");
+        console.log("ROM loaded successfully");
+
+        // Try to load saved state
+        const savedState = await storage.loadState(romHash);
+        if (savedState && backend.loadState(savedState)) {
+          console.log('[State] Restored state for ROM:', romHash);
+        } else {
+          console.log("No saved state, calling power_on...");
+          backend.powerOn();
+        }
+
         setRomLoaded(true);
         setIsRunning(true); // Auto-start
         setError(null);
@@ -431,10 +509,14 @@ export function Calculator({
     }
   };
 
-  const handleEjectRom = () => {
+  const handleEjectRom = async () => {
+    // Save state before ejecting
+    await saveState();
+
     setIsRunning(false);
     setRomLoaded(false);
     romDataRef.current = null;
+    romHashRef.current = null;
     if (backendRef.current) {
       backendRef.current.reset();
     }

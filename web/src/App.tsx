@@ -2,27 +2,29 @@ import { Calculator } from './Calculator'
 import './App.css'
 
 function App() {
-  const isDemo = window.location.pathname === '/demo';
+  const isSandbox = window.location.pathname === '/sandbox';
 
-  if (isDemo) {
+  // Sandbox mode: ROM file picker for development/testing
+  if (isSandbox) {
     return (
-      <div style={{
-        position: 'fixed',
-        inset: 0,
-        display: 'flex',
-        justifyContent: 'center',
-        alignItems: 'center',
-        background: '#111',
-        overflowY: 'auto',
-      }}>
-        <Calculator useBundledRom={true} defaultBackend="cemu" fullscreen />
+      <div style={{ minHeight: '100vh', display: 'flex', justifyContent: 'center', padding: '2rem' }}>
+        <Calculator useBundledRom={false} defaultBackend="rust" />
       </div>
     );
   }
 
+  // Default: Demo mode with bundled ROM
   return (
-    <div style={{ minHeight: '100vh', display: 'flex', justifyContent: 'center', padding: '2rem' }}>
-      <Calculator useBundledRom={false} defaultBackend="rust" />
+    <div style={{
+      position: 'fixed',
+      inset: 0,
+      display: 'flex',
+      justifyContent: 'center',
+      alignItems: 'center',
+      background: '#111',
+      overflowY: 'auto',
+    }}>
+      <Calculator useBundledRom={true} defaultBackend="cemu" fullscreen />
     </div>
   );
 }

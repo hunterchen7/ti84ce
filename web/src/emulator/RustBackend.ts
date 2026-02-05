@@ -87,4 +87,20 @@ export class RustBackend implements EmulatorBackend {
     if (!this.emu) return;
     this.emu.set_key(row, col, down);
   }
+
+  saveState(): Uint8Array | null {
+    if (!this.emu || !this._isRomLoaded) return null;
+    const data = this.emu.save_state();
+    return data.length > 0 ? data : null;
+  }
+
+  loadState(data: Uint8Array): boolean {
+    if (!this.emu) return false;
+    const result = this.emu.load_state(data);
+    if (result === 0) {
+      this._isRomLoaded = true;
+      return true;
+    }
+    return false;
+  }
 }
