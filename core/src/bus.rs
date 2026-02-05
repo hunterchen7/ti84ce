@@ -514,6 +514,11 @@ impl Bus {
     /// From CEmu port.c: {2,2,2,4,2,3,3,3,3,3,3,3,3,3,3,3}
     const PORT_WRITE_CYCLES: [u64; 16] = [2, 2, 2, 4, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3];
 
+    /// CEmu port.c: PORT_WRITE_DELAY = 4
+    /// This is added BEFORE the write, then (4 - port_write_cycles) is rewound AFTER.
+    /// This matters for cycle conversion when CPU speed changes during the write.
+    const PORT_WRITE_DELAY: u64 = 4;
+
     /// Unmapped MMIO timing (addresses that don't map to valid ports)
     /// CEmu: 0xFB0000-0xFEFFFF = 3 cycles, other = 2 cycles
     const UNMAPPED_MMIO_PROTECTED_CYCLES: u64 = 3;  // 0xFB0000-0xFEFFFF
@@ -1104,13 +1109,20 @@ impl Bus {
     }
 
     /// Write to I/O port (for OUT instructions)
+    /// CEmu timing: Add PORT_WRITE_DELAY (4) BEFORE the write, then rewind
+    /// (4 - port_write_cycles[range]) AFTER. This matters when CPU speed changes
+    /// during the write, as the conversion happens with the +4 already added.
     pub fn port_write(&mut self, port: u16, value: u8) {
         let range = (port >> 12) & 0xF;
-        // Note: port write cycles are added at the END of this function
-        // so they're counted after any potential cycle reset
+
+        // CEmu: cpu.cycles += PORT_WRITE_DELAY (4) BEFORE the write
+        self.mem_cycles += Self::PORT_WRITE_DELAY;
 
         // Get old value for tracing (read before write)
         let old_value = self.port_read_for_trace(port);
+
+        // Track whether cycle conversion happened (for proper rewind handling)
+        let mut cycles_converted = false;
 
         match range {
             0x0 => {
@@ -1124,6 +1136,7 @@ impl Bus {
                     let converted = total * new_rate as u64 / old_rate as u64;
                     self.cycles = converted;
                     self.mem_cycles = 0;
+                    cycles_converted = true;
                 }
             }
             0x1 => {
@@ -1242,13 +1255,24 @@ impl Bus {
                     let converted = total * new_rate as u64 / old_rate as u64;
                     self.cycles = converted;
                     self.mem_cycles = 0;
+                    cycles_converted = true;
                 }
             }
             // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => {}
         }
-        // Add port write cycles AFTER potential reset so they're counted
-        self.mem_cycles += Self::PORT_WRITE_CYCLES[range as usize];
+        // CEmu: sched_rewind_cpu(PORT_WRITE_DELAY - port_write_cycles[port_loc])
+        // After the write (and any cycle conversion), rewind the excess cycles.
+        // If cycles were converted, mem_cycles is 0 and we need to subtract from cycles.
+        // If no conversion, we subtract from mem_cycles as normal.
+        let rewind = Self::PORT_WRITE_DELAY.saturating_sub(Self::PORT_WRITE_CYCLES[range as usize]);
+        if cycles_converted {
+            // Conversion folded everything into cycles, rewind from there
+            self.cycles = self.cycles.saturating_sub(rewind);
+        } else {
+            // Normal case: PORT_WRITE_DELAY is in mem_cycles, rewind from there
+            self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
+        }
 
         // Record for comprehensive I/O tracing (CPU port write)
         let addr = 0xFF0000 | (port as u32);
@@ -1410,9 +1434,13 @@ impl Bus {
         &self.instruction_io_ops
     }
 
+    /// Maximum I/O operations to record per instruction (matches CEmu TRACE_MAX_IO_OPS)
+    /// This prevents memory issues with block instructions like LDIR that can do millions of ops.
+    const MAX_IO_OPS_PER_INSTRUCTION: usize = 256;
+
     /// Record an I/O operation (internal helper)
     fn record_io_op(&mut self, op_type: IoOpType, target: IoTarget, addr: u32, old_value: u8, new_value: u8) {
-        if self.full_trace_enabled {
+        if self.full_trace_enabled && self.instruction_io_ops.len() < Self::MAX_IO_OPS_PER_INSTRUCTION {
             self.instruction_io_ops.push(IoRecord {
                 op_type,
                 target,

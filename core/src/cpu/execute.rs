@@ -777,9 +777,9 @@ impl Cpu {
                 // IN0 r,(n) - read from port address 0xFF00nn (eZ80 mapped I/O)
                 // The port byte n maps to address 0xFF0000 + n, which corresponds to
                 // the control ports region at 0xE000nn (aliased at 0xFF00nn).
-                let port = self.fetch_byte(bus) as u32;
-                let addr = 0xFF0000 | port;
-                let val = bus.read_byte(addr);
+                // Use dedicated port_read for proper timing and tracing (IoTarget::CpuPort)
+                let port = self.fetch_byte(bus) as u16;
+                let val = bus.port_read(port);
                 if y != 6 {
                     self.set_reg8(y, val, bus);
                 }
@@ -812,10 +812,10 @@ impl Cpu {
                     // OUT0 (n),r - write to port address 0xFF00nn (eZ80 mapped I/O)
                     // The port byte n maps to address 0xFF0000 + n, which corresponds to
                     // the control ports region at 0xE000nn (aliased at 0xFF00nn).
-                    let port = self.fetch_byte(bus) as u32;
-                    let addr = 0xFF0000 | port;
+                    // Use dedicated port_write for proper timing and tracing (IoTarget::CpuPort)
+                    let port = self.fetch_byte(bus) as u16;
                     let val = self.get_reg8(y, bus);
-                    bus.write_byte(addr, val);
+                    bus.port_write(port, val);
                     12
                 }
             }

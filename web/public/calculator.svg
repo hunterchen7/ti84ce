@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 98 123">
+  <path fill="#1a1a1a" d="M4.23,0h89.52c2.32,0,4.23,1.9,4.23,4.23v114.42c0,2.33-1.9,4.23-4.23,4.23l-89.52,0c-2.32,0-4.23-1.9-4.23-4.23V4.23C0,1.9,1.9,0,4.23,0z"/>
+  <rect fill="#fff" x="7.63" y="8.63" width="81.87" height="21.9" rx="1.39"/>
+  <!-- Row 1: blue, black, black, black -->
+  <rect fill="#3b82f6" x="8.15" y="45.11" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#333" x="30.62" y="45.11" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#333" x="53.09" y="45.11" width="15.36" height="13.55" rx="1.82"/>
+  <rect fill="#333" x="75.56" y="45.11" width="15.37" height="13.55" rx="1.83"/>
+  <!-- Row 2: green, white, white, white -->
+  <rect fill="#4ade80" x="8.15" y="63.84" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#fff" x="30.62" y="63.84" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#fff" x="53.09" y="63.84" width="15.36" height="13.55" rx="1.82"/>
+  <rect fill="#fff" x="75.56" y="63.84" width="15.37" height="13.55" rx="1.83"/>
+  <!-- Row 3: black, white, white, white -->
+  <rect fill="#333" x="8.15" y="82.57" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#fff" x="30.62" y="82.57" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#fff" x="53.09" y="82.57" width="15.36" height="13.55" rx="1.82"/>
+  <rect fill="#fff" x="75.56" y="82.57" width="15.37" height="13.55" rx="1.83"/>
+  <!-- Row 4: black, white, white, white -->
+  <rect fill="#333" x="8.15" y="101.3" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#fff" x="30.62" y="101.3" width="15.38" height="13.55" rx="1.83"/>
+  <rect fill="#fff" x="53.09" y="101.3" width="15.36" height="13.55" rx="1.82"/>
+  <rect fill="#fff" x="75.56" y="101.3" width="15.37" height="13.55" rx="1.83"/>
+</svg>

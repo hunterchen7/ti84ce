@@ -13,10 +13,11 @@ interface KeypadProps {
 // Layout constants
 const ROW_SPACING = 2;
 const COLUMN_SPACING = 16;
-const FUNC_ROW_HEIGHT = 36;
-const CONTROL_ROW_HEIGHT = 42;
-const NUMBER_BUTTON_HEIGHT = 56;
-const SIDE_BUTTON_HEIGHT = 48;
+const FUNC_ROW_HEIGHT = 44;
+const CONTROL_ROW_HEIGHT = 50;
+const NUMBER_BUTTON_HEIGHT = 64;
+const SIDE_BUTTON_HEIGHT = 56;
+const DPAD_SIZE = 84; // Fixed D-pad size (unchanged)
 
 // Color
 const BACKGROUND_COLOR = '#1B1B1B';
@@ -99,11 +100,11 @@ export function Keypad({ onKeyDown, onKeyUp }: KeypadProps) {
     <div style={containerStyle}>
       {/* Row 1: Function keys (y=, window, zoom, trace, graph) */}
       {renderFiveKeyRow([
-        k('y=', 1, 4, 'white', 'stat plot', 'f1'),
-        k('window', 1, 3, 'white', 'tblset', 'f2'),
-        k('zoom', 1, 2, 'white', 'format', 'f3'),
-        k('trace', 1, 1, 'white', 'calc', 'f4'),
-        k('graph', 1, 0, 'white', 'table', 'f5'),
+        k('y=', 1, 4, 'dark', 'stat plot', 'f1'),
+        k('window', 1, 3, 'dark', 'tblset', 'f2'),
+        k('zoom', 1, 2, 'dark', 'format', 'f3'),
+        k('trace', 1, 1, 'dark', 'calc', 'f4'),
+        k('graph', 1, 0, 'dark', 'table', 'f5'),
       ], FUNC_ROW_HEIGHT)}
 
       {/* Rows 2-3: 2nd/mode/del + alpha/X,T,θ,n/stat with D-pad */}
@@ -139,7 +140,7 @@ export function Keypad({ onKeyDown, onKeyUp }: KeypadProps) {
           alignItems: 'center',
           justifyContent: 'center',
         }}>
-          <DPad onKeyDown={onKeyDown} onKeyUp={onKeyUp} size={CONTROL_ROW_HEIGHT * 2} />
+          <DPad onKeyDown={onKeyDown} onKeyUp={onKeyUp} size={DPAD_SIZE} />
         </div>
       </div>
 
