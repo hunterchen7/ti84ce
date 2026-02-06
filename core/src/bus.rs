@@ -488,6 +488,10 @@ pub struct Bus {
     instruction_io_ops: Vec<IoRecord>,
     /// SPI needs scheduler update (set after SPI writes that may start transfers)
     spi_needs_schedule: bool,
+    /// NMI requested by memory protection violation
+    nmi_requested: bool,
+    /// Current CPU PC for unprivileged code checks (set by CPU before each instruction)
+    pub cpu_pc: u32,
 }
 
 impl Bus {
@@ -547,6 +551,8 @@ impl Bus {
             current_opcode_len: 0,
             instruction_io_ops: Vec::new(),
             spi_needs_schedule: false,
+            nmi_requested: false,
+            cpu_pc: 0,
         }
     }
 
@@ -574,6 +580,13 @@ impl Bus {
     pub fn take_spi_schedule_flag(&mut self) -> bool {
         let flag = self.spi_needs_schedule;
         self.spi_needs_schedule = false;
+        flag
+    }
+
+    /// Check if NMI was requested by memory protection and clear the flag
+    pub fn take_nmi_flag(&mut self) -> bool {
+        let flag = self.nmi_requested;
+        self.nmi_requested = false;
         flag
     }
 
@@ -797,8 +810,33 @@ impl Bus {
     pub fn write_byte(&mut self, addr: u32, value: u8) {
         let addr = addr & addr::ADDR_MASK;
 
+        // CEmu memory protection: check stack limit (always, write still succeeds)
+        let stack_limit = self.ports.control.stack_limit();
+        if stack_limit != 0 && addr == stack_limit {
+            self.ports.control.set_stack_violation();
+            self.nmi_requested = true;
+        }
+
+        // CEmu memory protection: check protected range (unprivileged code only)
+        // CEmu uses rawPC = cpu.registers.PC + 1 for the unprivileged check
+        let raw_pc = self.cpu_pc.wrapping_add(1) & 0xFFFFFF;
+        let unprivileged = self.ports.control.is_unprivileged(raw_pc);
+        let protected_start = self.ports.control.protected_start();
+        let protected_end = self.ports.control.protected_end();
+        if addr >= protected_start && addr <= protected_end && unprivileged {
+            self.ports.control.set_protected_violation();
+            self.nmi_requested = true;
+            return; // Block the write
+        }
+
         match Self::decode_address(addr) {
             MemoryRegion::Flash => {
+                // CEmu: unprivileged flash writes also trigger protection
+                if unprivileged {
+                    self.ports.control.set_protected_violation();
+                    self.nmi_requested = true;
+                    return; // Block the write
+                }
                 // CEmu mem_write_flash: serial uses cache touch, parallel uses waitStates
                 if self.serial_flash {
                     self.cycles += self.flash_cache.touch(addr);

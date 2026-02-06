@@ -358,6 +358,34 @@ impl Scheduler {
         events.into_iter().map(|(e, _)| e).collect()
     }
 
+    /// Get the number of CPU cycles until the nearest active event fires.
+    /// Returns 0 if any event has already fired or no events are active.
+    /// Used by the emu loop to fast-forward HALT to the next event (matching CEmu's cpu_halt).
+    pub fn cycles_until_next_event(&self) -> u64 {
+        let mut earliest_timestamp: Option<u64> = None;
+
+        for item in &self.items {
+            if item.is_active() {
+                let timestamp = item.timestamp & !INACTIVE_FLAG;
+                match earliest_timestamp {
+                    None => earliest_timestamp = Some(timestamp),
+                    Some(t) if timestamp < t => earliest_timestamp = Some(timestamp),
+                    _ => {}
+                }
+            }
+        }
+
+        match earliest_timestamp {
+            Some(ts) if ts > self.base_ticks => {
+                let base_ticks_remaining = ts - self.base_ticks;
+                let base_ticks_per_cpu_cycle = ClockId::Cpu.base_ticks_per_tick(self.cpu_speed);
+                // Ceiling division to ensure we reach the event
+                (base_ticks_remaining + base_ticks_per_cpu_cycle - 1) / base_ticks_per_cpu_cycle
+            }
+            _ => 0, // Event already fired or no active events
+        }
+    }
+
     /// Calculate ticks until the next RTC LATCH point in the 1-second cycle.
     ///
     /// CEmu's RTC runs on a 1-second cycle from boot, with LATCH events

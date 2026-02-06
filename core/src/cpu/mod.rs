@@ -76,8 +76,10 @@ pub struct Cpu {
     pub iy: u32,
 
     // Special purpose registers
-    /// Stack pointer (24-bit in ADL mode, SPL)
-    pub sp: u32,
+    /// Z80 stack pointer (16-bit, used when L=false)
+    pub sps: u32,
+    /// ADL stack pointer (24-bit, used when L=true)
+    pub spl: u32,
     /// Program counter (24-bit)
     pub pc: u32,
     /// Interrupt vector base (16-bit on eZ80)
@@ -165,7 +167,8 @@ impl Cpu {
             iy: 0,
 
             // Special registers
-            sp: 0x000000, // Matches CEmu reset; ROM sets stack later
+            sps: 0x000000, // Z80 stack pointer; matches CEmu reset
+            spl: 0x000000, // ADL stack pointer; matches CEmu reset
             pc: 0,
             i: 0,
             r: 0,
@@ -196,6 +199,25 @@ impl Cpu {
         }
     }
 
+    /// Get the active stack pointer based on L mode (CEmu: stack[cpu.L])
+    #[inline(always)]
+    pub fn sp(&self) -> u32 {
+        if self.l { self.spl } else { self.sps }
+    }
+
+    /// Set the active stack pointer based on L mode
+    #[inline(always)]
+    pub fn set_sp(&mut self, val: u32) {
+        if self.l { self.spl = val; } else { self.sps = val; }
+    }
+
+    /// Set both SPS and SPL to the same value (convenience for init/tests)
+    #[inline(always)]
+    pub fn set_sp_both(&mut self, val: u32) {
+        self.sps = val;
+        self.spl = val;
+    }
+
     /// Reset the CPU to initial state
     /// CEmu zeroes all registers on reset (memset(&cpu, 0, sizeof(cpu)))
     pub fn reset(&mut self) {
@@ -219,7 +241,8 @@ impl Cpu {
 
         // Special registers
         self.pc = 0;
-        self.sp = 0;
+        self.sps = 0;
+        self.spl = 0;
         self.i = 0;
         self.r = 0;
         self.mbase = 0x00;
@@ -332,7 +355,7 @@ impl Cpu {
             }
             if self.halted {
                 self.halted = false;
-                bus.add_cycles(4); // Wake from halt cycle cost
+                bus.add_cycles(1); // Wake from halt cycle cost
                 return cycle_delta(start_cycles, bus.total_cycles());
             }
             // If not halted, CPU is running in powered-off loop - interrupts now enabled,
@@ -346,7 +369,7 @@ impl Cpu {
             if self.halted {
                 self.any_key_wake = false;
                 self.halted = false;
-                bus.add_cycles(4); // Wake from halt cycle cost
+                bus.add_cycles(1); // Wake from halt cycle cost
                 return cycle_delta(start_cycles, bus.total_cycles());
             }
             // Clear the flag even if not halted - signal has been processed
@@ -354,11 +377,14 @@ impl Cpu {
         }
 
         if self.halted {
-            // CPU is halted, just consume cycles
-            // Interrupts can wake it (handled above on next call)
-            bus.add_cycles(4); // Halted NOP cycle cost
+            // CPU is halted — emu loop handles fast-forward to next event.
+            // Just add 1 cycle so the loop advances. CEmu: cpu.cycles++ in cpu_halt().
+            bus.add_cycles(1);
             return cycle_delta(start_cycles, bus.total_cycles());
         }
+
+        // Set CPU PC on bus for memory protection checks
+        bus.cpu_pc = self.pc;
 
         // eZ80 per-instruction mode handling:
         // L and IL are reset to ADL at the start of each instruction, UNLESS
@@ -441,57 +467,60 @@ impl Cpu {
     }
 
     /// Handle maskable interrupt (IRQ)
+    /// Matches CEmu's interrupt entry in cpu.c:943-969
     fn handle_irq(&mut self, bus: &mut Bus) -> u32 {
-        // Wake from halt
+        let was_halted = self.halted;
+
+        // CEmu: if halted, cpu.cycles++ (wake cost); else prefetch_discard()
+        if was_halted {
+            bus.add_cycles(1);
+        } else {
+            self.prefetch_discard(bus);
+        }
+        bus.add_cycles(1); // CEmu: cpu.cycles++ after halt/discard
+
+        // CEmu: cpu.L = cpu.IL = cpu.ADL || cpu.MADL
+        let mode = self.adl || self.madl;
+        self.l = mode;
+        self.il = mode;
+
+        // Disable interrupts and clear state
+        self.iff1 = false;
         self.halted = false;
 
-        // Disable interrupts
-        self.iff1 = false;
-        self.iff2 = false;
-
-        match self.im {
-            InterruptMode::Mode0 => {
-                // Mode 0: Execute instruction on data bus
-                // Typically RST 38H on TI calculators
-                self.push_addr(bus, self.pc);
-                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
-                self.pc = 0x38;
-                13
-            }
-            InterruptMode::Mode1 => {
-                // Mode 1: Fixed call to 0x0038
-                self.push_addr(bus, self.pc);
-                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
-                self.pc = 0x38;
-                13
-            }
-            InterruptMode::Mode2 => {
-                // Mode 2: On TI-84 CE (eZ80), this is NOT the standard Z80 vectored mode!
-                // CEmu shows that IM 2 just jumps to 0x38, same as IM 1.
-                // The vectored interrupt mode (using I register) is only used in IM 3
-                // with the asic.im2 flag, which the TI-84 CE doesn't use.
-                self.push_addr(bus, self.pc);
-                self.prefetch(bus, 0x38); // Reload prefetch at ISR address
-                self.pc = 0x38;
-                13
-            }
-        }
+        // All modes on TI-84 CE (eZ80) jump to 0x38
+        self.push_addr(bus, self.pc);
+        self.prefetch(bus, 0x38);
+        self.pc = 0x38;
+        // Return 0 — cycles already tracked via bus
+        0
     }
 
     /// Handle non-maskable interrupt (NMI)
     fn handle_nmi(&mut self, bus: &mut Bus) -> u32 {
-        // Wake from halt
-        self.halted = false;
+        let was_halted = self.halted;
+
+        if was_halted {
+            bus.add_cycles(1);
+        } else {
+            self.prefetch_discard(bus);
+        }
+        bus.add_cycles(1);
+
+        let mode = self.adl || self.madl;
+        self.l = mode;
+        self.il = mode;
 
         // Save IFF1 to IFF2, disable IFF1
         self.iff2 = self.iff1;
         self.iff1 = false;
+        self.halted = false;
 
         // Jump to NMI handler at 0x0066
         self.push_addr(bus, self.pc);
-        self.prefetch(bus, 0x66); // Reload prefetch at NMI handler address
+        self.prefetch(bus, 0x66);
         self.pc = 0x66;
-        11
+        0
     }
 }
 
@@ -499,7 +528,7 @@ impl Cpu {
 
 impl Cpu {
     /// Size of CPU state snapshot in bytes
-    pub const SNAPSHOT_SIZE: usize = 64;
+    pub const SNAPSHOT_SIZE: usize = 67; // 64 + 3 for second SP
 
     /// Save CPU state to bytes for persistence
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -524,8 +553,9 @@ impl Cpu {
         buf[pos..pos+3].copy_from_slice(&self.ix.to_le_bytes()[..3]); pos += 3;
         buf[pos..pos+3].copy_from_slice(&self.iy.to_le_bytes()[..3]); pos += 3;
 
-        // Special registers (10 bytes)
-        buf[pos..pos+3].copy_from_slice(&self.sp.to_le_bytes()[..3]); pos += 3;
+        // Special registers (13 bytes: SPS 3 + SPL 3 + PC 3 + I 2 + R 1 + MBASE 1)
+        buf[pos..pos+3].copy_from_slice(&self.sps.to_le_bytes()[..3]); pos += 3;
+        buf[pos..pos+3].copy_from_slice(&self.spl.to_le_bytes()[..3]); pos += 3;
         buf[pos..pos+3].copy_from_slice(&self.pc.to_le_bytes()[..3]); pos += 3;
         buf[pos..pos+2].copy_from_slice(&self.i.to_le_bytes()); pos += 2;
         buf[pos] = self.r; pos += 1;
@@ -594,7 +624,8 @@ impl Cpu {
         self.iy = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
 
         // Special registers
-        self.sp = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.sps = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
+        self.spl = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
         self.pc = u32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], 0]); pos += 3;
         self.i = u16::from_le_bytes([buf[pos], buf[pos+1]]); pos += 2;
         self.r = buf[pos]; pos += 1;

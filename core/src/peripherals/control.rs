@@ -116,6 +116,9 @@ pub struct ControlPorts {
     set_battery_status: u8,
     /// Battery charging flag
     battery_charging: bool,
+    /// Protection status (NMI cause bits)
+    /// Bit 0: stack limit violation, Bit 1: protected memory violation
+    protection_status: u8,
 }
 
 impl ControlPorts {
@@ -149,6 +152,7 @@ impl ControlPorts {
             read_battery_status: 0,
             set_battery_status: battery::LEVEL_4, // Full battery
             battery_charging: false,
+            protection_status: 0,
         }
     }
 
@@ -222,6 +226,8 @@ impl ControlPorts {
             0x3A => self.stack_limit as u8,
             0x3B => (self.stack_limit >> 8) as u8,
             0x3C => (self.stack_limit >> 16) as u8,
+            // Protection status (read-only)
+            0x3D => self.protection_status,
             _ => 0x00,
         }
     }
@@ -339,6 +345,8 @@ impl ControlPorts {
             0x3A => self.stack_limit = (self.stack_limit & 0xFFFF00) | (value as u32),
             0x3B => self.stack_limit = (self.stack_limit & 0xFF00FF) | ((value as u32) << 8),
             0x3C => self.stack_limit = (self.stack_limit & 0x00FFFF) | ((value as u32) << 16),
+            // Clear protection status (write-1-to-clear)
+            0x3E => self.protection_status &= !value,
             _ => {}
         }
     }
@@ -447,6 +455,23 @@ impl ControlPorts {
     /// Unprivileged means: PC > privileged AND (PC < protectedStart OR PC > protectedEnd)
     pub fn is_unprivileged(&self, pc: u32) -> bool {
         pc > self.privileged && (pc < self.protected_start || pc > self.protected_end)
+    }
+
+    /// Get the stack limit address
+    pub fn stack_limit(&self) -> u32 {
+        self.stack_limit
+    }
+
+    /// Set stack limit violation bit and return true if NMI should fire
+    pub fn set_stack_violation(&mut self) -> bool {
+        self.protection_status |= 1;
+        true
+    }
+
+    /// Set protected memory violation bit and return true if NMI should fire
+    pub fn set_protected_violation(&mut self) -> bool {
+        self.protection_status |= 2;
+        true
     }
 
     /// Dump all control port values for debugging/comparison with CEmu

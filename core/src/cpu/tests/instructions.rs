@@ -491,7 +491,7 @@ fn test_call_ret() {
     let mut bus = Bus::new();
     cpu.adl = true;
 
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     // CALL 0x001234
     bus.poke_byte(0, 0xCD);
     bus.poke_byte(1, 0x34);
@@ -518,7 +518,7 @@ fn test_ret_nz_conditional() {
     cpu.adl = true;
 
     // Setup: call a subroutine first to put return address on stack
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     bus.poke_byte(0, 0xCD);      // CALL 0x001000
     bus.poke_byte(1, 0x00);
     bus.poke_byte(2, 0x10);
@@ -536,7 +536,7 @@ fn test_ret_nz_conditional() {
     // Test 2: RET NZ when Z is CLEAR (should return)
     // First, call again
     cpu.pc = 0;
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     cpu.step(&mut bus);          // CALL 0x001000
     assert_eq!(cpu.pc, 0x001000);
 
@@ -553,7 +553,7 @@ fn test_ret_z_conditional() {
     cpu.adl = true;
 
     // Setup: call a subroutine
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     bus.poke_byte(0, 0xCD);      // CALL 0x001000
     bus.poke_byte(1, 0x00);
     bus.poke_byte(2, 0x10);
@@ -569,7 +569,7 @@ fn test_ret_z_conditional() {
 
     // Test 2: RET Z when Z is SET (should return)
     cpu.pc = 0;
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     cpu.step(&mut bus);          // CALL 0x001000
 
     cpu.f = flags::Z;            // Z flag SET
@@ -583,7 +583,7 @@ fn test_push_pop() {
     let mut bus = Bus::new();
     cpu.adl = true;
 
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     cpu.bc = 0x001234;
 
     // PUSH BC (opcode 0xC5)
@@ -604,14 +604,15 @@ fn test_halt() {
 
     // HALT (opcode 0x76)
     bus.poke_byte(0, 0x76);
+    cpu.init_prefetch(&mut bus); // Must init prefetch so fetch_byte returns the right value
 
     cpu.step(&mut bus);
     assert!(cpu.halted);
     assert_eq!(cpu.pc, 1);
 
-    // Subsequent steps should just consume cycles
+    // Subsequent steps should just consume cycles (1 cycle for halted spin)
     let cycles = cpu.step(&mut bus);
-    assert_eq!(cycles, 4);
+    assert_eq!(cycles, 1);
     assert_eq!(cpu.pc, 1); // PC doesn't advance
 }
 
@@ -702,7 +703,7 @@ fn test_rst() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
 
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     // RST 0x38 (opcode 0xFF)
     bus.poke_byte(0, 0xFF);
 
@@ -1037,7 +1038,7 @@ fn test_pea_ix_pushes_24bit_adl() {
     let mut bus = Bus::new();
 
     cpu.adl = true;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.ix = 0x123456;
 
     // PEA IX+2 (ED 65 02)
@@ -1047,7 +1048,7 @@ fn test_pea_ix_pushes_24bit_adl() {
 
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.sp, 0xD001FD, "PEA should push 24-bit address in ADL mode");
+    assert_eq!(cpu.sp(), 0xD001FD, "PEA should push 24-bit address in ADL mode");
     assert_eq!(bus.peek_byte(0xD001FD), 0x58, "Low byte on stack");
     assert_eq!(bus.peek_byte(0xD001FE), 0x34, "Middle byte on stack");
     assert_eq!(bus.peek_byte(0xD001FF), 0x12, "High byte on stack");
@@ -1404,7 +1405,7 @@ fn test_push_pop_ix() {
     let mut bus = Bus::new();
     cpu.adl = true;
 
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.ix = 0x123456;
 
     // PUSH IX (DD E5)
@@ -1761,7 +1762,7 @@ fn test_push_pop_bc_24bit_adl() {
     let mut bus = Bus::new();
 
     cpu.adl = true;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.bc = 0xABCDEF; // Full 24-bit value
 
     // PUSH BC (opcode 0xC5)
@@ -1769,7 +1770,7 @@ fn test_push_pop_bc_24bit_adl() {
     cpu.step(&mut bus);
 
     // SP should decrease by 3 in ADL mode
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3 for 24-bit push");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3 for 24-bit push");
 
     // Verify all 3 bytes on stack
     assert_eq!(bus.peek_byte(0xD001FD), 0xEF, "Low byte on stack");
@@ -1784,7 +1785,7 @@ fn test_push_pop_bc_24bit_adl() {
     cpu.step(&mut bus);
 
     assert_eq!(cpu.bc, 0xABCDEF, "POP BC should restore full 24-bit value");
-    assert_eq!(cpu.sp, 0xD00200, "SP should return to original value");
+    assert_eq!(cpu.sp(), 0xD00200, "SP should return to original value");
 }
 
 #[test]
@@ -1794,14 +1795,14 @@ fn test_push_pop_de_24bit_adl() {
     let mut bus = Bus::new();
 
     cpu.adl = true;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.de = 0x123456;
 
     // PUSH DE (opcode 0xD5)
     bus.poke_byte(0, 0xD5);
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3");
 
     cpu.de = 0;
 
@@ -1819,14 +1820,14 @@ fn test_push_pop_hl_24bit_adl() {
     let mut bus = Bus::new();
 
     cpu.adl = true;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.hl = 0xFEDCBA;
 
     // PUSH HL (opcode 0xE5)
     bus.poke_byte(0, 0xE5);
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3");
 
     cpu.hl = 0;
 
@@ -1844,7 +1845,7 @@ fn test_push_pop_af_adl() {
     let mut bus = Bus::new();
 
     cpu.adl = true;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.a = 0xAB;
     cpu.f = 0xCD;
 
@@ -1853,7 +1854,7 @@ fn test_push_pop_af_adl() {
     cpu.step(&mut bus);
 
     // SP should decrease by 3 for AF in ADL mode (CEmu behavior)
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3 for AF in ADL mode");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3 for AF in ADL mode");
 
     cpu.a = 0;
     cpu.f = 0;
@@ -1864,7 +1865,7 @@ fn test_push_pop_af_adl() {
 
     assert_eq!(cpu.a, 0xAB, "A should be restored");
     assert_eq!(cpu.f, 0xCD, "F should be restored");
-    assert_eq!(cpu.sp, 0xD00200, "SP should return to original");
+    assert_eq!(cpu.sp(), 0xD00200, "SP should return to original");
 }
 
 #[test]
@@ -1875,7 +1876,7 @@ fn test_push_bc_uses_l_mode_with_suffix() {
 
     cpu.adl = true;
     cpu.mbase = 0xD0;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.bc = 0x112233;
 
     // Pre-fill the byte that would be overwritten by a 24-bit push
@@ -1889,7 +1890,7 @@ fn test_push_bc_uses_l_mode_with_suffix() {
     cpu.step(&mut bus); // execute suffix + PUSH BC atomically (L=0 from suffix)
 
     // SP should decrease by 2 (16-bit stack) and only low 16 bits should be pushed.
-    assert_eq!(cpu.sp & 0xFFFF, 0x01FE, "SP low 16 bits should decrease by 2");
+    assert_eq!(cpu.sp() & 0xFFFF, 0x01FE, "SP low 16 bits should decrease by 2");
     assert_eq!(bus.peek_byte(0xD001FE), 0x33, "Low byte on stack");
     assert_eq!(bus.peek_byte(0xD001FF), 0x22, "High byte on stack");
     assert_eq!(bus.peek_byte(0xD001FD), 0xAA, "Upper byte should remain untouched");
@@ -1933,7 +1934,7 @@ fn test_push_pop_bc_16bit_z80_mode() {
     // Use MBASE=0xD0 to map into RAM region
     cpu.mbase = 0xD0;
     // SP low 16-bits = 0x0200, with MBASE=0xD0 gives address 0xD00200 (in RAM)
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.bc = 0x123456; // Upper byte should be ignored in 16-bit push
 
     // Code needs to be in the MBASE region too
@@ -1947,7 +1948,7 @@ fn test_push_pop_bc_16bit_z80_mode() {
     // SP should decrease by 2 in Z80 mode
     // Low 16 bits: 0x0200 - 2 = 0x01FE
     assert_eq!(
-        cpu.sp & 0xFFFF,
+        cpu.sp() & 0xFFFF,
         0x01FE,
         "SP low 16 bits should decrease by 2 in Z80 mode"
     );
@@ -1973,7 +1974,7 @@ fn test_indexed_push_pop_bc_24bit_adl() {
     let mut bus = Bus::new();
 
     cpu.adl = true;
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.bc = 0xAABBCC;
 
     // DD PUSH BC (DD C5) - DD prefix but BC still uses 24-bit
@@ -1981,7 +1982,7 @@ fn test_indexed_push_pop_bc_24bit_adl() {
     bus.poke_byte(1, 0xC5);
     step_full(&mut cpu, &mut bus);
 
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3 for DD PUSH BC");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3 for DD PUSH BC");
 
     cpu.bc = 0;
 
@@ -2420,7 +2421,7 @@ fn test_decimal_point_sequence() {
     cpu.adl = true;
 
     // Setup: create a subroutine call so we can test RET NZ
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
 
     // First, CALL the test subroutine
     bus.poke_byte(0, 0xCD);       // CALL 0x001000
@@ -2473,7 +2474,7 @@ fn test_decimal_point_sequence() {
 
     // Test Case 2: C = 1 should NOT write decimal point (returns early)
     cpu.pc = 0;
-    cpu.sp = 0xD00100;
+    cpu.set_sp_both(0xD00100);
     cpu.set_c(1);
     cpu.de = 0xD01235;
     bus.poke_byte(0xD01235, 0x00); // Clear target
@@ -2886,7 +2887,7 @@ fn test_suffix_sis_push_uses_16bit_sp() {
     cpu.mbase = 0xD0;
     cpu.l = true; // Start with L=true, suffix will change to L=false
 
-    cpu.sp = 0x1000;
+    cpu.set_sp_both(0x1000);
     cpu.bc = 0x123456; // Only lower 16 bits should be pushed
 
     // .SIS PUSH BC (0x40 C5)
@@ -2903,7 +2904,7 @@ fn test_suffix_sis_push_uses_16bit_sp() {
     cpu.step(&mut bus);
 
     // SP should decrease by 2 (16-bit push)
-    assert_eq!(cpu.sp & 0xFFFF, 0x0FFE, "SP should decrease by 2 in .SIS mode");
+    assert_eq!(cpu.sp() & 0xFFFF, 0x0FFE, "SP should decrease by 2 in .SIS mode");
 
     // Only 2 bytes should be on stack
     assert_eq!(bus.peek_byte(0xD00FFE), 0x56, "Low byte of BC");
@@ -2918,7 +2919,7 @@ fn test_suffix_lil_push_uses_24bit_sp() {
     cpu.adl = true;
     cpu.l = false; // Start with L=false, suffix will change to L=true
 
-    cpu.sp = 0xD01000;
+    cpu.set_sp_both(0xD01000);
     cpu.bc = 0x123456; // All 3 bytes should be pushed
 
     // .LIL PUSH BC (0x5B C5)
@@ -2935,7 +2936,7 @@ fn test_suffix_lil_push_uses_24bit_sp() {
     cpu.step(&mut bus);
 
     // SP should decrease by 3 (24-bit push)
-    assert_eq!(cpu.sp, 0xD00FFD, "SP should decrease by 3 in .LIL mode");
+    assert_eq!(cpu.sp(), 0xD00FFD, "SP should decrease by 3 in .LIL mode");
 
     // All 3 bytes should be on stack
     assert_eq!(bus.peek_byte(0xD00FFD), 0x56, "Low byte of BC");
@@ -3011,7 +3012,7 @@ fn test_mlt_sp_multiply() {
     let mut bus = Bus::new();
     cpu.adl = true;
 
-    cpu.sp = 0xD00A05; // SPH (bits 15-8) = 0x0A, SPL (bits 7-0) = 0x05
+    cpu.set_sp_both(0xD00A05); // SPH (bits 15-8) = 0x0A, SPL (bits 7-0) = 0x05
     // 0x0A * 0x05 = 10 * 5 = 50 = 0x0032
 
     // MLT SP (ED 7C)
@@ -3022,7 +3023,7 @@ fn test_mlt_sp_multiply() {
     cpu.step(&mut bus);
 
     // Lower 16 bits of SP should be the product
-    assert_eq!(cpu.sp & 0xFFFF, 0x0032, "MLT SP: 0x0A * 0x05 = 0x0032");
+    assert_eq!(cpu.sp() & 0xFFFF, 0x0032, "MLT SP: 0x0A * 0x05 = 0x0032");
 }
 
 #[test]

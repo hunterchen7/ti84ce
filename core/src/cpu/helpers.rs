@@ -497,16 +497,19 @@ impl Cpu {
     /// CEmu: cpu_push_byte_mode(value, cpu.L) uses L mode for SP masking
     #[inline]
     pub fn push_byte(&mut self, bus: &mut Bus, val: u8) {
-        self.sp = self.wrap_data(self.sp.wrapping_sub(1));
-        bus.write_byte(self.mask_addr(self.sp), val);
+        let sp = self.sp().wrapping_sub(1);
+        let sp = self.wrap_data(sp);
+        self.set_sp(sp);
+        bus.write_byte(self.mask_addr(sp), val);
     }
 
     /// Pop a byte from the stack
     /// CEmu: cpu_pop_byte_mode(cpu.L) uses L mode for SP masking
     #[inline]
     pub fn pop_byte(&mut self, bus: &mut Bus) -> u8 {
-        let val = bus.read_byte(self.mask_addr(self.sp));
-        self.sp = self.wrap_data(self.sp.wrapping_add(1));
+        let sp = self.sp();
+        let val = bus.read_byte(self.mask_addr(sp));
+        self.set_sp(self.wrap_data(sp.wrapping_add(1)));
         val
     }
 
@@ -750,7 +753,7 @@ impl Cpu {
             0 => self.bc & mask,
             1 => self.de & mask,
             2 => self.hl & mask,
-            3 => self.sp & mask,
+            3 => self.sp() & mask,
             _ => 0,
         }
     }
@@ -764,7 +767,7 @@ impl Cpu {
             0 => self.bc = masked,
             1 => self.de = masked,
             2 => self.hl = masked,
-            3 => self.sp = masked,
+            3 => self.set_sp(masked),
             _ => {}
         }
     }

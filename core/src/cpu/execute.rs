@@ -403,7 +403,7 @@ impl Cpu {
                         }
                         3 => {
                             // LD SP,HL
-                            self.sp = self.wrap_data(self.hl);
+                            self.set_sp(self.wrap_data(self.hl));
                             6
                         }
                         _ => 4,
@@ -459,7 +459,7 @@ impl Cpu {
                     }
                     4 => {
                         // EX (SP),HL
-                        let sp_addr = self.mask_addr(self.sp);
+                        let sp_addr = self.mask_addr(self.sp());
                         let sp_val = if self.l {
                             bus.read_addr24(sp_addr)
                         } else {
@@ -1245,26 +1245,28 @@ impl Cpu {
                         9
                     }
                     1 => {
-                        // LD R,A
-                        self.r = self.a;
+                        // LD R,A — CEmu: R = rotate_left(A)
+                        // CEmu stores R rotated: (A << 1) | (A >> 7)
+                        self.r = (self.a << 1) | (self.a >> 7);
                         9
                     }
                     2 => {
-                        // LD A,I
+                        // LD A,I — CEmu: r->A = r->I, PV = IEF1
                         self.a = self.i as u8;
                         self.set_sz_flags(self.a);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.set_flag_pv(self.iff2);
+                        self.set_flag_pv(self.iff1); // CEmu uses IEF1, not IFF2
                         9
                     }
                     3 => {
-                        // LD A,R
-                        self.a = self.r;
+                        // LD A,R — CEmu: r->A = rotate(R), PV = IEF1
+                        // CEmu rotates R: (R >> 1) | (R << 7)
+                        self.a = (self.r >> 1) | (self.r << 7);
                         self.set_sz_flags(self.a);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.set_flag_pv(self.iff2);
+                        self.set_flag_pv(self.iff1); // CEmu uses IEF1, not IFF2
                         9
                     }
                     4 => {
@@ -2267,7 +2269,7 @@ impl Cpu {
                     self.iy
                 }
             }
-            3 => self.sp,
+            3 => self.sp(),
             _ => 0,
         }
     }
@@ -2351,7 +2353,7 @@ impl Cpu {
                         3 => {
                             // LD SP,IX/IY
                             let index_reg = if use_ix { self.ix } else { self.iy };
-                            self.sp = self.wrap_data(index_reg);
+                            self.set_sp(self.wrap_data(index_reg));
                             10
                         }
                         _ => 4,
@@ -2389,7 +2391,7 @@ impl Cpu {
                     }
                     4 => {
                         // EX (SP),IX/IY
-                        let sp_addr = self.mask_addr(self.sp);
+                        let sp_addr = self.mask_addr(self.sp());
                         let sp_val = if self.l {
                             bus.read_addr24(sp_addr)
                         } else {
