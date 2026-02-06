@@ -4,24 +4,72 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Calculator body -->
-    <path
-        android:fillColor="#2D2D2D"
-        android:pathData="M24,24h60v60h-60z" />
-    <!-- Screen -->
-    <path
-        android:fillColor="#A8D8A8"
-        android:pathData="M28,28h52v20h-52z" />
-    <!-- Buttons row 1 -->
-    <path
-        android:fillColor="#4A4A4A"
-        android:pathData="M28,52h10v8h-10zM42,52h10v8h-10zM56,52h10v8h-10zM70,52h10v8h-10z" />
-    <!-- Buttons row 2 -->
-    <path
-        android:fillColor="#4A4A4A"
-        android:pathData="M28,64h10v8h-10zM42,64h10v8h-10zM56,64h10v8h-10zM70,64h10v8h-10z" />
-    <!-- Plus symbol on button -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M73,66h4v4h-4zM71,68h8v2h-8z" />
+    <!-- Calculator from web/public/calculator.svg, scaled to fit adaptive icon safe zone -->
+    <!-- Scale: 0.537 (66/123), translateX: 27.7 (center 98*0.537=52.6 in 108), translateY: 21 -->
+    <group
+        android:translateX="27.7"
+        android:translateY="21"
+        android:scaleX="0.537"
+        android:scaleY="0.537">
+        <!-- Calculator body -->
+        <path
+            android:fillColor="#1a1a1a"
+            android:pathData="M4.23,0 C4.23,0 0,0 0,4.23 L0,118.65 C0,122.88 4.23,122.88 4.23,122.88 L93.75,122.88 C98,122.88 98,118.65 98,118.65 L98,4.23 C98,0 93.75,0 93.75,0 Z" />
+        <!-- Screen -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M7.63,8.63 L89.5,8.63 Q90.89,8.63 90.89,10.02 L90.89,29.14 Q90.89,30.53 89.5,30.53 L7.63,30.53 Q6.24,30.53 6.24,29.14 L6.24,10.02 Q6.24,8.63 7.63,8.63 Z" />
+        <!-- Row 1: blue, dark, dark, dark -->
+        <path
+            android:fillColor="#3b82f6"
+            android:pathData="M9.98,45.11 Q8.15,45.11 8.15,46.94 L8.15,56.83 Q8.15,58.66 9.98,58.66 L21.7,58.66 Q23.53,58.66 23.53,56.83 L23.53,46.94 Q23.53,45.11 21.7,45.11 Z" />
+        <path
+            android:fillColor="#333333"
+            android:pathData="M32.45,45.11 Q30.62,45.11 30.62,46.94 L30.62,56.83 Q30.62,58.66 32.45,58.66 L44.17,58.66 Q46,58.66 46,56.83 L46,46.94 Q46,45.11 44.17,45.11 Z" />
+        <path
+            android:fillColor="#333333"
+            android:pathData="M54.91,45.11 Q53.09,45.11 53.09,46.94 L53.09,56.83 Q53.09,58.66 54.91,58.66 L66.63,58.66 Q68.45,58.66 68.45,56.83 L68.45,46.94 Q68.45,45.11 66.63,45.11 Z" />
+        <path
+            android:fillColor="#333333"
+            android:pathData="M77.39,45.11 Q75.56,45.11 75.56,46.94 L75.56,56.83 Q75.56,58.66 77.39,58.66 L89.1,58.66 Q90.93,58.66 90.93,56.83 L90.93,46.94 Q90.93,45.11 89.1,45.11 Z" />
+        <!-- Row 2: green, white, white, white -->
+        <path
+            android:fillColor="#4ade80"
+            android:pathData="M9.98,63.84 Q8.15,63.84 8.15,65.67 L8.15,75.56 Q8.15,77.39 9.98,77.39 L21.7,77.39 Q23.53,77.39 23.53,75.56 L23.53,65.67 Q23.53,63.84 21.7,63.84 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M32.45,63.84 Q30.62,63.84 30.62,65.67 L30.62,75.56 Q30.62,77.39 32.45,77.39 L44.17,77.39 Q46,77.39 46,75.56 L46,65.67 Q46,63.84 44.17,63.84 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54.91,63.84 Q53.09,63.84 53.09,65.67 L53.09,75.56 Q53.09,77.39 54.91,77.39 L66.63,77.39 Q68.45,77.39 68.45,75.56 L68.45,65.67 Q68.45,63.84 66.63,63.84 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M77.39,63.84 Q75.56,63.84 75.56,65.67 L75.56,75.56 Q75.56,77.39 77.39,77.39 L89.1,77.39 Q90.93,77.39 90.93,75.56 L90.93,65.67 Q90.93,63.84 89.1,63.84 Z" />
+        <!-- Row 3: dark, white, white, white -->
+        <path
+            android:fillColor="#333333"
+            android:pathData="M9.98,82.57 Q8.15,82.57 8.15,84.4 L8.15,94.29 Q8.15,96.12 9.98,96.12 L21.7,96.12 Q23.53,96.12 23.53,94.29 L23.53,84.4 Q23.53,82.57 21.7,82.57 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M32.45,82.57 Q30.62,82.57 30.62,84.4 L30.62,94.29 Q30.62,96.12 32.45,96.12 L44.17,96.12 Q46,96.12 46,94.29 L46,84.4 Q46,82.57 44.17,82.57 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54.91,82.57 Q53.09,82.57 53.09,84.4 L53.09,94.29 Q53.09,96.12 54.91,96.12 L66.63,96.12 Q68.45,96.12 68.45,94.29 L68.45,84.4 Q68.45,82.57 66.63,82.57 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M77.39,82.57 Q75.56,82.57 75.56,84.4 L75.56,94.29 Q75.56,96.12 77.39,96.12 L89.1,96.12 Q90.93,96.12 90.93,94.29 L90.93,84.4 Q90.93,82.57 89.1,82.57 Z" />
+        <!-- Row 4: dark, white, white, white -->
+        <path
+            android:fillColor="#333333"
+            android:pathData="M9.98,101.3 Q8.15,101.3 8.15,103.13 L8.15,113.02 Q8.15,114.85 9.98,114.85 L21.7,114.85 Q23.53,114.85 23.53,113.02 L23.53,103.13 Q23.53,101.3 21.7,101.3 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M32.45,101.3 Q30.62,101.3 30.62,103.13 L30.62,113.02 Q30.62,114.85 32.45,114.85 L44.17,114.85 Q46,114.85 46,113.02 L46,103.13 Q46,101.3 44.17,101.3 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M54.91,101.3 Q53.09,101.3 53.09,103.13 L53.09,113.02 Q53.09,114.85 54.91,114.85 L66.63,114.85 Q68.45,114.85 68.45,113.02 L68.45,103.13 Q68.45,101.3 66.63,101.3 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M77.39,101.3 Q75.56,101.3 75.56,103.13 L75.56,113.02 Q75.56,114.85 77.39,114.85 L89.1,114.85 Q90.93,114.85 90.93,113.02 L90.93,103.13 Q90.93,101.3 89.1,101.3 Z" />
+    </group>
 </vector>
