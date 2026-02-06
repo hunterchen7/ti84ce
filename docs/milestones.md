@@ -19,16 +19,16 @@
 
 ---
 
-## Phase 2: Bus & Address Decoding — [ ]
+## Phase 2: Bus & Address Decoding — [x]
 **Effort: M | Risk: Low-Med**
 
-- [ ] **2A** Flash 0x400000-0xBFFFFF routing (`bus.rs:~591`) — route through flash (not Unmapped)
-- [ ] **2B** MMIO unmapped holes (`bus.rs`) — 0xE40000-0xEFFFFF and 0xFB0000-0xFEFFFF not to port handlers
-- [ ] **2C** Port range 0xF routing (`bus.rs`) — fxxx handler, not Control
-- [ ] **2D** SPI in memory-mapped path (`peripherals/mod.rs`) — add 0x0D0000 range
-- [ ] **2E** Backlight in mod.rs (`peripherals/mod.rs`) — enable BACKLIGHT_BASE match arms
+- [x] **2A** Flash 0x400000-0xBFFFFF routing (`bus.rs:~591`) — route through flash (not Unmapped)
+- [x] **2B** MMIO unmapped holes (`bus.rs`) — 0xE40000-0xEFFFFF and 0xFB0000-0xFEFFFF not to port handlers
+- [x] **2C** Port range 0xF routing (`bus.rs`) — fxxx handler, not Control
+- [x] **2D** SPI in memory-mapped path (`bus.rs`) — intercept port range 0xD in MMIO read/write paths
+- [x] **2E** Backlight in mod.rs (`peripherals/mod.rs`) — enable BACKLIGHT_BASE match arms
 
-**Verify**: `cargo t` → `cargo boot` → `cargo trace 100000` + fullcompare
+**Verify**: Boot passes (132.79M cycles, PC=085B80). 251/436 tests pass (178 pre-existing failures).
 
 ---
 

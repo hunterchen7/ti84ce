@@ -57,9 +57,7 @@ const WATCHDOG_BASE: u32 = 0x160000; // 0xF60000
 const WATCHDOG_END: u32 = 0x160100;
 const RTC_BASE: u32 = 0x180000; // 0xF80000
 const RTC_END: u32 = 0x180100;
-#[allow(dead_code)]
 const BACKLIGHT_BASE: u32 = 0x1B0000; // 0xFB0000
-#[allow(dead_code)]
 const BACKLIGHT_END: u32 = 0x1B0100;
 
 /// Peripheral subsystem containing all hardware controllers
@@ -244,6 +242,9 @@ impl Peripherals {
             // RTC Controller (0xF80000 - 0xF800FF)
             a if a >= RTC_BASE && a < RTC_END => self.rtc.read(a - RTC_BASE, current_cycles, cpu_speed),
 
+            // Backlight Controller (0xFB0000 - 0xFB00FF)
+            a if a >= BACKLIGHT_BASE && a < BACKLIGHT_END => self.backlight.read(a - BACKLIGHT_BASE),
+
             // Unmapped - return from fallback storage
             _ => {
                 let offset = (addr as usize) % Self::FALLBACK_SIZE;
@@ -364,6 +365,11 @@ impl Peripherals {
             // RTC Controller (0xF80000 - 0xF800FF)
             a if a >= RTC_BASE && a < RTC_END => {
                 self.rtc.write(a - RTC_BASE, value, current_cycles, cpu_speed)
+            }
+
+            // Backlight Controller (0xFB0000 - 0xFB00FF)
+            a if a >= BACKLIGHT_BASE && a < BACKLIGHT_END => {
+                self.backlight.write(a - BACKLIGHT_BASE, value)
             }
 
             // Unmapped - store in fallback

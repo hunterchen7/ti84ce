@@ -167,7 +167,9 @@ fn test_exx() {
 
 #[test]
 fn test_ex_de_hl() {
+    // ADL mode (24-bit): swap full values
     let mut cpu = Cpu::new();
+    cpu.l = true;
     cpu.de = 0x123456;
     cpu.hl = 0xABCDEF;
 
@@ -175,6 +177,17 @@ fn test_ex_de_hl() {
 
     assert_eq!(cpu.de, 0xABCDEF);
     assert_eq!(cpu.hl, 0x123456);
+
+    // Z80 mode (16-bit): swap only lower 16 bits, mask upper byte
+    let mut cpu2 = Cpu::new();
+    cpu2.l = false;
+    cpu2.de = 0x123456;
+    cpu2.hl = 0xABCDEF;
+
+    cpu2.ex_de_hl();
+
+    assert_eq!(cpu2.de, 0xCDEF);
+    assert_eq!(cpu2.hl, 0x3456);
 }
 
 #[test]

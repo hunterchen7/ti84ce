@@ -586,10 +586,15 @@ impl Bus {
     pub fn decode_address(addr: u32) -> MemoryRegion {
         let addr = addr & addr::ADDR_MASK;
 
-        if addr < addr::FLASH_END {
+        // CEmu routes addresses by top nibble (addr >> 20):
+        // 0x0-0xB: Flash (including 0x4-0xB mirrored/extended flash)
+        // 0xC: Unmapped
+        // 0xD: RAM
+        // 0xE-0xF: MMIO ports
+        if addr < 0xC00000 {
             MemoryRegion::Flash
         } else if addr < addr::RAM_START {
-            MemoryRegion::Unmapped
+            MemoryRegion::Unmapped // 0xC00000-0xCFFFFF
         } else if addr < addr::RAM_END {
             if addr >= addr::VRAM_START {
                 MemoryRegion::Vram
@@ -630,12 +635,37 @@ impl Bus {
                 (self.ram.read(addr - addr::RAM_START), Some(IoTarget::Ram))
             }
             MemoryRegion::Ports => {
-                // Use port-specific timing like CEmu's port_read_byte()
-                let port_offset = addr - addr::PORT_START;
-                let port_range = (port_offset >> 12) & 0xF;
-                self.mem_cycles += Self::PORT_READ_CYCLES[port_range as usize];
-                let keys = *self.ports.key_state();
-                (self.ports.read(port_offset, &keys, self.cycles), Some(IoTarget::MmioPort))
+                // CEmu mmio_mapped check: only certain MMIO ranges are valid
+                // 0xE00000-0xE3FFFF: mapped, 0xE40000-0xEFFFFF: unmapped (2 cycles)
+                // 0xF00000-0xFAFFFF: mapped, 0xFB0000-0xFEFFFF: unmapped (3 cycles)
+                // 0xFF0000-0xFFFFFF: mapped
+                let is_mapped = if addr < 0xF00000 {
+                    addr < 0xE40000
+                } else {
+                    addr < 0xFB0000 || addr >= 0xFF0000
+                };
+
+                if is_mapped {
+                    let port_offset = addr - addr::PORT_START;
+                    let port_range = (port_offset >> 12) & 0xF;
+                    self.mem_cycles += Self::PORT_READ_CYCLES[port_range as usize];
+                    // SPI lives on bus.spi (not bus.ports), intercept its MMIO range
+                    if port_range == 0xD {
+                        let offset = (port_offset & 0x7F) as u32;
+                        (self.spi.read(offset, self.cycles, self.ports.control.cpu_speed()), Some(IoTarget::MmioPort))
+                    } else {
+                        let keys = *self.ports.key_state();
+                        (self.ports.read(port_offset, &keys, self.cycles), Some(IoTarget::MmioPort))
+                    }
+                } else {
+                    // Unmapped MMIO: CEmu returns random data with cycle penalty
+                    if addr >= 0xFB0000 && addr < 0xFF0000 {
+                        self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES; // 3
+                    } else {
+                        self.mem_cycles += Self::UNMAPPED_MMIO_OTHER_CYCLES; // 2
+                    }
+                    (self.rng.next(), None)
+                }
             }
             MemoryRegion::Unmapped => {
                 // CEmu: 258 cycles for parallel mode, 2 for serial mode
@@ -798,47 +828,65 @@ impl Bus {
                 self.record_io_op(IoOpType::Write, IoTarget::Ram, addr, old_value, value);
             }
             MemoryRegion::Ports => {
-                // CEmu's port_write_byte timing:
-                // 1. Add PORT_WRITE_DELAY (4) before processing
-                // 2. Do port write (may trigger clock conversion)
-                // 3. Rewind by (PORT_WRITE_DELAY - port_write_cycles)
-                const PORT_WRITE_DELAY: u64 = 4;
-                let port_offset = addr - addr::PORT_START;
-                let port_range = (port_offset >> 12) & 0xF;
-
-                // Add delay before port write (like CEmu)
-                self.mem_cycles += PORT_WRITE_DELAY;
-
-                // Get old value for tracing (read without side effects if possible)
-                // Note: some ports have read side effects, so we may not get the true old value
-                let keys = *self.ports.key_state();
-                let old_value = self.ports.read(port_offset, &keys, self.cycles);
-                self.ports.write(port_offset, value, self.cycles);
-                // Record for comprehensive I/O tracing
-                self.record_io_op(IoOpType::Write, IoTarget::MmioPort, addr, old_value, value);
-
-                // CEmu: sched_set_clock() converts cycles when CPU speed changes
-                // Conversion: new_cycles = old_cycles * new_rate / old_rate
-                // For 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
-                // For 6MHz -> 48MHz: new_cycles = old_cycles * 48 / 6 = old_cycles * 8
-                let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
-                if speed_written && new_rate != old_rate {
-                    let total = self.cycles + self.mem_cycles;
-                    // CEmu: muldiv_floor(cpu.cycles, old_tick_unit, new_tick_unit)
-                    // = cpu.cycles * (base/old_rate) / (base/new_rate)
-                    // = cpu.cycles * new_rate / old_rate
-                    let converted = total * new_rate as u64 / old_rate as u64;
-                    self.cycles = converted;
-                    self.mem_cycles = 0;
-                    // After conversion, rewind from converted cycles
-                    let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
-                    let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
-                    self.cycles = self.cycles.saturating_sub(rewind);
+                // CEmu mmio_mapped check for write path
+                let is_mapped = if addr < 0xF00000 {
+                    addr < 0xE40000
                 } else {
-                    // No clock conversion - just rewind from mem_cycles
-                    let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
-                    let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
-                    self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
+                    addr < 0xFB0000 || addr >= 0xFF0000
+                };
+
+                if !is_mapped {
+                    // Unmapped MMIO: writes ignored, only cycle penalty
+                    if addr >= 0xFB0000 && addr < 0xFF0000 {
+                        self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES; // 3
+                    } else {
+                        self.mem_cycles += Self::UNMAPPED_MMIO_OTHER_CYCLES; // 2
+                    }
+                } else {
+                    // CEmu's port_write_byte timing:
+                    // 1. Add PORT_WRITE_DELAY (4) before processing
+                    // 2. Do port write (may trigger clock conversion)
+                    // 3. Rewind by (PORT_WRITE_DELAY - port_write_cycles)
+                    const PORT_WRITE_DELAY: u64 = 4;
+                    let port_offset = addr - addr::PORT_START;
+                    let port_range = (port_offset >> 12) & 0xF;
+
+                    // Add delay before port write (like CEmu)
+                    self.mem_cycles += PORT_WRITE_DELAY;
+
+                    // SPI lives on bus.spi (not bus.ports), intercept its MMIO range
+                    let old_value;
+                    if port_range == 0xD {
+                        let offset = (port_offset & 0x7F) as u32;
+                        old_value = self.spi.read(offset, self.cycles, self.ports.control.cpu_speed());
+                        let needs_schedule = self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
+                        if needs_schedule {
+                            self.spi_needs_schedule = true;
+                        }
+                    } else {
+                        // Get old value for tracing (read without side effects if possible)
+                        let keys = *self.ports.key_state();
+                        old_value = self.ports.read(port_offset, &keys, self.cycles);
+                        self.ports.write(port_offset, value, self.cycles);
+                    }
+                    // Record for comprehensive I/O tracing
+                    self.record_io_op(IoOpType::Write, IoTarget::MmioPort, addr, old_value, value);
+
+                    // CEmu: sched_set_clock() converts cycles when CPU speed changes
+                    let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
+                    if speed_written && new_rate != old_rate {
+                        let total = self.cycles + self.mem_cycles;
+                        let converted = total * new_rate as u64 / old_rate as u64;
+                        self.cycles = converted;
+                        self.mem_cycles = 0;
+                        let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
+                        let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
+                        self.cycles = self.cycles.saturating_sub(rewind);
+                    } else {
+                        let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
+                        let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
+                        self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
+                    }
                 }
             }
             MemoryRegion::Unmapped => {
@@ -1092,11 +1140,10 @@ impl Bus {
                 let offset = (port & 0x7F) as u32;
                 self.spi.read(offset, self.cycles, self.ports.control.cpu_speed())
             }
-            0xF => {
-                // Control ports alternate - mask with 0xFF
-                let offset = (port & 0xFF) as u32;
-                self.ports.control.read(offset)
-            }
+            // CEmu: port_map[0xF] = fxxx (debug handler), not Control
+            // Control ports are only accessible via IN0/OUT0 (port range 0x0)
+            // or via MMIO at 0xFF0000 which routes to peripherals/mod.rs
+            0xF => 0x00,
             // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => 0x00,
         };
@@ -1244,20 +1291,8 @@ impl Bus {
                     self.spi_needs_schedule = true;
                 }
             }
-            0xF => {
-                // Control ports alternate - mask with 0xFF
-                let offset = (port & 0xFF) as u32;
-                self.ports.control.write(offset, value);
-                // CEmu: sched_set_clock() converts cycles when CPU speed changes
-                let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
-                if speed_written && new_rate != old_rate {
-                    let total = self.cycles + self.mem_cycles;
-                    let converted = total * new_rate as u64 / old_rate as u64;
-                    self.cycles = converted;
-                    self.mem_cycles = 0;
-                    cycles_converted = true;
-                }
-            }
+            // CEmu: port_map[0xF] = fxxx (debug handler), not Control
+            0xF => {}
             // Unimplemented: USB(3), Protected(9), Cxxx(C), UART(E)
             _ => {}
         }
@@ -1473,9 +1508,13 @@ mod tests {
         assert_eq!(Bus::decode_address(0x100000), MemoryRegion::Flash);
         assert_eq!(Bus::decode_address(0x3FFFFF), MemoryRegion::Flash);
 
+        // Extended flash region (CEmu routes 0x4-0xB through flash)
+        assert_eq!(Bus::decode_address(0x400000), MemoryRegion::Flash);
+        assert_eq!(Bus::decode_address(0x800000), MemoryRegion::Flash);
+        assert_eq!(Bus::decode_address(0xBFFFFF), MemoryRegion::Flash);
+
         // Unmapped between flash and RAM
-        assert_eq!(Bus::decode_address(0x400000), MemoryRegion::Unmapped);
-        assert_eq!(Bus::decode_address(0x800000), MemoryRegion::Unmapped);
+        assert_eq!(Bus::decode_address(0xC00000), MemoryRegion::Unmapped);
         assert_eq!(Bus::decode_address(0xCFFFFF), MemoryRegion::Unmapped);
 
         // RAM region
@@ -1590,8 +1629,9 @@ mod tests {
         bus.seed_rng(0x12, 0x34, 0x56);
 
         // With deterministic seed, verify we get expected sequence
-        let val1 = bus.read_byte(0x500000);
-        let val2 = bus.read_byte(0x500000); // Same address, different value (RNG advances)
+        // Use 0xC00000 (unmapped region) since 0x500000 is now extended flash
+        let val1 = bus.read_byte(0xC00000);
+        let val2 = bus.read_byte(0xC00000); // Same address, different value (RNG advances)
 
         // RNG should produce different values on consecutive reads
         assert_ne!(val1, val2, "RNG should produce varying values");
@@ -1600,7 +1640,7 @@ mod tests {
         // seed [0x12, 0x34, 0x56], first output should be 0x12 (returns state[0])
         let mut bus2 = Bus::new();
         bus2.seed_rng(0x12, 0x34, 0x56);
-        assert_eq!(bus2.read_byte(0x500000), 0x12);
+        assert_eq!(bus2.read_byte(0xC00000), 0x12);
     }
 
     #[test]
@@ -1642,7 +1682,8 @@ mod tests {
         bus.reset_cycles();
 
         // Unmapped read: 258 cycles in parallel flash mode (default)
-        bus.read_byte(0x500000);
+        // 0xC00000 is unmapped (0x500000 is now extended flash via 2A fix)
+        bus.read_byte(0xC00000);
         assert_eq!(bus.mem_cycles(), Bus::UNMAPPED_PARALLEL_CYCLES);
     }
 
@@ -1718,9 +1759,12 @@ mod tests {
     fn test_boundary_addresses() {
         // Test exact boundary addresses to ensure off-by-one errors are caught
 
-        // Last flash byte vs first unmapped
+        // Last flash byte vs extended flash (0x4-0xB now routes through flash)
         assert_eq!(Bus::decode_address(0x3FFFFF), MemoryRegion::Flash);
-        assert_eq!(Bus::decode_address(0x400000), MemoryRegion::Unmapped);
+        assert_eq!(Bus::decode_address(0x400000), MemoryRegion::Flash);
+        assert_eq!(Bus::decode_address(0xBFFFFF), MemoryRegion::Flash);
+        // First unmapped after extended flash
+        assert_eq!(Bus::decode_address(0xC00000), MemoryRegion::Unmapped);
 
         // Last unmapped byte vs first RAM byte
         assert_eq!(Bus::decode_address(0xCFFFFF), MemoryRegion::Unmapped);
