@@ -20,11 +20,13 @@ function App() {
       inset: 0,
       display: 'flex',
       justifyContent: 'center',
-      alignItems: 'center',
+      alignItems: 'flex-start',
       background: '#111',
       overflowY: 'auto',
     }}>
-      <Calculator useBundledRom={true} defaultBackend="cemu" fullscreen />
+      <div style={{ marginTop: 'auto', marginBottom: 'auto', paddingTop: '1rem', paddingBottom: '1rem' }}>
+        <Calculator useBundledRom={true} defaultBackend="cemu" fullscreen />
+      </div>
     </div>
   );
 }
