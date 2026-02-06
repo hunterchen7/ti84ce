@@ -403,7 +403,7 @@ impl Cpu {
                         }
                         3 => {
                             // LD SP,HL
-                            self.sp = self.wrap_data(self.hl);
+                            self.set_sp(self.wrap_data(self.hl));
                             6
                         }
                         _ => 4,
@@ -459,7 +459,7 @@ impl Cpu {
                     }
                     4 => {
                         // EX (SP),HL
-                        let sp_addr = self.mask_addr(self.sp);
+                        let sp_addr = self.mask_addr(self.sp());
                         let sp_val = if self.l {
                             bus.read_addr24(sp_addr)
                         } else {
@@ -752,6 +752,7 @@ impl Cpu {
                 // Block instructions
                 // Standard Z80: y >= 4, z <= 3 (LDI/CPI/INI/OUTI and variants)
                 // eZ80 extended: y < 4, z = 2 or 3 (INIM/OTIM and variants)
+                // z=4: INI2/IND2/OUTI2/OUTD2 and repeat variants (both y<4 and y>=4)
                 if z <= 3 {
                     if y >= 4 {
                         // Standard Z80 block instructions
@@ -760,11 +761,38 @@ impl Cpu {
                         // eZ80 extended block I/O instructions
                         self.execute_bli_ez80(bus, y, z, p, q)
                     }
+                } else if z == 4 {
+                    // z=4: INI2/IND2/OUTI2/OUTD2 + repeat variants
+                    self.execute_bli_z4(bus, y, z, p, q)
                 } else {
                     8 // NOP for invalid
                 }
             }
-            _ => 8, // x=3 is NONI (no operation, no interrupt)
+            3 => {
+                // x=3: a few valid instructions, rest are NONI/OPCODETRAP
+                let opcode = (x << 6) | (y << 3) | z;
+                match opcode {
+                    0xC7 => {
+                        // LD I, HL — CEmu: REG_WRITE_EX(I, r->I, r->HL)
+                        self.i = self.hl as u16;
+                        8
+                    }
+                    0xD7 => {
+                        // LD HL, I — CEmu: cpu_mask_mode(r->I | (r->MBASE << 16), cpu.L)
+                        self.hl = self.wrap_data(self.i as u32 | ((self.mbase as u32) << 16));
+                        // CEmu: r->F = cpuflag_undef(r->F) — preserves F3/F5 only
+                        self.f = self.f & (flags::F5 | flags::F3);
+                        8
+                    }
+                    // INIRX (C2), INDRX (CA), OTIRX (C3), OTDRX (CB)
+                    // These route to the block instruction handler (execute_bli)
+                    0xC2 | 0xCA | 0xC3 | 0xCB => {
+                        self.execute_bli_x3(bus, opcode)
+                    }
+                    _ => 8, // NONI (no operation, no interrupt)
+                }
+            }
+            _ => unreachable!(),
         }
     }
 
@@ -883,7 +911,7 @@ impl Cpu {
                         0 => self.bc = self.wrap_data(val),
                         1 => self.de = self.wrap_data(val),
                         2 => self.hl = self.wrap_data(val),
-                        3 => self.iy = self.wrap_data(val), // IY in rp3 context
+                        3 => self.ix = self.wrap_data(val), // IX in rp3 context (CEmu: PREFIX=2)
                         _ => {}
                     }
                 } else {
@@ -892,7 +920,7 @@ impl Cpu {
                         0 => self.bc,
                         1 => self.de,
                         2 => self.hl,
-                        3 => self.iy, // IY in rp3 context
+                        3 => self.ix, // IX in rp3 context (CEmu: PREFIX=2)
                         _ => 0,
                     };
                     if self.l {
@@ -1120,6 +1148,7 @@ impl Cpu {
                     1 => {
                         // RETI - Uses L mode for stack operations, then ADL becomes L
                         bus.add_cycles(1); // CEmu: cpu.cycles++ in cpu_return()
+                        self.iff1 = self.iff2; // Matches RETN behavior
                         let target = self.pop_addr(bus);
                         self.prefetch(bus, target); // Reload prefetch at return address
                         self.pc = target;
@@ -1146,8 +1175,16 @@ impl Cpu {
                         self.madl = true;
                         8
                     }
+                    2 => {
+                        // LEA IY, IX+d (ED 55)
+                        // CEmu: PREFIX=2 (IX), cpu_index_address() reads d and computes IX+d
+                        let d = self.fetch_byte(bus) as i8;
+                        let val = (self.ix as i32 + d as i32) as u32;
+                        self.iy = if self.l { val & 0xFFFFFF } else { val & 0xFFFF };
+                        12
+                    }
                     _ => {
-                        // Other y values are NOP in eZ80
+                        // y=3,6 are OPCODETRAP in CEmu, others NOP
                         8
                     }
                 }
@@ -1208,26 +1245,28 @@ impl Cpu {
                         9
                     }
                     1 => {
-                        // LD R,A
-                        self.r = self.a;
+                        // LD R,A — CEmu: R = rotate_left(A)
+                        // CEmu stores R rotated: (A << 1) | (A >> 7)
+                        self.r = (self.a << 1) | (self.a >> 7);
                         9
                     }
                     2 => {
-                        // LD A,I
+                        // LD A,I — CEmu: r->A = r->I, PV = IEF1
                         self.a = self.i as u8;
                         self.set_sz_flags(self.a);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.set_flag_pv(self.iff2);
+                        self.set_flag_pv(self.iff1); // CEmu uses IEF1, not IFF2
                         9
                     }
                     3 => {
-                        // LD A,R
-                        self.a = self.r;
+                        // LD A,R — CEmu: r->A = rotate(R), PV = IEF1
+                        // CEmu rotates R: (R >> 1) | (R << 7)
+                        self.a = (self.r >> 1) | (self.r << 7);
                         self.set_sz_flags(self.a);
                         self.set_flag_h(false);
                         self.set_flag_n(false);
-                        self.set_flag_pv(self.iff2);
+                        self.set_flag_pv(self.iff1); // CEmu uses IEF1, not IFF2
                         9
                     }
                     4 => {
@@ -1279,7 +1318,7 @@ impl Cpu {
                 self.hl = self.wrap_data(self.hl.wrapping_add(1));
                 self.de = self.wrap_data(self.de.wrapping_add(1));
                 // BC is a counter - use L mode for masking (CEmu: cpu_dec_bc_partial_mode)
-                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                let _ = self.dec_bc_partial_mode();
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -1297,7 +1336,7 @@ impl Cpu {
                 self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                 self.de = self.wrap_data(self.de.wrapping_sub(1));
                 // BC is a counter - use L mode for masking (CEmu: cpu_dec_bc_partial_mode)
-                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                let _ = self.dec_bc_partial_mode();
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
@@ -1316,7 +1355,7 @@ impl Cpu {
                     bus.write_byte(self.mask_addr(self.de), val);
                     self.hl = self.wrap_data(self.hl.wrapping_add(1));
                     self.de = self.wrap_data(self.de.wrapping_add(1));
-                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let _ = self.dec_bc_partial_mode();
 
                     self.set_flag_h(false);
                     self.set_flag_n(false);
@@ -1342,7 +1381,7 @@ impl Cpu {
                     bus.write_byte(self.mask_addr(self.de), val);
                     self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                     self.de = self.wrap_data(self.de.wrapping_sub(1));
-                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let _ = self.dec_bc_partial_mode();
 
                     self.set_flag_h(false);
                     self.set_flag_n(false);
@@ -1365,7 +1404,7 @@ impl Cpu {
                 let result = self.a.wrapping_sub(val);
                 self.hl = self.wrap_data(self.hl.wrapping_add(1));
                 // BC is a counter - use L mode for masking
-                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                let _ = self.dec_bc_partial_mode();
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1384,7 +1423,7 @@ impl Cpu {
                 let result = self.a.wrapping_sub(val);
                 self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                 // BC is a counter - use L mode for masking
-                self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                let _ = self.dec_bc_partial_mode();
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1405,7 +1444,7 @@ impl Cpu {
                     let result = self.a.wrapping_sub(val);
                     self.hl = self.wrap_data(self.hl.wrapping_add(1));
                     // BC is a counter - use L mode for masking
-                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let _ = self.dec_bc_partial_mode();
 
                     self.set_sz_flags(result);
                     self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1435,7 +1474,7 @@ impl Cpu {
                     let result = self.a.wrapping_sub(val);
                     self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                     // BC is a counter - use L mode for masking
-                    self.bc = self.bc.wrapping_sub(1) & if self.l { 0xFFFFFF } else { 0xFFFF };
+                    let _ = self.dec_bc_partial_mode();
 
                     self.set_sz_flags(result);
                     self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
@@ -1455,10 +1494,68 @@ impl Cpu {
                 }
                 0
             }
-            // INI, IND, INIR, INDR - I/O blocked on TI-84 CE
-            (4, 2) | (5, 2) | (6, 2) | (7, 2) => 16,
-            // OUTI, OUTD, OTIR, OTDR - I/O blocked on TI-84 CE
-            (4, 3) | (5, 3) | (6, 3) | (7, 3) => 16,
+            // INI (4,2) / IND (5,2) — read from port BC, write to (HL), --B
+            (4, 2) | (5, 2) => {
+                let delta: i32 = if y == 5 { -1 } else { 1 };
+                let val = bus.port_read(self.bc as u16);
+                bus.write_byte(self.mask_addr(self.hl), val);
+                self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
+                let new_b = self.b().wrapping_sub(1);
+                self.set_b(new_b);
+                self.set_flag_z(new_b == 0);
+                self.set_flag_n(val & 0x80 != 0);
+                bus.add_cycles(1);
+                0
+            }
+            // INIR (6,2) / INDR (7,2) — repeat INI/IND while B != 0
+            (6, 2) | (7, 2) => {
+                let delta: i32 = if y == 7 { -1 } else { 1 };
+                loop {
+                    let val = bus.port_read(self.bc as u16);
+                    bus.write_byte(self.mask_addr(self.hl), val);
+                    self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
+                    let new_b = self.b().wrapping_sub(1);
+                    self.set_b(new_b);
+                    self.set_flag_z(new_b == 0);
+                    self.set_flag_n(val & 0x80 != 0);
+                    bus.add_cycles(1);
+                    if new_b == 0 {
+                        break;
+                    }
+                }
+                0
+            }
+            // OUTI (4,3) / OUTD (5,3) — read from (HL), write to port BC, --B
+            (4, 3) | (5, 3) => {
+                let delta: i32 = if y == 5 { -1 } else { 1 };
+                let val = bus.read_byte(self.mask_addr(self.hl));
+                bus.port_write(self.bc as u16, val);
+                self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
+                let new_b = self.b().wrapping_sub(1);
+                self.set_b(new_b);
+                self.set_flag_z(new_b == 0);
+                self.set_flag_n(val & 0x80 != 0);
+                bus.add_cycles(1);
+                0
+            }
+            // OTIR (6,3) / OTDR (7,3) — repeat OUTI/OUTD while B != 0
+            (6, 3) | (7, 3) => {
+                let delta: i32 = if y == 7 { -1 } else { 1 };
+                loop {
+                    let val = bus.read_byte(self.mask_addr(self.hl));
+                    bus.port_write(self.bc as u16, val);
+                    self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
+                    let new_b = self.b().wrapping_sub(1);
+                    self.set_b(new_b);
+                    self.set_flag_z(new_b == 0);
+                    self.set_flag_n(val & 0x80 != 0);
+                    bus.add_cycles(1);
+                    if new_b == 0 {
+                        break;
+                    }
+                }
+                0
+            }
             _ => 8,
         }
     }
@@ -1546,6 +1643,107 @@ impl Cpu {
             }
             _ => 8, // Unknown eZ80 BLI opcode
         }
+    }
+
+    /// Execute ED x=3 block I/O instructions (INIRX, INDRX, OTIRX, OTDRX)
+    /// These use port DE for I/O and dec BC with partial mode (preserve BCU in Z80 mode)
+    /// CEmu: routes via cpu_execute_bli with xp=0xC
+    pub fn execute_bli_x3(&mut self, bus: &mut Bus, opcode: u8) -> u32 {
+        // q bit determines direction: 0=increment, 1=decrement (via y bit 0 in original encoding)
+        // INIRX=C2 (y=0,z=2), OTIRX=C3 (y=0,z=3), INDRX=CA (y=1,z=2), OTDRX=CB (y=1,z=3)
+        let q = (opcode >> 3) & 1;
+        let z = opcode & 0x07;
+        let delta: i32 = if q != 0 { -1 } else { 1 };
+        let is_input = z == 2;
+
+        loop {
+            if is_input {
+                // INIRX/INDRX: read from port DE, write to (HL)
+                let val = bus.port_read(self.de as u16);
+                bus.write_byte(self.mask_addr(self.hl), val);
+                self.set_flag_n(val & 0x80 != 0);
+            } else {
+                // OTIRX/OTDRX: read from (HL), write to port DE
+                let val = bus.read_byte(self.mask_addr(self.hl));
+                bus.port_write(self.de as u16, val);
+                self.set_flag_n(val & 0x80 != 0);
+            }
+
+            // HL += delta, masked by L mode (common to all block instructions)
+            self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
+
+            // Decrement BC with partial mode (preserve BCU in Z80 mode)
+            let bc_val = self.dec_bc_partial_mode();
+            self.set_flag_z(bc_val == 0);
+
+            bus.add_cycles(1);
+
+            if bc_val == 0 {
+                break;
+            }
+        }
+        0
+    }
+
+    /// Execute ED x=2 z=4 block instructions (INI2/IND2/OUTI2/OUTD2 + repeat variants)
+    /// CEmu: case 4 in cpu_execute_bli, uses xp to determine variant
+    pub fn execute_bli_z4(&mut self, bus: &mut Bus, y: u8, _z: u8, p: u8, q: u8) -> u32 {
+        let delta: i32 = if q != 0 { -1 } else { 1 };
+        let is_repeat = p & 1 != 0; // odd p = repeat variant
+        let is_output = p & 2 != 0; // p>=2 = output variant
+
+        loop {
+            let val;
+            if is_repeat {
+                // Repeat variants: use port DE
+                if is_output {
+                    // OTI2R/OTD2R: read from (HL), write to port DE
+                    val = bus.read_byte(self.mask_addr(self.hl));
+                    bus.port_write(self.de as u16, val);
+                } else {
+                    // INI2R/IND2R: read from port DE, write to (HL)
+                    val = bus.port_read(self.de as u16);
+                    bus.write_byte(self.mask_addr(self.hl), val);
+                }
+                // DE += delta, masked by L mode
+                self.de = self.wrap_data((self.de as i32 + delta) as u32);
+                // Decrement BC with partial mode
+                let bc_val = self.dec_bc_partial_mode();
+                self.set_flag_z(bc_val == 0);
+            } else {
+                // Non-repeat variants: use port BC
+                if is_output {
+                    // OUTI2/OUTD2: read from (HL), write to port BC
+                    val = bus.read_byte(self.mask_addr(self.hl));
+                    bus.port_write(self.bc as u16, val);
+                } else {
+                    // INI2/IND2: read from port BC, write to (HL)
+                    val = bus.port_read(self.bc as u16);
+                    bus.write_byte(self.mask_addr(self.hl), val);
+                }
+                // C += delta
+                let c = (self.c() as i32 + delta) as u8;
+                self.set_c(c);
+                // --B
+                let new_b = self.b().wrapping_sub(1);
+                self.set_b(new_b);
+                self.set_flag_z(new_b == 0);
+            }
+
+            // HL += delta (common to all block instructions)
+            self.hl = self.wrap_data((self.hl as i32 + delta) as u32);
+            self.set_flag_n(val & 0x80 != 0);
+            bus.add_cycles(1);
+
+            // Repeat variants loop while Z flag is not set
+            if !is_repeat || self.flag_z() {
+                break;
+            }
+
+            // Suppress unused variable warning for y
+            let _ = y;
+        }
+        0
     }
 
     // ========== DD/FD Prefix (IX/IY Instructions) ==========
@@ -2071,7 +2269,7 @@ impl Cpu {
                     self.iy
                 }
             }
-            3 => self.sp,
+            3 => self.sp(),
             _ => 0,
         }
     }
@@ -2155,7 +2353,7 @@ impl Cpu {
                         3 => {
                             // LD SP,IX/IY
                             let index_reg = if use_ix { self.ix } else { self.iy };
-                            self.sp = self.wrap_data(index_reg);
+                            self.set_sp(self.wrap_data(index_reg));
                             10
                         }
                         _ => 4,
@@ -2193,7 +2391,7 @@ impl Cpu {
                     }
                     4 => {
                         // EX (SP),IX/IY
-                        let sp_addr = self.mask_addr(self.sp);
+                        let sp_addr = self.mask_addr(self.sp());
                         let sp_val = if self.l {
                             bus.read_addr24(sp_addr)
                         } else {

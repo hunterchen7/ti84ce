@@ -116,6 +116,9 @@ pub struct ControlPorts {
     set_battery_status: u8,
     /// Battery charging flag
     battery_charging: bool,
+    /// Protection status (NMI cause bits)
+    /// Bit 0: stack limit violation, Bit 1: protected memory violation
+    protection_status: u8,
 }
 
 impl ControlPorts {
@@ -149,6 +152,7 @@ impl ControlPorts {
             read_battery_status: 0,
             set_battery_status: battery::LEVEL_4, // Full battery
             battery_charging: false,
+            protection_status: 0,
         }
     }
 
@@ -222,6 +226,8 @@ impl ControlPorts {
             0x3A => self.stack_limit as u8,
             0x3B => (self.stack_limit >> 8) as u8,
             0x3C => (self.stack_limit >> 16) as u8,
+            // Protection status (read-only)
+            0x3D => self.protection_status,
             _ => 0x00,
         }
     }
@@ -249,11 +255,10 @@ impl ControlPorts {
                 // For now we skip the FSM to ensure boot completes
             }
             regs::CPU_SPEED => {
-                // Update cpu_speed value. Don't update prev_clock_mhz here!
-                // prev_clock_mhz tracks the SCHEDULER's actual rate, not the cpu_speed register.
-                // It's initialized to 48MHz (scheduler default) and updated in cpu_speed_changed()
-                // AFTER conversion happens.
-                self.cpu_speed = value & 0x03;
+                // CEmu: control.ports[index] = byte & 19 (0x13)
+                // Bits [1:0] = CPU speed, bit 4 = additional flag
+                // Store full masked value; cpu_speed() extracts bits [1:0]
+                self.cpu_speed = value & 0x13;
                 // CEmu calls set_cpu_clock() on EVERY write to port 0x01,
                 // which triggers cycle conversion
                 self.cpu_speed_written = true;
@@ -319,7 +324,7 @@ impl ControlPorts {
                 // Bit 3 (flash ready) can only be cleared by this, never set
                 self.flash_unlock = (self.flash_unlock | 5) & value;
             }
-            regs::GENERAL => self.general = value,
+            regs::GENERAL => self.general = value & 0x01, // CEmu: byte & 1
             // Privileged boundary (3 bytes at 0x1D-0x1F)
             0x1D => self.privileged = (self.privileged & 0xFFFF00) | (value as u32),
             0x1E => self.privileged = (self.privileged & 0xFF00FF) | ((value as u32) << 8),
@@ -340,13 +345,16 @@ impl ControlPorts {
             0x3A => self.stack_limit = (self.stack_limit & 0xFFFF00) | (value as u32),
             0x3B => self.stack_limit = (self.stack_limit & 0xFF00FF) | ((value as u32) << 8),
             0x3C => self.stack_limit = (self.stack_limit & 0x00FFFF) | ((value as u32) << 16),
+            // Clear protection status (write-1-to-clear)
+            0x3E => self.protection_status &= !value,
             _ => {}
         }
     }
 
-    /// Get current CPU speed setting
+    /// Get current CPU speed setting (0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz)
+    /// Returns only bits [1:0] of the port value
     pub fn cpu_speed(&self) -> u8 {
-        self.cpu_speed
+        self.cpu_speed & 0x03
     }
 
     /// Check if CPU_SPEED port was written since last check, and reset the flag.
@@ -371,12 +379,11 @@ impl ControlPorts {
 
     /// Get current CPU clock rate in MHz based on speed setting
     pub fn clock_rate_mhz(&self) -> u32 {
-        match self.cpu_speed {
+        match self.cpu_speed() {
             0 => 6,
             1 => 12,
             2 => 24,
-            3 => 48,
-            _ => 48, // Default to 48MHz for invalid values
+            _ => 48,
         }
     }
 
@@ -448,6 +455,23 @@ impl ControlPorts {
     /// Unprivileged means: PC > privileged AND (PC < protectedStart OR PC > protectedEnd)
     pub fn is_unprivileged(&self, pc: u32) -> bool {
         pc > self.privileged && (pc < self.protected_start || pc > self.protected_end)
+    }
+
+    /// Get the stack limit address
+    pub fn stack_limit(&self) -> u32 {
+        self.stack_limit
+    }
+
+    /// Set stack limit violation bit and return true if NMI should fire
+    pub fn set_stack_violation(&mut self) -> bool {
+        self.protection_status |= 1;
+        true
+    }
+
+    /// Set protected memory violation bit and return true if NMI should fire
+    pub fn set_protected_violation(&mut self) -> bool {
+        self.protection_status |= 2;
+        true
     }
 
     /// Dump all control port values for debugging/comparison with CEmu

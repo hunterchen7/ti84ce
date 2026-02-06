@@ -108,7 +108,7 @@ fn test_adl_mode_call_ret_24bit_pc() {
     let mut bus = Bus::new();
     cpu.adl = true;
 
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.pc = 0x100000; // High PC value
 
     // CALL nn (CD nn nn nn in ADL mode - 4 byte address)
@@ -120,7 +120,7 @@ fn test_adl_mode_call_ret_24bit_pc() {
     cpu.step(&mut bus);
 
     assert_eq!(cpu.pc, 0x123456, "CALL should jump to 24-bit address");
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3 in ADL mode");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3 in ADL mode");
 
     // Return address on stack should be 0x100004 (after CALL instruction)
     let ret_lo = bus.peek_byte(0xD001FD);
@@ -141,6 +141,7 @@ fn test_adl_mode_ldir_24bit() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
     cpu.adl = true;
+    cpu.mbase = 0x00;
 
     // Copy 3 bytes from 0xD00100 to 0xD00200
     cpu.hl = 0xD00100; // Source (24-bit)
@@ -152,16 +153,14 @@ fn test_adl_mode_ldir_24bit() {
     bus.poke_byte(0xD00101, 0xBB);
     bus.poke_byte(0xD00102, 0xCC);
 
-    // LDIR (ED B0)
+    // LDIR (ED B0) — poke at PC=0 in flash, initialize prefetch
     bus.poke_byte(0, 0xED);
     bus.poke_byte(1, 0xB0);
     cpu.pc = 0;
+    cpu.prefetch = 0xED; // Initialize prefetch to the byte at PC=0
 
-    // Execute until BC = 0
-    while cpu.bc != 0 {
-        cpu.pc = 0;
-        cpu.step(&mut bus);
-    }
+    // LDIR executes all iterations in a single step
+    cpu.step(&mut bus);
 
     // Verify copy
     assert_eq!(bus.peek_byte(0xD00200), 0xAA);
@@ -257,7 +256,7 @@ fn test_adl_rst_pushes_24bit() {
     let mut bus = Bus::new();
     cpu.adl = true;
 
-    cpu.sp = 0xD00200;
+    cpu.set_sp_both(0xD00200);
     cpu.pc = 0x123456;
 
     // RST 38h (FF)
@@ -265,7 +264,7 @@ fn test_adl_rst_pushes_24bit() {
     cpu.step(&mut bus);
 
     assert_eq!(cpu.pc, 0x000038, "RST 38h should jump to 0x38");
-    assert_eq!(cpu.sp, 0xD001FD, "SP should decrease by 3");
+    assert_eq!(cpu.sp(), 0xD001FD, "SP should decrease by 3");
 
     // Verify return address
     let ret_lo = bus.peek_byte(0xD001FD);
@@ -307,7 +306,7 @@ fn test_z80_mode_call_ret_16bit() {
     let mut bus = Bus::new();
     setup_z80_mode(&mut cpu);
 
-    cpu.sp = 0x1000;
+    cpu.set_sp_both(0x1000);
 
     // CALL 0x200 (CD 00 02)
     bus.poke_byte(0xD00100, 0xCD);
@@ -316,7 +315,7 @@ fn test_z80_mode_call_ret_16bit() {
     cpu.step(&mut bus);
 
     assert_eq!(cpu.pc, 0x0200, "Should jump to 0x0200");
-    assert_eq!(cpu.sp, 0x0FFE, "SP should decrease by 2 in Z80 mode");
+    assert_eq!(cpu.sp(), 0x0FFE, "SP should decrease by 2 in Z80 mode");
 
     // Check return address is 16-bit (0x0103)
     let ret_lo = bus.peek_byte(0xD00FFE);
@@ -329,7 +328,7 @@ fn test_z80_mode_call_ret_16bit() {
     cpu.step(&mut bus);
 
     assert_eq!(cpu.pc, 0x0103, "Should return to 0x0103");
-    assert_eq!(cpu.sp, 0x1000, "SP should be restored");
+    assert_eq!(cpu.sp(), 0x1000, "SP should be restored");
 }
 
 #[test]
@@ -338,14 +337,14 @@ fn test_z80_mode_push_pop_16bit() {
     let mut bus = Bus::new();
     setup_z80_mode(&mut cpu);
 
-    cpu.sp = 0x1000;
+    cpu.set_sp_both(0x1000);
     cpu.bc = 0xABCD; // Only lower 16 bits matter in Z80 mode
 
     // PUSH BC (C5)
     bus.poke_byte(0xD00100, 0xC5);
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.sp, 0x0FFE, "SP should decrease by 2");
+    assert_eq!(cpu.sp(), 0x0FFE, "SP should decrease by 2");
     assert_eq!(bus.peek_byte(0xD00FFE), 0xCD, "Low byte");
     assert_eq!(bus.peek_byte(0xD00FFF), 0xAB, "High byte");
 
@@ -353,7 +352,7 @@ fn test_z80_mode_push_pop_16bit() {
     bus.poke_byte(0xD00101, 0xD1);
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.sp, 0x1000, "SP should be restored");
+    assert_eq!(cpu.sp(), 0x1000, "SP should be restored");
     assert_eq!(cpu.de & 0xFFFF, 0xABCD, "DE should have popped value");
 }
 
@@ -482,14 +481,14 @@ fn test_z80_mode_rst() {
     let mut bus = Bus::new();
     setup_z80_mode(&mut cpu);
 
-    cpu.sp = 0x1000;
+    cpu.set_sp_both(0x1000);
 
     // RST 38h (FF)
     bus.poke_byte(0xD00100, 0xFF);
     cpu.step(&mut bus);
 
     assert_eq!(cpu.pc, 0x0038, "RST should jump to vector");
-    assert_eq!(cpu.sp, 0x0FFE, "SP should decrease by 2");
+    assert_eq!(cpu.sp(), 0x0FFE, "SP should decrease by 2");
 
     // Check 16-bit return address
     let ret_lo = bus.peek_byte(0xD00FFE);
@@ -504,7 +503,7 @@ fn test_z80_mode_ex_sp_hl() {
     let mut bus = Bus::new();
     setup_z80_mode(&mut cpu);
 
-    cpu.sp = 0x1000;
+    cpu.set_sp_both(0x1000);
     cpu.hl = 0x1234;
     bus.poke_byte(0xD01000, 0xCD);
     bus.poke_byte(0xD01001, 0xAB);
@@ -969,7 +968,7 @@ fn test_z80_mode_ld_sp_hl() {
     bus.poke_byte(0xD00100, 0xF9);
     cpu.step(&mut bus);
 
-    assert_eq!(cpu.sp, 0xABCD, "SP should equal HL value");
+    assert_eq!(cpu.sp(), 0xABCD, "SP should equal HL value");
 }
 
 #[test]
@@ -979,7 +978,7 @@ fn test_z80_mode_ex_sp_ix_uses_mbase() {
     let mut bus = Bus::new();
     setup_z80_mode(&mut cpu);
 
-    cpu.sp = 0x4000;
+    cpu.set_sp_both(0x4000);
     cpu.ix = 0x1234;
     // Store 0x5678 at stack location (MBASE + SP)
     bus.poke_byte(0xD04000, 0x78);

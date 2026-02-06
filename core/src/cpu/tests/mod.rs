@@ -24,7 +24,7 @@ fn setup_z80_mode(cpu: &mut Cpu) {
     cpu.adl = false;
     cpu.mbase = 0xD0; // RAM starts at 0xD00000
     cpu.pc = 0x0100; // Typical Z80 program start
-    cpu.sp = 0xFFFF; // Top of 64KB space
+    cpu.set_sp_both(0xFFFF); // Top of 64KB space
 }
 
 /// Helper to set up CPU in Z80 mode and initialize prefetch buffer
@@ -34,7 +34,7 @@ fn setup_z80_mode_with_prefetch(cpu: &mut Cpu, bus: &mut Bus) {
     cpu.adl = false;
     cpu.mbase = 0xD0; // RAM starts at 0xD00000
     cpu.pc = 0x0100; // Typical Z80 program start
-    cpu.sp = 0xFFFF; // Top of 64KB space
+    cpu.set_sp_both(0xFFFF); // Top of 64KB space
     cpu.init_prefetch(bus); // Load first instruction byte into prefetch buffer
 }
 

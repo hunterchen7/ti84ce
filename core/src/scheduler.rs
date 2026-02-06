@@ -47,7 +47,7 @@ impl ClockId {
                 2 => 24_000_000,
                 _ => 48_000_000,
             },
-            ClockId::Panel => 60, // 60 Hz refresh (approximate)
+            ClockId::Panel => 10_000_000, // 10 MHz (CEmu CLOCK_PANEL)
             ClockId::Run => 1_000_000, // 1 MHz
             ClockId::Clock48M => 48_000_000,
             ClockId::Clock24M => 24_000_000,
@@ -132,6 +132,9 @@ pub struct Scheduler {
     pub base_ticks: u64,
     /// CPU cycles counter (for conversion)
     cpu_cycles: u64,
+    /// Accumulated offset from SCHED_SECOND resets
+    /// The scheduler tracks: actual_cpu_cycles = cpu_cycles + base_cycles_offset
+    base_cycles_offset: u64,
     /// Current CPU speed setting
     cpu_speed: u8,
 }
@@ -151,6 +154,7 @@ impl Scheduler {
             ],
             base_ticks: 0,
             cpu_cycles: 0,
+            base_cycles_offset: 0,
             cpu_speed: 0, // Default 6 MHz
         }
     }
@@ -162,6 +166,7 @@ impl Scheduler {
         }
         self.base_ticks = 0;
         self.cpu_cycles = 0;
+        self.base_cycles_offset = 0;
         self.cpu_speed = 0;
     }
 
@@ -175,16 +180,44 @@ impl Scheduler {
         self.cpu_speed
     }
 
-    /// Convert the internal cpu_cycles counter when CPU speed changes.
-    /// This must be called when the bus converts its cycle counter to keep
-    /// the scheduler's delta calculations correct.
+    /// Convert the internal cpu_cycles counter and all CPU-clocked events
+    /// when CPU speed changes.
     ///
     /// CEmu's sched_set_clock() converts: new_cycles = old_cycles * new_rate / old_rate
-    /// - 48MHz -> 6MHz: new_cycles = old_cycles * 6 / 48 = old_cycles / 8
-    /// - 6MHz -> 48MHz: new_cycles = old_cycles * 48 / 6 = old_cycles * 8
+    /// and recalculates timestamps for all events on the changed clock.
     pub fn convert_cpu_cycles(&mut self, new_rate_mhz: u32, old_rate_mhz: u32) {
-        if old_rate_mhz > 0 && new_rate_mhz != old_rate_mhz {
-            self.cpu_cycles = self.cpu_cycles * new_rate_mhz as u64 / old_rate_mhz as u64;
+        if old_rate_mhz == 0 || new_rate_mhz == old_rate_mhz {
+            return;
+        }
+
+        // Convert internal cpu_cycles counter
+        let old_cycles = self.cpu_cycles;
+        self.cpu_cycles = old_cycles * new_rate_mhz as u64 / old_rate_mhz as u64;
+
+        // Adjust base_cycles_offset to account for the conversion
+        // The bus's actual total_cycles doesn't change, so:
+        // old: adjusted = bus_total - old_offset, where adjusted = old_cycles
+        // new: adjusted = bus_total - new_offset, where adjusted = new_cycles
+        // => new_offset = old_offset + (old_cycles - new_cycles)
+        if old_cycles >= self.cpu_cycles {
+            self.base_cycles_offset += old_cycles - self.cpu_cycles;
+        } else {
+            self.base_cycles_offset -= self.cpu_cycles - old_cycles;
+        }
+
+        // Convert all active events on CLOCK_CPU to new timestamps
+        let old_ticks_per = SCHED_BASE_CLOCK_RATE / (old_rate_mhz as u64 * 1_000_000);
+        let new_ticks_per = SCHED_BASE_CLOCK_RATE / (new_rate_mhz as u64 * 1_000_000);
+
+        for item in &mut self.items {
+            if item.is_active() && item.clock == ClockId::Cpu {
+                let timestamp = item.timestamp & !INACTIVE_FLAG;
+                if timestamp > self.base_ticks {
+                    let remaining_base = timestamp - self.base_ticks;
+                    let remaining_old_ticks = remaining_base / old_ticks_per;
+                    item.timestamp = self.base_ticks + remaining_old_ticks * new_ticks_per;
+                }
+            }
         }
     }
 
@@ -202,10 +235,38 @@ impl Scheduler {
     }
 
     /// Advance time based on CPU cycles executed
+    /// cpu_cycles is the bus's total cycle counter (monotonically increasing)
     pub fn advance(&mut self, cpu_cycles: u64) {
-        let delta_cycles = cpu_cycles.saturating_sub(self.cpu_cycles);
-        self.cpu_cycles = cpu_cycles;
+        // Adjust for SCHED_SECOND resets: the scheduler's internal cpu_cycles
+        // is offset from the bus's counter
+        let adjusted = cpu_cycles - self.base_cycles_offset;
+        let delta_cycles = adjusted.saturating_sub(self.cpu_cycles);
+        self.cpu_cycles = adjusted;
         self.base_ticks += self.cpu_cycles_to_base_ticks(delta_cycles);
+
+        // SCHED_SECOND: prevent overflow by subtracting one second's worth of
+        // base ticks from all timestamps every second (matches CEmu schedule.c:393-410)
+        if self.base_ticks >= SCHED_BASE_CLOCK_RATE {
+            self.process_second();
+        }
+    }
+
+    /// Process the SCHED_SECOND event: subtract one second from all timestamps
+    /// to prevent u64 overflow. CEmu does this via a dedicated scheduler event.
+    fn process_second(&mut self) {
+        self.base_ticks -= SCHED_BASE_CLOCK_RATE;
+
+        // Subtract from all active event timestamps
+        for item in &mut self.items {
+            if item.is_active() {
+                item.timestamp = item.timestamp.saturating_sub(SCHED_BASE_CLOCK_RATE);
+            }
+        }
+
+        // Subtract cpu_clock_rate from cpu_cycles and accumulate in offset
+        let cpu_clock_rate = ClockId::Cpu.rate(self.cpu_speed);
+        self.cpu_cycles = self.cpu_cycles.saturating_sub(cpu_clock_rate);
+        self.base_cycles_offset += cpu_clock_rate;
     }
 
     /// Schedule an event to fire after `ticks` clock ticks
@@ -297,6 +358,34 @@ impl Scheduler {
         events.into_iter().map(|(e, _)| e).collect()
     }
 
+    /// Get the number of CPU cycles until the nearest active event fires.
+    /// Returns 0 if any event has already fired or no events are active.
+    /// Used by the emu loop to fast-forward HALT to the next event (matching CEmu's cpu_halt).
+    pub fn cycles_until_next_event(&self) -> u64 {
+        let mut earliest_timestamp: Option<u64> = None;
+
+        for item in &self.items {
+            if item.is_active() {
+                let timestamp = item.timestamp & !INACTIVE_FLAG;
+                match earliest_timestamp {
+                    None => earliest_timestamp = Some(timestamp),
+                    Some(t) if timestamp < t => earliest_timestamp = Some(timestamp),
+                    _ => {}
+                }
+            }
+        }
+
+        match earliest_timestamp {
+            Some(ts) if ts > self.base_ticks => {
+                let base_ticks_remaining = ts - self.base_ticks;
+                let base_ticks_per_cpu_cycle = ClockId::Cpu.base_ticks_per_tick(self.cpu_speed);
+                // Ceiling division to ensure we reach the event
+                (base_ticks_remaining + base_ticks_per_cpu_cycle - 1) / base_ticks_per_cpu_cycle
+            }
+            _ => 0, // Event already fired or no active events
+        }
+    }
+
     /// Calculate ticks until the next RTC LATCH point in the 1-second cycle.
     ///
     /// CEmu's RTC runs on a 1-second cycle from boot, with LATCH events
@@ -327,8 +416,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 8 (cpu_cycles) + 1 (cpu_speed) + 7*8 (item timestamps) = 73 bytes, round to 80
-    pub const SNAPSHOT_SIZE: usize = 80;
+    /// 8 (base_ticks) + 8 (cpu_cycles) + 8 (base_cycles_offset) + 1 (cpu_speed) + 7*8 (item timestamps) = 81 bytes, round to 88
+    pub const SNAPSHOT_SIZE: usize = 88;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -338,6 +427,7 @@ impl Scheduler {
         // Base timing state
         buf[pos..pos+8].copy_from_slice(&self.base_ticks.to_le_bytes()); pos += 8;
         buf[pos..pos+8].copy_from_slice(&self.cpu_cycles.to_le_bytes()); pos += 8;
+        buf[pos..pos+8].copy_from_slice(&self.base_cycles_offset.to_le_bytes()); pos += 8;
         buf[pos] = self.cpu_speed; pos += 1;
 
         // Event timestamps (7 events × 8 bytes each)
@@ -359,6 +449,7 @@ impl Scheduler {
 
         self.base_ticks = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
         self.cpu_cycles = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
+        self.base_cycles_offset = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
         self.cpu_speed = buf[pos]; pos += 1;
 
         // Event timestamps

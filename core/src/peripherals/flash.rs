@@ -58,8 +58,8 @@ impl FlashController {
         let mut controller = Self {
             // Flash enabled by default - ROM expects flash to be accessible
             enable: 0x01,
-            // Default size configuration (4MB flash)
-            size_config: 0x07,
+            // CEmu flash_reset() memsets to 0; ROM writes correct value during init
+            size_config: 0x00,
             // CEmu defaults map_select to 0x06
             map_select: 0x06,
             // CEmu defaults wait_states to 0x04 (total 10 wait cycles = 6 base + 4)
@@ -416,8 +416,8 @@ mod tests {
         assert!(flash.is_enabled());
         assert_eq!(flash.read(regs::ENABLE), 0x01);
 
-        // Size config should be set for 4MB flash (0x07)
-        assert_eq!(flash.read(regs::SIZE_CONFIG), 0x07);
+        // CEmu memsets flash to 0; size_config starts at 0x00
+        assert_eq!(flash.read(regs::SIZE_CONFIG), 0x00);
 
         // CEmu defaults wait states to 0x04 (10 total cycles)
         assert_eq!(flash.read(regs::WAIT_STATES), 0x04);

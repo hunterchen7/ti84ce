@@ -4,7 +4,6 @@ A cross-platform emulator for TI-84 Plus CE calculators, with native Android, iO
 
 ![video-thumb](https://github.com/user-attachments/assets/33e55f96-a156-415c-9aed-01f312d3d6c1)
 
-
 ## Project Structure
 
 ```
@@ -218,18 +217,18 @@ The web app runs entirely in the browser using WebAssembly (~96KB gzipped).
 
 **Keyboard Controls:**
 
-| Key | Function |
-|-----|----------|
-| 0-9 | Number keys |
-| + - * / | Math operations |
-| ( ) | Parentheses |
-| Enter | Enter |
-| Backspace | Delete |
-| Arrow keys | Navigation |
-| Escape | Mode |
-| Shift | 2nd |
-| Alt | Alpha |
-| O | ON key |
+| Key        | Function        |
+| ---------- | --------------- |
+| 0-9        | Number keys     |
+| + - \* /   | Math operations |
+| ( )        | Parentheses     |
+| Enter      | Enter           |
+| Backspace  | Delete          |
+| Arrow keys | Navigation      |
+| Escape     | Mode            |
+| Shift      | 2nd             |
+| Alt        | Alpha           |
+| O          | ON key          |
 
 ### Development Workflow
 
@@ -394,14 +393,6 @@ cargo run --release --example debug -- screen boot.png
 # Compare with CEmu trace
 cargo run --release --example debug -- compare ../traces/cemu.log
 ```
-
-### Boot Status
-
-The emulator successfully boots the TI-84 CE OS:
-
-- **3,609,969 steps** (~61.6M cycles) to reach OS idle
-- Screen shows "RAM Cleared" message with full status bar
-- CPU reaches idle loop at PC=0x085B7F (EI + HALT)
 
 ### Trace Comparison
 

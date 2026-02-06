@@ -274,7 +274,6 @@ pub struct LcdSnapshot {
     pub int_status: u32,
     pub upbase: u32,
     pub lpbase: u32,
-    pub palbase: u32,
     pub frame_cycles: u32,
 }
 
@@ -401,7 +400,7 @@ impl Emu {
                     count, pc, opcode_str,
                     self.cpu.a, self.cpu.f,
                     self.cpu.bc, self.cpu.de, self.cpu.hl,
-                    self.cpu.sp,
+                    self.cpu.sp(),
                     self.cpu.halted, self.cpu.any_key_wake
                 ));
 
@@ -467,22 +466,37 @@ impl Emu {
                 }
             }
 
+            // Check for NMI from memory protection violations
+            if self.bus.take_nmi_flag() {
+                self.cpu.nmi_pending = true;
+            }
+
             // Tick peripherals and check for interrupts
             let tick_irq = self.bus.ports.tick(cycles_used);
             if tick_irq {
                 self.cpu.irq_pending = true;
             }
 
-            // RTC load scheduling is now handled by the continuous 1-second RTC cycle
-            // that's initialized in reset(). When load is triggered, it will be processed
-            // at the next natural LATCH event.
-
-            // Don't return early when halted - peripherals need to keep ticking!
-            // CEmu continues the main loop when halted, fast-forwarding to next scheduled event.
-            // We do similar by continuing the loop - cpu.step() returns quickly with 4 cycles,
-            // which allows peripherals to tick and generate interrupts that can wake the CPU.
+            // CEmu HALT fast-forward: when halted, advance cycles to next scheduled event.
+            // This matches CEmu's cpu_halt() which sets cpu.cycles = cpu.next.
+            // We must do this AFTER processing scheduler events above, so we know what's next.
             if self.cpu.halted {
                 self.last_stop = StopReason::Halted;
+                let skip = self.scheduler.cycles_until_next_event();
+                if skip > 0 {
+                    // Fast-forward bus cycles and re-sync scheduler
+                    self.bus.add_cycles(skip);
+                    cycles_remaining -= skip as i32;
+                    self.total_cycles = self.bus.total_cycles();
+                    self.scheduler.advance(self.total_cycles);
+                    // Process any events that just fired
+                    self.process_scheduler_events();
+                    // Check for interrupts from the fired events
+                    let tick_irq2 = self.bus.ports.tick(0);
+                    if tick_irq2 {
+                        self.cpu.irq_pending = true;
+                    }
+                }
             }
         }
 
@@ -529,11 +543,29 @@ impl Emu {
                 }
             }
 
+            // Check for NMI from memory protection violations
+            if self.bus.take_nmi_flag() {
+                self.cpu.nmi_pending = true;
+            }
+
             if self.bus.ports.tick(cycles_used) {
                 self.cpu.irq_pending = true;
             }
 
-            // RTC load scheduling handled by continuous 1-second cycle from reset()
+            // HALT fast-forward: advance to next scheduled event
+            if self.cpu.halted {
+                let skip = self.scheduler.cycles_until_next_event();
+                if skip > 0 {
+                    self.bus.add_cycles(skip);
+                    cycles_remaining -= skip as i32;
+                    self.total_cycles = self.bus.total_cycles();
+                    self.scheduler.advance(self.total_cycles);
+                    self.process_scheduler_events();
+                    if self.bus.ports.tick(0) {
+                        self.cpu.irq_pending = true;
+                    }
+                }
+            }
         }
 
         (self.total_cycles - start_cycles) as u32
@@ -554,7 +586,7 @@ impl Emu {
 
         // Capture state BEFORE execution
         let pc = self.cpu.pc;
-        let sp = self.cpu.sp;
+        let sp = self.cpu.sp();
         let a = self.cpu.a;
         let f = self.cpu.f;
         let bc = self.cpu.bc;
@@ -629,16 +661,30 @@ impl Emu {
             }
         }
 
+        // Check for NMI from memory protection violations
+        if self.bus.take_nmi_flag() {
+            self.cpu.nmi_pending = true;
+        }
+
         // Tick peripherals and check for interrupts
         let tick_irq = self.bus.ports.tick(cycles_used);
         if tick_irq {
             self.cpu.irq_pending = true;
         }
 
-        // RTC load scheduling handled by continuous 1-second cycle from reset()
-
+        // HALT fast-forward: advance to next scheduled event
         if self.cpu.halted {
             self.last_stop = StopReason::Halted;
+            let skip = self.scheduler.cycles_until_next_event();
+            if skip > 0 {
+                self.bus.add_cycles(skip);
+                self.total_cycles = self.bus.total_cycles();
+                self.scheduler.advance(self.total_cycles);
+                self.process_scheduler_events();
+                if self.bus.ports.tick(0) {
+                    self.cpu.irq_pending = true;
+                }
+            }
         }
 
         // Collect I/O ops from this instruction
@@ -675,10 +721,12 @@ impl Emu {
         while let Some(event) = self.scheduler.next_pending_event() {
             match event {
                 EventId::Rtc => {
-                    // Process RTC event (LATCH or load tick)
-                    // The RTC maintains a continuous 1-second cycle like CEmu
-                    use crate::scheduler::TICKS_PER_SECOND;
-                    let next_delay = self.bus.ports.rtc.process_event(TICKS_PER_SECOND, LATCH_TICK_OFFSET);
+                    // Process RTC event using 3-state machine (TICK/LATCH/LOAD_LATCH)
+                    let (next_delay, raise_interrupt) = self.bus.ports.rtc.process_event();
+                    if raise_interrupt {
+                        // TODO: Wire RTC interrupt to interrupt controller
+                        // CEmu: intrpt_set(INT_RTC, true) — INT_RTC is a dedicated line
+                    }
                     // Schedule next RTC event
                     self.scheduler.repeat(EventId::Rtc, next_delay);
                 }
@@ -1310,7 +1358,7 @@ impl Emu {
 
     /// Get the CPU's stack pointer
     pub fn sp(&self) -> u32 {
-        self.cpu.sp
+        self.cpu.sp()
     }
 
     /// Get the CPU's BC register
@@ -1417,19 +1465,21 @@ impl Emu {
 
     /// Snapshot a timer's internal state (1, 2, or 3)
     pub fn timer_snapshot(&self, which: usize) -> Option<TimerSnapshot> {
-        let timer = match which {
-            1 => &self.bus.ports.timer1,
-            2 => &self.bus.ports.timer2,
-            3 => &self.bus.ports.timer3,
+        let idx = match which {
+            1 => 0,
+            2 => 1,
+            3 => 2,
             _ => return None,
         };
+        let timers = &self.bus.ports.timers;
 
         Some(TimerSnapshot {
-            counter: timer.counter(),
-            reset_value: timer.reset_value(),
-            match1: timer.match1(),
-            match2: timer.match2(),
-            control: timer.control(),
+            counter: timers.counter(idx),
+            reset_value: timers.reset_value(idx),
+            match1: timers.match_val(idx, 0),
+            match2: timers.match_val(idx, 1),
+            control: ((timers.control_word() >> (idx * 3)) & 0x7) as u8
+                | if timers.control_word() & (1 << (9 + idx)) != 0 { 0x08 } else { 0 },
         })
     }
 
@@ -1443,7 +1493,6 @@ impl Emu {
             int_status: lcd.int_status(),
             upbase: lcd.upbase(),
             lpbase: lcd.lpbase(),
-            palbase: lcd.palbase(),
             frame_cycles: lcd.frame_cycles(),
         }
     }
@@ -1641,7 +1690,7 @@ impl Emu {
             self.cpu.hl,
             self.cpu.ix,
             self.cpu.iy,
-            self.cpu.sp,
+            self.cpu.sp(),
             self.cpu.pc,
             (self.cpu.f >> 7) & 1,
             (self.cpu.f >> 6) & 1,
