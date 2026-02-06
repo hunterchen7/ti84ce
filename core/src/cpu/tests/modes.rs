@@ -141,6 +141,7 @@ fn test_adl_mode_ldir_24bit() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
     cpu.adl = true;
+    cpu.mbase = 0x00;
 
     // Copy 3 bytes from 0xD00100 to 0xD00200
     cpu.hl = 0xD00100; // Source (24-bit)
@@ -152,16 +153,14 @@ fn test_adl_mode_ldir_24bit() {
     bus.poke_byte(0xD00101, 0xBB);
     bus.poke_byte(0xD00102, 0xCC);
 
-    // LDIR (ED B0)
+    // LDIR (ED B0) — poke at PC=0 in flash, initialize prefetch
     bus.poke_byte(0, 0xED);
     bus.poke_byte(1, 0xB0);
     cpu.pc = 0;
+    cpu.prefetch = 0xED; // Initialize prefetch to the byte at PC=0
 
-    // Execute until BC = 0
-    while cpu.bc != 0 {
-        cpu.pc = 0;
-        cpu.step(&mut bus);
-    }
+    // LDIR executes all iterations in a single step
+    cpu.step(&mut bus);
 
     // Verify copy
     assert_eq!(bus.peek_byte(0xD00200), 0xAA);

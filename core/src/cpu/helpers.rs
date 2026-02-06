@@ -279,11 +279,13 @@ impl Cpu {
         std::mem::swap(&mut self.hl, &mut self.hl_prime);
     }
 
-    /// Exchange DE and HL
-    /// Note: EX DE,HL is a simple register swap - no L-mode masking
-    /// CEmu: EX(DE, cpu_read_index()) uses simple swap macro
+    /// Exchange DE and HL with L-mode masking
+    /// CEmu: w = cpu_mask_mode(r->DE, cpu.L); DE = cpu_mask_mode(HL, cpu.L); HL = w;
     pub fn ex_de_hl(&mut self) {
-        std::mem::swap(&mut self.de, &mut self.hl);
+        let masked_de = self.wrap_data(self.de);
+        let masked_hl = self.wrap_data(self.hl);
+        self.de = masked_hl;
+        self.hl = masked_de;
     }
 
     // ========== Address Masking ==========
@@ -331,6 +333,21 @@ impl Cpu {
         } else {
             addr & 0xFFFF // 16-bit in Z80 data mode (no MBASE)
         }
+    }
+
+    /// Decrement BC with partial mode (CEmu: cpu_dec_bc_partial_mode)
+    /// In L (ADL) mode: full 24-bit decrement
+    /// In Z80 mode: only decrement lower 16 bits, preserving upper byte (BCU)
+    #[inline]
+    pub fn dec_bc_partial_mode(&mut self) -> u32 {
+        let value = self.wrap_data(self.bc.wrapping_sub(1));
+        if self.l {
+            self.bc = value;
+        } else {
+            // Only write lower 16 bits, preserve BCU
+            self.bc = (self.bc & 0xFF0000) | (value & 0xFFFF);
+        }
+        value
     }
 
     /// Get effective address width based on ADL mode
