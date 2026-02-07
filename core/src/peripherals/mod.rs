@@ -316,10 +316,10 @@ impl Peripherals {
         let cpu_speed = self.control.cpu_speed();
         self.timers.tick(cycles, cpu_speed, delay_remaining);
 
-        // Tick LCD
-        if self.lcd.tick(cycles) {
-            self.interrupt.raise(sources::LCD);
-        }
+        // LCD interrupts are now driven by scheduler events (EventId::Lcd / EventId::LcdDma)
+        // in emu.rs, matching CEmu's lcd_event()/lcd_dma() architecture.
+        // Check LCD scheduling flags set by control register writes.
+        // (The actual scheduling is done by emu.rs which checks these flags.)
 
         // Tick keypad scan timing and raise interrupt if scan/status indicates it
         if self.keypad.tick(cycles, &self.key_state) {
@@ -465,8 +465,8 @@ impl Peripherals {
         buf[pos..pos+4].copy_from_slice(&self.lcd.upbase().to_le_bytes()); pos += 4;
         buf[pos..pos+4].copy_from_slice(&self.lcd.int_mask().to_le_bytes()); pos += 4;
         buf[pos..pos+4].copy_from_slice(&self.lcd.int_status().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.frame_cycles().to_le_bytes()); pos += 4;
-        pos += 4; // Padding
+        buf[pos] = self.lcd.compare_state(); pos += 1;
+        pos += 7; // Padding to 24 bytes
 
         // OS Timer state (16 bytes)
         buf[pos] = if self.os_timer_state { 1 } else { 0 }; pos += 1;
@@ -548,8 +548,8 @@ impl Peripherals {
         self.lcd.set_upbase(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
         self.lcd.set_int_mask(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
         self.lcd.set_int_status(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_frame_cycles(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        pos += 4;
+        self.lcd.set_compare_state(buf[pos]); pos += 1;
+        pos += 7;
 
         // OS Timer state
         self.os_timer_state = buf[pos] != 0; pos += 1;
@@ -767,22 +767,19 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_lcd_interrupt() {
+    fn test_lcd_enable_sets_scheduling_flag() {
         let mut p = Peripherals::new();
 
-        // Enable LCD with VBLANK interrupt via write API
-        // Control is at offset 0x18, IMSC is at offset 0x1C
+        // LCD interrupts are now event-driven (not tick-based).
+        // Verify that enabling LCD sets the needs_lcd_event flag.
+        assert!(!p.lcd.needs_lcd_event);
         p.write_test(LCD_BASE + 0x18, 0x01); // ENABLE (control bit 0)
-        p.write_test(LCD_BASE + 0x1C, 0x08); // Enable vert comp interrupt (bit 3, bit 0 reserved)
+        assert!(p.lcd.needs_lcd_event);
 
-        // Enable LCD interrupt in interrupt controller (bit 11 - in byte 1)
-        p.write_test(INT_BASE + 0x04, 0x00); // Low byte
-        p.write_test(INT_BASE + 0x05, (sources::LCD >> 8) as u8); // High byte (bit 11)
-
-        // Tick for a full frame (800_000 cycles at 48MHz/60Hz)
-        let pending = p.tick(800_000, 0);
-        assert!(pending);
-        assert!(p.irq_pending());
+        // Verify that disabling LCD sets the needs_lcd_clear flag
+        p.lcd.needs_lcd_event = false;
+        p.write_test(LCD_BASE + 0x18, 0x00); // Disable
+        assert!(p.lcd.needs_lcd_clear);
     }
 
     #[test]

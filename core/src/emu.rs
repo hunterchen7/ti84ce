@@ -303,7 +303,7 @@ pub struct LcdSnapshot {
     pub int_status: u32,
     pub upbase: u32,
     pub lpbase: u32,
-    pub frame_cycles: u32,
+    pub compare_state: u8,
 }
 
 impl Emu {
@@ -744,6 +744,19 @@ impl Emu {
             }
         }
 
+        // Check LCD scheduling flags (set by control register writes)
+        if self.bus.ports.lcd.needs_lcd_event {
+            self.bus.ports.lcd.needs_lcd_event = false;
+            // LCD just enabled — schedule immediate LCD event (sched_set(SCHED_LCD, 0))
+            self.scheduler.set(EventId::Lcd, 0);
+        }
+        if self.bus.ports.lcd.needs_lcd_clear {
+            self.bus.ports.lcd.needs_lcd_clear = false;
+            // LCD just disabled — clear LCD and LCD DMA events
+            self.scheduler.clear(EventId::Lcd);
+            self.scheduler.clear(EventId::LcdDma);
+        }
+
         irq
     }
 
@@ -824,10 +837,39 @@ impl Emu {
                     self.scheduler.clear(EventId::OsTimer);
                 }
                 EventId::Lcd => {
-                    // LCD refresh - raise LCD interrupt
-                    self.bus.ports.interrupt.raise(sources::LCD);
-                    self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
-                    self.scheduler.clear(EventId::Lcd);
+                    // LCD event state machine — matches CEmu's lcd_event()
+                    let result = self.bus.ports.lcd.process_event();
+                    // Update interrupt controller based on lcd.ris & lcd.imsc
+                    if result.interrupt_changed {
+                        if self.bus.ports.lcd.check_interrupt() {
+                            self.bus.ports.interrupt.raise(sources::LCD);
+                        } else {
+                            self.bus.ports.interrupt.clear_raw(sources::LCD);
+                        }
+                        self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
+                    }
+                    // Schedule DMA if needed (relative to this LCD event)
+                    if let Some(offset) = result.schedule_dma_offset {
+                        self.scheduler.repeat_relative(
+                            EventId::LcdDma, EventId::Lcd, offset, 0,
+                        );
+                    }
+                    // Reschedule LCD event
+                    self.scheduler.repeat(EventId::Lcd, result.duration);
+                }
+                EventId::LcdDma => {
+                    // LCD DMA — reads VRAM and advances UPCURR
+                    let result = self.bus.ports.lcd.process_dma();
+                    if let Some(ticks) = result.repeat_ticks {
+                        self.scheduler.repeat(EventId::LcdDma, ticks);
+                    } else if let Some(offset) = result.schedule_relative {
+                        // Schedule relative to LCD event
+                        self.scheduler.repeat_relative(
+                            EventId::LcdDma, EventId::Lcd, offset, 0,
+                        );
+                    } else {
+                        self.scheduler.clear(EventId::LcdDma);
+                    }
                 }
                 _ => {
                     // Unknown event - clear it
@@ -1052,8 +1094,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version (v5: scheduler snapshot grew from 72→80 bytes for TimerDelay event)
-    const STATE_VERSION: u32 = 5;
+    /// State format version (v6: LCD DMA engine, scheduler grew from 80→88 bytes for LcdDma event)
+    const STATE_VERSION: u32 = 6;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
@@ -1539,7 +1581,7 @@ impl Emu {
             int_status: lcd.int_status(),
             upbase: lcd.upbase(),
             lpbase: lcd.lpbase(),
-            frame_cycles: lcd.frame_cycles(),
+            compare_state: lcd.compare_state(),
         }
     }
 

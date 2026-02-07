@@ -86,8 +86,10 @@ pub enum EventId {
     OsTimer = 6,
     /// LCD refresh
     Lcd = 7,
+    /// LCD DMA (VRAM read)
+    LcdDma = 8,
     /// Number of event types
-    Count = 8,
+    Count = 9,
 }
 
 /// Bit 63 set indicates event is inactive
@@ -152,7 +154,8 @@ impl Scheduler {
                 SchedItem::new(EventId::Timer1, ClockId::Cpu),
                 SchedItem::new(EventId::Timer2, ClockId::Cpu),
                 SchedItem::new(EventId::OsTimer, ClockId::Clock32K),
-                SchedItem::new(EventId::Lcd, ClockId::Panel),
+                SchedItem::new(EventId::Lcd, ClockId::Clock24M),
+                SchedItem::new(EventId::LcdDma, ClockId::Clock48M),
             ],
             base_ticks: 0,
             cpu_speed: 0, // Default 6 MHz
@@ -278,6 +281,22 @@ impl Scheduler {
         let current = item.timestamp & !INACTIVE_FLAG;
         let ts = current + ticks * base_ticks_per_tick;
         item.timestamp = ts;
+        if ts < self.next_event_ticks {
+            self.next_event_ticks = ts;
+        }
+    }
+
+    /// Schedule an event relative to another event's timestamp, using the reference
+    /// event's clock domain. Matches CEmu's `sched_repeat_relative(event, ref, offset, ticks)`.
+    /// `offset` is in the reference event's clock ticks added to ref's timestamp,
+    /// then `ticks` in the target event's own clock ticks are added.
+    pub fn repeat_relative(&mut self, event: EventId, reference: EventId, offset: u64, ticks: u64) {
+        let ref_ts = self.items[reference as usize].timestamp & !INACTIVE_FLAG;
+        let ref_clock = self.items[reference as usize].clock;
+        let ref_base_ticks = ref_clock.base_ticks_per_tick(self.cpu_speed);
+        let event_base_ticks = self.items[event as usize].clock.base_ticks_per_tick(self.cpu_speed);
+        let ts = ref_ts + offset * ref_base_ticks + ticks * event_base_ticks;
+        self.items[event as usize].timestamp = ts;
         if ts < self.next_event_ticks {
             self.next_event_ticks = ts;
         }
@@ -421,8 +440,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 1 (cpu_speed) + 8*8 (item timestamps) = 73 bytes, round to 80
-    pub const SNAPSHOT_SIZE: usize = 80;
+    /// 8 (base_ticks) + 1 (cpu_speed) + 9*8 (item timestamps) = 81 bytes, round to 88
+    pub const SNAPSHOT_SIZE: usize = 88;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {

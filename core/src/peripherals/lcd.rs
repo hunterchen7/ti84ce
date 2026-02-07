@@ -2,7 +2,7 @@
 //!
 //! Memory-mapped at 0xE30000 (port offset 0x030000 from 0xE00000)
 //!
-//! The LCD controller manages the display timing and points to VRAM.
+//! The LCD controller manages the display timing and DMA from VRAM.
 //! VRAM is typically at 0xD40000 and contains 320x240 RGB565 pixels.
 //!
 //! Register map matches CEmu's lcd.c:
@@ -16,7 +16,12 @@
 //! - 0x028: ICR (interrupt clear register, write-only)
 //! - 0x02C-0x02F: UPCURR (upper current address, read-only)
 //! - 0x030-0x033: LPCURR (lower current address, read-only)
-//! - 0x200-0x3FF: Palette (256 entries × 2 bytes)
+//! - 0x200-0x3FF: Palette (256 entries x 2 bytes)
+//!
+//! DMA state machine (CEmu lcd_event / lcd_dma):
+//!   FRONT_PORCH -> SYNC -> LNBU -> BACK_PORCH -> ACTIVE_VIDEO -> FRONT_PORCH
+//!
+//! LCD event uses CLOCK_24M; LCD DMA uses CLOCK_48M.
 
 /// Display dimensions
 pub const LCD_WIDTH: usize = 320;
@@ -25,17 +30,8 @@ pub const LCD_HEIGHT: usize = 240;
 /// Default VRAM base address
 pub const DEFAULT_VRAM_BASE: u32 = 0xD40000;
 
-/// Cycles per frame at ~60Hz with 48MHz clock
-/// 48_000_000 / 60 = 800_000 cycles
-const CYCLES_PER_FRAME: u32 = 800_000;
-
 /// Register offsets matching CEmu lcd.c
 mod regs {
-    // TODO: Used when LCD timing is implemented (Milestone 6C)
-    pub const _TIMING0: u32 = 0x00;
-    pub const _TIMING1: u32 = 0x04;
-    pub const _TIMING2: u32 = 0x08;
-    pub const _TIMING3: u32 = 0x0C;
     pub const UPBASE: u32 = 0x10;
     pub const LPBASE: u32 = 0x14;
     pub const CONTROL: u32 = 0x18;
@@ -67,6 +63,36 @@ mod ctrl {
 /// Peripheral ID bytes (CEmu lcd_read at 0xFE0)
 const LCD_PERIPH_ID: [u8; 8] = [0x11, 0x11, 0x14, 0x00, 0x0D, 0xF0, 0x05, 0xB1];
 
+/// LCD DMA state machine compare states (matches CEmu lcd_comp enum)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LcdCompare {
+    FrontPorch = 0,
+    Sync = 1,
+    Lnbu = 2,
+    BackPorch = 3,
+    ActiveVideo = 4,
+}
+
+/// Result from process_event: duration for next LCD event, optional DMA scheduling info
+pub struct LcdEventResult {
+    /// Duration (in Clock24M ticks) until next LCD event
+    pub duration: u64,
+    /// If Some, schedule LcdDma relative to this LCD event with given offset (in LCD clock ticks)
+    pub schedule_dma_offset: Option<u64>,
+    /// Whether interrupt state changed (caller should update interrupt controller)
+    pub interrupt_changed: bool,
+}
+
+/// Result from process_dma: optional reschedule info
+pub struct LcdDmaResult {
+    /// If Some(ticks), repeat LcdDma after this many Clock48M ticks.
+    /// If None, don't reschedule (DMA complete for now).
+    pub repeat_ticks: Option<u64>,
+    /// If true, schedule DMA relative to LCD event with given offset instead of repeating
+    pub schedule_relative: Option<u64>,
+}
+
 /// LCD Controller
 #[derive(Debug, Clone)]
 pub struct LcdController {
@@ -88,8 +114,57 @@ pub struct LcdController {
     lpcurr: u32,
     /// 256-entry color palette (stored as raw bytes, 2 bytes per entry)
     palette: [u8; 512],
-    /// Cycle accumulator for frame timing
-    frame_cycles: u32,
+
+    // === DMA state machine (CEmu parity) ===
+
+    /// Current compare state in the LCD event state machine
+    compare: LcdCompare,
+    /// Whether in prefill phase (initial FIFO fill before active video)
+    prefill: bool,
+    /// FIFO position counter (u8, wraps at 256 to signal prefill complete)
+    pos: u8,
+    /// Current row being rendered
+    cur_row: u32,
+    /// Current column being rendered
+    cur_col: u32,
+
+    // === Extracted timing parameters (parsed from timing registers at SYNC) ===
+
+    /// Pixels per line
+    ppl: u32,
+    /// Horizontal sync width
+    hsw: u32,
+    /// Horizontal front porch
+    hfp: u32,
+    /// Horizontal back porch
+    hbp: u32,
+    /// Lines per panel
+    lpp: u32,
+    /// Vertical sync width
+    vsw: u32,
+    /// Vertical front porch
+    vfp: u32,
+    /// Vertical back porch
+    vbp: u32,
+    /// Panel clock divisor
+    pcd: u32,
+    /// Clocks per line
+    cpl: u32,
+    /// LCD BPP mode from control register
+    lcdbpp: u32,
+    /// Effective BPP exponent
+    bpp: u32,
+    /// Watermark flag (control bit 16)
+    wtrmrk: u32,
+    /// Pixels per FIFO fill
+    ppf: u32,
+
+    // === Scheduling flags (checked by emu.rs after writes) ===
+
+    /// Set when LCD is enabled via control write — emu.rs should schedule LCD event
+    pub needs_lcd_event: bool,
+    /// Set when LCD is disabled via control write — emu.rs should clear LCD event
+    pub needs_lcd_clear: bool,
 }
 
 impl LcdController {
@@ -105,7 +180,27 @@ impl LcdController {
             upcurr: 0,
             lpcurr: 0,
             palette: [0; 512],
-            frame_cycles: 0,
+            compare: LcdCompare::FrontPorch,
+            prefill: false,
+            pos: 0,
+            cur_row: 0,
+            cur_col: 0,
+            ppl: 0,
+            hsw: 0,
+            hfp: 0,
+            hbp: 0,
+            lpp: 0,
+            vsw: 0,
+            vfp: 0,
+            vbp: 0,
+            pcd: 0,
+            cpl: 0,
+            lcdbpp: 0,
+            bpp: 0,
+            wtrmrk: 0,
+            ppf: 0,
+            needs_lcd_event: false,
+            needs_lcd_clear: false,
         }
     }
 
@@ -120,7 +215,27 @@ impl LcdController {
         self.upcurr = 0;
         self.lpcurr = 0;
         self.palette = [0; 512];
-        self.frame_cycles = 0;
+        self.compare = LcdCompare::FrontPorch;
+        self.prefill = false;
+        self.pos = 0;
+        self.cur_row = 0;
+        self.cur_col = 0;
+        self.ppl = 0;
+        self.hsw = 0;
+        self.hfp = 0;
+        self.hbp = 0;
+        self.lpp = 0;
+        self.vsw = 0;
+        self.vfp = 0;
+        self.vbp = 0;
+        self.pcd = 0;
+        self.cpl = 0;
+        self.lcdbpp = 0;
+        self.bpp = 0;
+        self.wtrmrk = 0;
+        self.ppf = 0;
+        self.needs_lcd_event = false;
+        self.needs_lcd_clear = false;
     }
 
     /// Check if LCD is enabled (bit 0)
@@ -163,40 +278,248 @@ impl LcdController {
         self.lpbase
     }
 
-    /// Get current frame cycle accumulator
-    pub fn frame_cycles(&self) -> u32 {
-        self.frame_cycles
-    }
-
     /// Get BPP mode from control register (bits 1-3)
     pub fn bpp_mode(&self) -> u8 {
         ((self.control >> ctrl::BPP_SHIFT) & ctrl::BPP_MASK) as u8
     }
 
-    /// Check interrupt and return whether LCD interrupt should be active
-    fn check_interrupt(&self) -> bool {
+    /// Check if LCD interrupt should be active (ris & imsc)
+    pub fn check_interrupt(&self) -> bool {
         (self.ris & self.imsc) != 0
     }
 
-    /// Tick the LCD controller
-    /// Returns true if VBLANK interrupt should fire
-    pub fn tick(&mut self, cycles: u32) -> bool {
-        if !self.is_enabled() {
-            return false;
+    /// Extract timing parameters from timing registers.
+    /// Called at SYNC state, matching CEmu lcd_event case LCD_SYNC.
+    fn extract_timing(&mut self) {
+        self.ppl = ((self.timing[0] >> 2 & 0x3F) + 1) << 4;
+        self.hsw = (self.timing[0] >> 8 & 0xFF) + 1;
+        self.hfp = (self.timing[0] >> 16 & 0xFF) + 1;
+        self.hbp = (self.timing[0] >> 24 & 0xFF) + 1;
+        self.lpp = (self.timing[1] & 0x3FF) + 1;
+        self.vsw = (self.timing[1] >> 10 & 0x3F) + 1;
+        self.vfp = self.timing[1] >> 16 & 0xFF;
+        self.vbp = self.timing[1] >> 24 & 0xFF;
+        self.pcd = ((self.timing[2] & 0x1F) | ((self.timing[2] >> 27 & 0x1F) << 5)) + 2;
+        self.cpl = (self.timing[2] >> 16 & 0x3FF) + 1;
+        if self.timing[2] >> 26 & 1 != 0 {
+            self.pcd = 1;
+        }
+        self.lcdbpp = self.control >> 1 & 7;
+        self.wtrmrk = self.control >> 16 & 1;
+        self.bpp = if self.lcdbpp <= 5 { self.lcdbpp } else { 4 };
+        self.ppf = 1 << (8 + self.wtrmrk - self.bpp);
+    }
+
+    /// Horizontal line duration in PCD units (used repeatedly in timing calculations)
+    fn hline(&self) -> u32 {
+        self.hsw + self.hbp + self.cpl + self.hfp
+    }
+
+    /// Process LCD event (called when SCHED_LCD fires).
+    /// Returns the result containing the duration for the next event and optional DMA scheduling.
+    /// Matches CEmu's lcd_event() state machine.
+    pub fn process_event(&mut self) -> LcdEventResult {
+        let compare_setting = (self.control >> 12 & 3) as u8;
+        let duration;
+        let schedule_dma_offset = None;
+
+        match self.compare {
+            LcdCompare::FrontPorch => {
+                // Set cursor interrupt bit (simplified: always set)
+                self.ris |= 1 << 0;
+
+                if self.vfp > 0 {
+                    if compare_setting == LcdCompare::FrontPorch as u8 {
+                        self.ris |= 1 << 3;
+                    }
+                    duration = self.vfp as u64 * self.hline() as u64 * self.pcd as u64;
+                    self.compare = LcdCompare::Sync;
+                } else {
+                    // Fall through to SYNC if VFP is 0
+                    return self.process_sync_state(compare_setting);
+                }
+            }
+            LcdCompare::Sync => {
+                return self.process_sync_state(compare_setting);
+            }
+            LcdCompare::Lnbu => {
+                self.ris |= 1 << 2; // LNBU interrupt
+                duration = (self.hbp as u64 + self.cpl as u64 + self.hfp as u64)
+                    * self.pcd as u64 - 1;
+                self.compare = LcdCompare::BackPorch;
+            }
+            LcdCompare::BackPorch => {
+                if self.vbp > 0 {
+                    if compare_setting == LcdCompare::BackPorch as u8 {
+                        self.ris |= 1 << 3;
+                    }
+                    duration = self.vbp as u64 * self.hline() as u64 * self.pcd as u64;
+                    self.compare = LcdCompare::ActiveVideo;
+                } else {
+                    // Fall through to ACTIVE_VIDEO if VBP is 0
+                    return self.process_active_video_state(compare_setting);
+                }
+            }
+            LcdCompare::ActiveVideo => {
+                return self.process_active_video_state(compare_setting);
+            }
         }
 
-        let total_cycles = self.frame_cycles as u64 + cycles as u64;
-        if total_cycles >= CYCLES_PER_FRAME as u64 {
-            self.frame_cycles = (total_cycles % CYCLES_PER_FRAME as u64) as u32;
-            // Set VBLANK interrupt status bit (bit 3 in CEmu is LCD_VERT_COMP)
-            // We use bit 0 for the simple vblank for now
+        LcdEventResult {
+            duration,
+            schedule_dma_offset,
+            interrupt_changed: true,
+        }
+    }
+
+    /// Process SYNC state — extract timing, start DMA prefill
+    fn process_sync_state(&mut self, compare_setting: u8) -> LcdEventResult {
+        if compare_setting == LcdCompare::Sync as u8 {
             self.ris |= 1 << 3;
-            return self.check_interrupt();
+        }
+        self.extract_timing();
+
+        let duration = ((self.vsw - 1) as u64 * self.hline() as u64 + self.hsw as u64)
+            * self.pcd as u64 + 1;
+
+        self.prefill = true;
+        self.pos = 0;
+        self.cur_row = 0;
+        self.cur_col = 0;
+
+        // Schedule DMA prefill relative to this LCD event with offset = duration
+        let schedule_dma_offset = Some(duration);
+
+        self.compare = LcdCompare::Lnbu;
+
+        LcdEventResult {
+            duration,
+            schedule_dma_offset,
+            interrupt_changed: true,
+        }
+    }
+
+    /// Process ACTIVE_VIDEO state
+    fn process_active_video_state(&mut self, compare_setting: u8) -> LcdEventResult {
+        if compare_setting == LcdCompare::ActiveVideo as u8 {
+            self.ris |= 1 << 3;
+        }
+        let duration = self.lpp as u64 * self.hline() as u64 * self.pcd as u64;
+
+        // If not in prefill, schedule DMA for active video rendering
+        let schedule_dma_offset = if !self.prefill {
+            Some((self.hsw as u64 + self.hbp as u64) * self.pcd as u64)
+        } else {
+            None
+        };
+
+        self.compare = LcdCompare::FrontPorch;
+
+        LcdEventResult {
+            duration,
+            schedule_dma_offset,
+            interrupt_changed: true,
+        }
+    }
+
+    /// Process LCD DMA event (called when SCHED_LCD_DMA fires).
+    /// Advances UPCURR through VRAM.
+    /// Returns DMA result with reschedule info.
+    pub fn process_dma(&mut self) -> LcdDmaResult {
+        if self.prefill {
+            // Prefill phase: fill 64 bytes at a time
+            if self.pos == 0 {
+                self.upcurr = self.upbase;
+            }
+            // Advance UPCURR by 64 bytes (simulating DMA read)
+            self.upcurr = self.upcurr.wrapping_add(64);
+            self.pos = self.pos.wrapping_add(64);
+
+            // pos wraps u8: after 4 fills (4*64=256), pos wraps to 0 -> prefill done
+            if self.pos != 0 {
+                // More prefill needed
+                let repeat = if self.pos == 128 { 22 } else { 19 };
+                return LcdDmaResult {
+                    repeat_ticks: Some(repeat),
+                    schedule_relative: None,
+                };
+            }
+            // Prefill complete (pos wrapped to 0)
+            self.prefill = false;
+            if self.compare == LcdCompare::FrontPorch {
+                // Prefill finished during active video transition —
+                // schedule DMA relative to LCD event
+                return LcdDmaResult {
+                    repeat_ticks: None,
+                    schedule_relative: Some(
+                        (self.hsw as u64 + self.hbp as u64) * self.pcd as u64,
+                    ),
+                };
+            }
+            // Prefill done, no more DMA until ACTIVE_VIDEO
+            return LcdDmaResult {
+                repeat_ticks: None,
+                schedule_relative: None,
+            };
         }
 
-        self.frame_cycles = total_cycles as u32;
+        // Active video phase: process pixels and advance UPCURR
+        let fill_bytes: u32 = if self.wtrmrk != 0 { 64 } else { 32 };
+        let words: u32 = if self.wtrmrk != 0 { 16 } else { 8 };
 
-        false
+        // Process pixels (advance cur_col and cur_row)
+        let pixels = words << (5 - self.bpp);
+        self.cur_col += pixels;
+        while self.cur_col >= self.cpl {
+            self.cur_col -= self.cpl;
+            self.cur_row += 1;
+        }
+
+        // Calculate ticks for lcd_words equivalent
+        let ticks = self.process_words_ticks(words);
+
+        // Fill FIFO (advance upcurr)
+        self.upcurr = self.upcurr.wrapping_add(fill_bytes);
+
+        if self.cur_row < self.lpp {
+            // More scanlines to process
+            LcdDmaResult {
+                repeat_ticks: Some(ticks),
+                schedule_relative: None,
+            }
+        } else {
+            // Frame complete
+            LcdDmaResult {
+                repeat_ticks: None,
+                schedule_relative: None,
+            }
+        }
+    }
+
+    /// Calculate ticks consumed by processing `words` words.
+    /// Simplified: each pixel takes PCD*2 ticks at end-of-line boundaries,
+    /// otherwise just the base processing time.
+    fn process_words_ticks(&self, words: u32) -> u64 {
+        // Base: each word group takes some ticks for pixel processing.
+        // Approximate with scanline-based timing matching CEmu's lcd_words return value.
+        // For each scanline transition, add (HFP + HSW + HBP) * PCD * 2
+        // This is a simplification — full pixel-accurate timing is done in CEmu's lcd_process_pixel.
+        let pixels = words << (5 - self.bpp);
+        let mut ticks = 0u64;
+        let mut col = self.cur_col.wrapping_sub(pixels); // pre-advance column
+
+        for _ in 0..pixels {
+            col += 1;
+            if col >= self.cpl {
+                col = 0;
+                ticks += (self.hfp as u64 + self.hsw as u64 + self.hbp as u64)
+                    * self.pcd as u64 * 2;
+            }
+        }
+
+        // Minimum ticks for the DMA call itself
+        let base_ticks = if self.wtrmrk != 0 { 19 } else { 11 };
+        ticks.max(base_ticks)
     }
 
     /// Read a register byte
@@ -230,7 +553,6 @@ impl LcdController {
             }
         } else if index < regs::PALETTE_END {
             // Palette read (0x200-0x3FF)
-            // CEmu adds 1 cycle penalty for palette reads
             let palette_idx = (index - regs::PALETTE_START) as usize;
             self.palette[palette_idx]
         } else if index >= 0xFE0 {
@@ -263,26 +585,38 @@ impl LcdController {
                     let i = (reg >> 2) as usize;
                     self.timing[i] = (self.timing[i] & !mask) | (shifted & mask);
                 }
-                // UPBASE — CEmu aligns to 8 bytes
+                // UPBASE -- CEmu aligns to 8 bytes
                 regs::UPBASE => {
                     self.upbase = (self.upbase & !mask) | (shifted & mask);
                     self.upbase &= !7;
                 }
-                // LPBASE — CEmu aligns to 8 bytes
+                // LPBASE -- CEmu aligns to 8 bytes
                 regs::LPBASE => {
                     self.lpbase = (self.lpbase & !mask) | (shifted & mask);
                     self.lpbase &= !7;
                 }
-                // Control register
+                // Control register — detect enable/disable transitions
                 regs::CONTROL => {
+                    let old = self.control;
                     self.control = (self.control & !mask) | (shifted & mask);
+                    // Detect lcdEn bit change (bit 0)
+                    if (self.control ^ old) & ctrl::ENABLE != 0 {
+                        if self.control & ctrl::ENABLE != 0 {
+                            // LCD just enabled — start at SYNC state
+                            self.compare = LcdCompare::Sync;
+                            self.needs_lcd_event = true;
+                        } else {
+                            // LCD just disabled
+                            self.needs_lcd_clear = true;
+                        }
+                    }
                 }
-                // IMSC — byte write only at offset 0, bits [4:1] only
+                // IMSC -- byte write only at offset 0, bits [4:1] only
                 regs::IMSC if bit_offset == 0 => {
                     self.imsc &= !0x1E;
                     self.imsc |= value & 0x1E;
                 }
-                // ICR — interrupt clear, write clears bits in ris
+                // ICR -- interrupt clear, write clears bits in ris
                 regs::ICR if bit_offset == 0 => {
                     self.ris &= !(value & 0x1E);
                 }
@@ -317,9 +651,20 @@ impl LcdController {
         self.ris = value as u8;
     }
 
-    /// Set frame cycles directly
-    pub fn set_frame_cycles(&mut self, value: u32) {
-        self.frame_cycles = value;
+    /// Get the DMA compare state (for snapshot)
+    pub fn compare_state(&self) -> u8 {
+        self.compare as u8
+    }
+
+    /// Set the DMA compare state (for loading snapshot)
+    pub fn set_compare_state(&mut self, state: u8) {
+        self.compare = match state {
+            0 => LcdCompare::FrontPorch,
+            1 => LcdCompare::Sync,
+            2 => LcdCompare::Lnbu,
+            3 => LcdCompare::BackPorch,
+            _ => LcdCompare::ActiveVideo,
+        };
     }
 }
 
@@ -338,6 +683,7 @@ mod tests {
         let lcd = LcdController::new();
         assert!(!lcd.is_enabled());
         assert_eq!(lcd.upbase(), DEFAULT_VRAM_BASE);
+        assert_eq!(lcd.compare, LcdCompare::FrontPorch);
     }
 
     #[test]
@@ -346,63 +692,57 @@ mod tests {
         lcd.control = ctrl::ENABLE;
         lcd.upbase = 0xD50000;
         lcd.imsc = 0x1E;
-        lcd.frame_cycles = 500000;
+        lcd.compare = LcdCompare::ActiveVideo;
 
         lcd.reset();
         assert!(!lcd.is_enabled());
         assert_eq!(lcd.upbase(), DEFAULT_VRAM_BASE);
         assert_eq!(lcd.imsc, 0);
-        assert_eq!(lcd.frame_cycles, 0);
+        assert_eq!(lcd.compare, LcdCompare::FrontPorch);
     }
 
     #[test]
-    fn test_enable() {
+    fn test_enable_triggers_lcd_event_flag() {
         let mut lcd = LcdController::new();
         lcd.write(regs::CONTROL, ctrl::ENABLE as u8);
         assert!(lcd.is_enabled());
+        assert!(lcd.needs_lcd_event);
+        assert_eq!(lcd.compare, LcdCompare::Sync);
     }
 
     #[test]
-    fn test_disabled_no_interrupt() {
+    fn test_disable_triggers_lcd_clear_flag() {
         let mut lcd = LcdController::new();
-        lcd.imsc = 0x08; // Enable vert comp interrupt (bit 3)
-
-        let irq = lcd.tick(CYCLES_PER_FRAME);
-        assert!(!irq);
-        assert_eq!(lcd.frame_cycles, 0);
-        assert_eq!(lcd.ris & 0x08, 0);
+        // Enable first
+        lcd.control = ctrl::ENABLE;
+        // Now disable
+        lcd.write(regs::CONTROL, 0x00);
+        assert!(!lcd.is_enabled());
+        assert!(lcd.needs_lcd_clear);
     }
 
     #[test]
     fn test_upbase_write() {
         let mut lcd = LcdController::new();
-
-        // Write new VRAM address 0xD50000
         lcd.write(regs::UPBASE, 0x00);
         lcd.write(regs::UPBASE + 1, 0x00);
         lcd.write(regs::UPBASE + 2, 0xD5);
-
         assert_eq!(lcd.upbase(), 0xD50000);
     }
 
     #[test]
     fn test_upbase_alignment() {
         let mut lcd = LcdController::new();
-        // Write non-aligned address — should be forced to 8-byte alignment
-        lcd.write(regs::UPBASE, 0x07); // low byte 0x07
-        assert_eq!(lcd.upbase & 0x07, 0); // Should be cleared
+        lcd.write(regs::UPBASE, 0x07);
+        assert_eq!(lcd.upbase & 0x07, 0);
     }
 
     #[test]
     fn test_icr_clears_ris() {
         let mut lcd = LcdController::new();
-        lcd.ris = 0x1E; // All interrupt bits set
-
-        // Write ICR to clear bit 3 (vert comp)
+        lcd.ris = 0x1E;
         lcd.write(regs::ICR, 0x08);
-        assert_eq!(lcd.ris, 0x16); // Bit 3 cleared
-
-        // Write ICR to clear remaining bits
+        assert_eq!(lcd.ris, 0x16);
         lcd.write(regs::ICR, 0x16);
         assert_eq!(lcd.ris, 0x00);
     }
@@ -410,151 +750,35 @@ mod tests {
     #[test]
     fn test_imsc_masks_bit0() {
         let mut lcd = LcdController::new();
-
-        // Write IMSC with all bits including bit 0
         lcd.write(regs::IMSC, 0x1F);
-        // Bit 0 should NOT be set (reserved for cursor)
         assert_eq!(lcd.imsc, 0x1E);
-
-        // Reading should also mask bit 0
         assert_eq!(lcd.read(regs::IMSC), 0x1E);
     }
 
     #[test]
     fn test_ris_read_masks_bit0() {
         let mut lcd = LcdController::new();
-        lcd.ris = 0x1F; // Set all bits including reserved bit 0
-
-        // Read should mask bit 0
+        lcd.ris = 0x1F;
         assert_eq!(lcd.read(regs::RIS), 0x1E);
     }
 
     #[test]
     fn test_mis_read() {
         let mut lcd = LcdController::new();
-        lcd.imsc = 0x08; // Mask for bit 3 only
-        lcd.ris = 0x1E; // All bits set
-
-        // MIS = imsc & ris & ~1
+        lcd.imsc = 0x08;
+        lcd.ris = 0x1E;
         assert_eq!(lcd.read(regs::MIS), 0x08);
-    }
-
-    #[test]
-    fn test_vblank_interrupt() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0x08; // Enable vert comp interrupt (bit 3)
-
-        // Tick less than a frame
-        let irq = lcd.tick(100);
-        assert!(!irq);
-
-        // Tick to complete a frame
-        let irq = lcd.tick(CYCLES_PER_FRAME);
-        assert!(irq);
-        assert_eq!(lcd.ris & 0x08, 0x08);
-
-        // Clear interrupt via ICR
-        lcd.write(regs::ICR, 0x08);
-        assert_eq!(lcd.ris & 0x08, 0);
-    }
-
-    #[test]
-    fn test_multiple_frames() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0x08;
-
-        let mut interrupt_count = 0;
-
-        // Run for 3 frames
-        for _ in 0..(CYCLES_PER_FRAME * 3) {
-            if lcd.tick(1) {
-                interrupt_count += 1;
-                lcd.write(regs::ICR, 0x08);
-            }
-        }
-
-        assert_eq!(interrupt_count, 3);
-    }
-
-    #[test]
-    fn test_vblank_no_interrupt_when_masked() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0; // Interrupt NOT enabled
-
-        let irq = lcd.tick(CYCLES_PER_FRAME);
-        assert!(!irq);
-        // But ris should still be set
-        assert_eq!(lcd.ris & 0x08, 0x08);
-    }
-
-    #[test]
-    fn test_vblank_exact_boundary() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0x08;
-
-        let irq = lcd.tick(CYCLES_PER_FRAME - 1);
-        assert!(!irq);
-        assert_eq!(lcd.frame_cycles, CYCLES_PER_FRAME - 1);
-
-        let irq = lcd.tick(1);
-        assert!(irq);
-        assert_eq!(lcd.frame_cycles, 0);
-    }
-
-    #[test]
-    fn test_tick_larger_than_frame() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0x08;
-
-        let irq = lcd.tick(CYCLES_PER_FRAME * 2 + 100);
-        assert!(irq);
-        assert_eq!(lcd.frame_cycles, 100);
-    }
-
-    #[test]
-    fn test_tick_multiple_frames_remainder_and_status() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0x08;
-
-        let irq = lcd.tick(CYCLES_PER_FRAME * 3 + 5);
-        assert!(irq);
-        assert_eq!(lcd.ris & 0x08, 0x08);
-        assert_eq!(lcd.frame_cycles, 5);
-    }
-
-    #[test]
-    fn test_tick_multiple_frames_masked_sets_status() {
-        let mut lcd = LcdController::new();
-        lcd.control = ctrl::ENABLE;
-        lcd.imsc = 0;
-
-        let irq = lcd.tick(CYCLES_PER_FRAME * 2 + 7);
-        assert!(!irq);
-        assert_eq!(lcd.ris & 0x08, 0x08);
-        assert_eq!(lcd.frame_cycles, 7);
     }
 
     #[test]
     fn test_palette_read_write() {
         let mut lcd = LcdController::new();
-
-        // Write palette entry 0 (offset 0x200-0x201)
         lcd.write(0x200, 0xAB);
         lcd.write(0x201, 0xCD);
-
         assert_eq!(lcd.read(0x200), 0xAB);
         assert_eq!(lcd.read(0x201), 0xCD);
-
-        // Write palette entry 255 (offset 0x3FE-0x3FF)
         lcd.write(0x3FE, 0x12);
         lcd.write(0x3FF, 0x34);
-
         assert_eq!(lcd.read(0x3FE), 0x12);
         assert_eq!(lcd.read(0x3FF), 0x34);
     }
@@ -570,5 +794,112 @@ mod tests {
         assert_eq!(lcd.read(0xFF4), 0xF0);
         assert_eq!(lcd.read(0xFF8), 0x05);
         assert_eq!(lcd.read(0xFFC), 0xB1);
+    }
+
+    #[test]
+    fn test_extract_timing() {
+        let mut lcd = LcdController::new();
+        // Set up timing registers matching typical TI-84 CE config
+        // TIMING0: PPL=320/16-1=19 (bits 7:2), HSW=1 (bits 15:8), HFP=1 (bits 23:16), HBP=1 (bits 31:24)
+        lcd.timing[0] = (19 << 2) | (0 << 8) | (0 << 16) | (0 << 24);
+        // TIMING1: LPP=240-1=239 (bits 9:0), VSW=1 (bits 15:10), VFP=2 (bits 23:16), VBP=2 (bits 31:24)
+        lcd.timing[1] = 239 | (0 << 10) | (2 << 16) | (2 << 24);
+        // TIMING2: PCD_LO=0 (bits 4:0), CPL=320-1=319 (bits 25:16)
+        lcd.timing[2] = 0 | (319 << 16);
+        lcd.control = ctrl::ENABLE; // BPP=0, no watermark
+
+        lcd.extract_timing();
+
+        assert_eq!(lcd.ppl, 320);
+        assert_eq!(lcd.hsw, 1);
+        assert_eq!(lcd.hfp, 1);
+        assert_eq!(lcd.hbp, 1);
+        assert_eq!(lcd.lpp, 240);
+        assert_eq!(lcd.vsw, 1);
+        assert_eq!(lcd.vfp, 2);
+        assert_eq!(lcd.vbp, 2);
+        assert_eq!(lcd.pcd, 2);
+        assert_eq!(lcd.cpl, 320);
+    }
+
+    #[test]
+    fn test_process_event_sync_to_lnbu() {
+        let mut lcd = LcdController::new();
+        // Set up basic timing
+        lcd.timing[0] = (19 << 2) | (0 << 8) | (0 << 16) | (0 << 24);
+        lcd.timing[1] = 239 | (0 << 10) | (2 << 16) | (2 << 24);
+        lcd.timing[2] = 0 | (319 << 16);
+        lcd.control = ctrl::ENABLE;
+        lcd.compare = LcdCompare::Sync;
+
+        let result = lcd.process_event();
+
+        assert_eq!(lcd.compare, LcdCompare::Lnbu);
+        assert!(lcd.prefill);
+        assert_eq!(lcd.pos, 0);
+        assert!(result.schedule_dma_offset.is_some());
+        assert!(result.duration > 0);
+    }
+
+    #[test]
+    fn test_process_dma_prefill() {
+        let mut lcd = LcdController::new();
+        lcd.upbase = 0xD40000;
+        lcd.prefill = true;
+        lcd.pos = 0;
+        lcd.lpp = 240;
+
+        // First DMA call — sets upcurr to upbase, advances 64 bytes
+        let result = lcd.process_dma();
+        assert_eq!(lcd.upcurr, 0xD40000 + 64);
+        assert_eq!(lcd.pos, 64);
+        assert!(result.repeat_ticks.is_some());
+
+        // Second DMA call — pos = 128
+        let result = lcd.process_dma();
+        assert_eq!(lcd.pos, 128);
+        assert!(result.repeat_ticks.is_some());
+        assert_eq!(result.repeat_ticks.unwrap(), 22); // special timing for pos==128
+
+        // Third DMA call — pos = 192
+        let result = lcd.process_dma();
+        assert_eq!(lcd.pos, 192);
+        assert!(result.repeat_ticks.is_some());
+
+        // Fourth DMA call — pos wraps to 0, prefill complete
+        let result = lcd.process_dma();
+        assert_eq!(lcd.pos, 0);
+        assert!(!lcd.prefill);
+        // Not in FRONT_PORCH, so no schedule_relative
+        assert!(result.repeat_ticks.is_none());
+    }
+
+    #[test]
+    fn test_process_dma_active() {
+        let mut lcd = LcdController::new();
+        lcd.upbase = 0xD40000;
+        lcd.upcurr = 0xD40000;
+        lcd.prefill = false;
+        lcd.lpp = 240;
+        lcd.cpl = 320;
+        lcd.bpp = 4; // 16bpp
+        lcd.wtrmrk = 0;
+        lcd.hsw = 1;
+        lcd.hfp = 1;
+        lcd.hbp = 1;
+        lcd.pcd = 2;
+
+        let result = lcd.process_dma();
+        assert!(lcd.upcurr > 0xD40000); // UPCURR advanced
+        assert!(result.repeat_ticks.is_some()); // More rows to process
+    }
+
+    #[test]
+    fn test_upcurr_read() {
+        let mut lcd = LcdController::new();
+        lcd.upcurr = 0xD40100;
+        assert_eq!(lcd.read(regs::UPCURR), 0x00);
+        assert_eq!(lcd.read(regs::UPCURR + 1), 0x01);
+        assert_eq!(lcd.read(regs::UPCURR + 2), 0xD4);
     }
 }
