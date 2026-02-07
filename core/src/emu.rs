@@ -6,12 +6,26 @@ use crate::bus::{Bus, IoRecord};
 use crate::cpu::{Cpu, InterruptMode};
 use crate::peripherals::rtc::LATCH_TICK_OFFSET;
 use crate::scheduler::{EventId, Scheduler};
-use std::ffi::CString;
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
+
+/// Zero-cost logging macro — compiles to nothing in WASM builds.
+/// Use this instead of `log_event(&format!(...))` to avoid format string
+/// allocation overhead in WASM where logging is a no-op.
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! log_evt {
+    ($($arg:tt)*) => {
+        $crate::emu::log_event(&format!($($arg)*))
+    };
+}
+
+#[cfg(target_arch = "wasm32")]
+macro_rules! log_evt {
+    ($($arg:tt)*) => { /* no-op in WASM */ };
+}
+
+pub(crate) use log_evt;
 
 /// Instruction trace flag - when enabled, logs every instruction
 static INST_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -30,7 +44,7 @@ pub fn enable_inst_trace(limit: u32) {
     INST_TRACE_COUNT.store(0, Ordering::SeqCst);
     INST_TRACE_LIMIT.store(limit, Ordering::SeqCst);
     INST_TRACE_ENABLED.store(true, Ordering::SeqCst);
-    log_event(&format!("INST_TRACE: enabled, limit={}", limit));
+    log_evt!("INST_TRACE: enabled, limit={}", limit);
 }
 
 /// Arm instruction tracing to start when CPU wakes from HALT
@@ -39,7 +53,7 @@ pub fn enable_inst_trace(limit: u32) {
 pub fn arm_inst_trace_on_wake(limit: u32) {
     INST_TRACE_ARMED_LIMIT.store(limit, Ordering::SeqCst);
     INST_TRACE_ARMED.store(true, Ordering::SeqCst);
-    log_event(&format!("INST_TRACE: armed for wake, limit={}", limit));
+    log_evt!("INST_TRACE: armed for wake, limit={}", limit);
 }
 
 /// Disable instruction tracing
@@ -47,7 +61,7 @@ pub fn arm_inst_trace_on_wake(limit: u32) {
 pub fn disable_inst_trace() {
     INST_TRACE_ENABLED.store(false, Ordering::SeqCst);
     INST_TRACE_ARMED.store(false, Ordering::SeqCst);
-    log_event("INST_TRACE: disabled");
+    log_evt!("INST_TRACE: disabled");
 }
 
 /// Check if instruction tracing is enabled
@@ -65,7 +79,7 @@ fn check_armed_trace_on_wake(was_halted: bool, is_halted: bool) {
         INST_TRACE_COUNT.store(0, Ordering::SeqCst);
         INST_TRACE_LIMIT.store(limit, Ordering::SeqCst);
         INST_TRACE_ENABLED.store(true, Ordering::SeqCst);
-        log_event(&format!("INST_TRACE: triggered on wake, limit={}", limit));
+        log_evt!("INST_TRACE: triggered on wake, limit={}", limit);
     }
 }
 
@@ -153,7 +167,9 @@ pub(crate) fn set_log_callback(cb: Option<extern "C" fn(*const c_char)>) {
     LOG_CALLBACK.store(ptr, Ordering::SeqCst);
 }
 
-/// Public logging function for use by other modules
+/// Public logging function for use by other modules.
+/// In WASM builds this is a no-op (callback is never set).
+#[cfg(not(target_arch = "wasm32"))]
 pub fn log_event(message: &str) {
     let cb_ptr = LOG_CALLBACK.load(Ordering::SeqCst);
     if !cb_ptr.is_null() {
@@ -161,7 +177,20 @@ pub fn log_event(message: &str) {
         if let Ok(cstr) = std::ffi::CString::new(message) {
             cb(cstr.as_ptr());
         }
+        return;
     }
+
+    // Fallback: append to emu.log
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("emu.log") {
+        let _ = std::io::Write::write_fmt(&mut file, format_args!("{message}\n"));
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+pub fn log_event(_message: &str) {
+    // No-op in WASM — but callers still evaluate format!() args.
+    // Use log_event_fmt!() macro instead for zero-cost in WASM.
 }
 
 /// Reason for stopping execution
@@ -303,7 +332,7 @@ impl Emu {
 
         self.bus.load_rom(data).map_err(|_| -3)?; // -3 = ROM too large
         self.rom_loaded = true;
-        Self::log_event(&format!("ROM_LOADED bytes={}", data.len()));
+        log_evt!("ROM_LOADED bytes={}", data.len());
         self.reset();
         Ok(())
     }
@@ -322,7 +351,7 @@ impl Emu {
 
     /// Reset emulator to initial state
     pub fn reset(&mut self) {
-        Self::log_event("RESET");
+        log_evt!("RESET");
         self.cpu.reset();
         self.bus.reset();
         self.scheduler.reset();
@@ -382,49 +411,38 @@ impl Emu {
             let (opcode, opcode_len) = self.peek_opcode(pc);
             let was_halted = self.cpu.halted;
 
-            // Instruction tracing (when enabled)
-            // Skip HALT cycles - only count actual instruction execution
+            // Instruction tracing (when enabled via FFI, not in WASM)
+            #[cfg(not(target_arch = "wasm32"))]
             if INST_TRACE_ENABLED.load(Ordering::Relaxed) && !self.cpu.halted {
                 let count = INST_TRACE_COUNT.fetch_add(1, Ordering::Relaxed);
                 let limit = INST_TRACE_LIMIT.load(Ordering::Relaxed);
 
-                // Log instruction with register state
                 let opcode_str: String = opcode[..opcode_len]
                     .iter()
                     .map(|b| format!("{:02X}", b))
                     .collect::<Vec<_>>()
                     .join(" ");
 
-                log_event(&format!(
+                log_evt!(
                     "INST[{}]: PC={:06X} OP={} A={:02X} F={:02X} BC={:06X} DE={:06X} HL={:06X} SP={:06X} halted={} wake={}",
                     count, pc, opcode_str,
                     self.cpu.a, self.cpu.f,
                     self.cpu.bc, self.cpu.de, self.cpu.hl,
                     self.cpu.sp(),
                     self.cpu.halted, self.cpu.any_key_wake
-                ));
+                );
 
-                // Auto-disable after limit
                 if limit > 0 && count >= limit {
                     INST_TRACE_ENABLED.store(false, Ordering::SeqCst);
-                    log_event("INST_TRACE: auto-disabled after limit reached");
+                    log_evt!("INST_TRACE: auto-disabled after limit reached");
                 }
             }
 
             // Handle CPU_SIGNAL_ANY_KEY equivalent - call any_key_check before CPU executes
-            // This mirrors CEmu's main loop which calls keypad_any_check() when ANY_KEY signal is set
             if self.cpu.any_key_wake {
-                let mode = self.bus.ports.keypad.mode();
-                log_event(&format!(
-                    "ANY_KEY_CHECK: mode={} halted={} iff1={}",
-                    mode, self.cpu.halted, self.cpu.iff1
-                ));
-                // Get key state for any_key_check
                 let key_state = self.bus.key_state().clone();
                 let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
                 if should_interrupt {
-                    log_event("ANY_KEY_CHECK: raising keypad interrupt");
-                    // Raise keypad interrupt
                     use crate::peripherals::interrupt::sources;
                     self.bus.ports.interrupt.raise(sources::KEYPAD);
                 }
@@ -439,22 +457,21 @@ impl Emu {
             // Record in history
             self.history.record(pc, &opcode[..opcode_len]);
 
-            // Check for CPU speed change BEFORE advancing scheduler.
-            // When the bus converts its cycle counter (on speed change), we must also
-            // convert the scheduler's cpu_cycles to keep delta calculations correct.
+            // Advance scheduler with cycles used at current speed, THEN handle speed change
+            cycles_remaining -= cycles_used as i32;
+            self.scheduler.advance(cycles_used as u64);
+
+            // Check for CPU speed change AFTER advancing scheduler
             let new_cpu_speed = self.bus.ports.control.cpu_speed();
             if new_cpu_speed != cpu_speed {
                 let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
                 let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
-                self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+                self.scheduler.convert_cpu_events(new_mhz, old_mhz);
                 self.scheduler.set_cpu_speed(new_cpu_speed);
             }
 
-            // Update total cycles and advance scheduler
-            cycles_remaining -= cycles_used as i32;
-            // Sync with bus to handle CPU speed conversion
+            // Sync total_cycles with bus (handles speed conversion)
             self.total_cycles = self.bus.total_cycles();
-            self.scheduler.advance(self.total_cycles);
 
             // Process pending scheduler events
             self.process_scheduler_events();
@@ -484,18 +501,24 @@ impl Emu {
                 self.last_stop = StopReason::Halted;
                 let skip = self.scheduler.cycles_until_next_event();
                 if skip > 0 {
-                    // Fast-forward bus cycles and re-sync scheduler
+                    // Cap skip to prevent i32 overflow and ensure we exit the loop
+                    let skip = skip.min(cycles_remaining.max(0) as u64);
+                    // Fast-forward bus cycles and advance scheduler
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
                     self.total_cycles = self.bus.total_cycles();
-                    self.scheduler.advance(self.total_cycles);
+                    self.scheduler.advance(skip);
                     // Process any events that just fired
                     self.process_scheduler_events();
-                    // Check for interrupts from the fired events
-                    let tick_irq2 = self.bus.ports.tick(0);
+                    // Tick peripherals with skipped cycles so OS timer/LCD/etc. advance
+                    let tick_irq2 = self.bus.ports.tick(skip as u32);
                     if tick_irq2 {
                         self.cpu.irq_pending = true;
                     }
+                } else if !self.cpu.iff1 && !self.cpu.nmi_pending {
+                    // No events scheduled and interrupts disabled — nothing can wake the CPU.
+                    // Break to avoid spinning 1 cycle at a time through all remaining cycles.
+                    break;
                 }
             }
         }
@@ -521,19 +544,19 @@ impl Emu {
             let cycles_used = self.cpu.step(&mut self.bus);
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
 
-            // Check for CPU speed change BEFORE advancing scheduler
+            // Advance scheduler with cycles used at current speed, then handle speed change
+            cycles_remaining -= cycles_used as i32;
+            self.scheduler.advance(cycles_used as u64);
+
             let new_cpu_speed = self.bus.ports.control.cpu_speed();
             if new_cpu_speed != cpu_speed {
                 let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
                 let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
-                self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+                self.scheduler.convert_cpu_events(new_mhz, old_mhz);
                 self.scheduler.set_cpu_speed(new_cpu_speed);
             }
 
-            cycles_remaining -= cycles_used as i32;
-            // Sync with bus to handle CPU speed conversion
             self.total_cycles = self.bus.total_cycles();
-            self.scheduler.advance(self.total_cycles);
             self.process_scheduler_events();
 
             // Check if SPI needs initial scheduling (state changed via port write)
@@ -556,14 +579,17 @@ impl Emu {
             if self.cpu.halted {
                 let skip = self.scheduler.cycles_until_next_event();
                 if skip > 0 {
+                    let skip = skip.min(cycles_remaining.max(0) as u64);
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
                     self.total_cycles = self.bus.total_cycles();
-                    self.scheduler.advance(self.total_cycles);
+                    self.scheduler.advance(skip);
                     self.process_scheduler_events();
-                    if self.bus.ports.tick(0) {
+                    if self.bus.ports.tick(skip as u32) {
                         self.cpu.irq_pending = true;
                     }
+                } else if !self.cpu.iff1 && !self.cpu.nmi_pending {
+                    break;
                 }
             }
         }
@@ -609,15 +635,12 @@ impl Emu {
 
         // Handle CPU_SIGNAL_ANY_KEY equivalent
         if self.cpu.any_key_wake {
-            let mode = self.bus.ports.keypad.mode();
-            log_event(&format!(
-                "ANY_KEY_CHECK: mode={} halted={} iff1={}",
-                mode, self.cpu.halted, self.cpu.iff1
-            ));
+            log_evt!("ANY_KEY_CHECK: mode={} halted={} iff1={}",
+                self.bus.ports.keypad.mode(), self.cpu.halted, self.cpu.iff1);
             let key_state = self.bus.key_state().clone();
             let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
             if should_interrupt {
-                log_event("ANY_KEY_CHECK: raising keypad interrupt");
+                log_evt!("ANY_KEY_CHECK: raising keypad interrupt");
                 use crate::peripherals::interrupt::sources;
                 self.bus.ports.interrupt.raise(sources::KEYPAD);
             }
@@ -632,24 +655,18 @@ impl Emu {
         // Record in history
         self.history.record(pc, &opcode[..opcode_len]);
 
-        // Check for CPU speed change BEFORE advancing scheduler.
-        // When the bus converts its cycle counter (on speed change), we must also
-        // convert the scheduler's cpu_cycles to keep delta calculations correct.
+        // Advance scheduler with cycles used at current speed, then handle speed change
+        self.scheduler.advance(cycles_used as u64);
+
         let new_cpu_speed = self.bus.ports.control.cpu_speed();
         if new_cpu_speed != cpu_speed {
             let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
             let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
-            self.scheduler.convert_cpu_cycles(new_mhz, old_mhz);
+            self.scheduler.convert_cpu_events(new_mhz, old_mhz);
             self.scheduler.set_cpu_speed(new_cpu_speed);
         }
 
-        // Update total cycles from bus directly
-        // This handles CPU speed conversion automatically - when the bus cycle
-        // counter is converted (divided) on speed changes, total_cycles follows.
-        // Using bus.total_cycles() instead of accumulating ensures parity with CEmu's
-        // cpu.cycles which gets converted by sched_set_clock().
         self.total_cycles = self.bus.total_cycles();
-        self.scheduler.advance(self.total_cycles);
 
         // Process pending scheduler events
         self.process_scheduler_events();
@@ -677,11 +694,13 @@ impl Emu {
             self.last_stop = StopReason::Halted;
             let skip = self.scheduler.cycles_until_next_event();
             if skip > 0 {
+                // Cap to a reasonable amount for single-step mode
+                let skip = skip.min(10_000_000);
                 self.bus.add_cycles(skip);
                 self.total_cycles = self.bus.total_cycles();
-                self.scheduler.advance(self.total_cycles);
+                self.scheduler.advance(skip);
                 self.process_scheduler_events();
-                if self.bus.ports.tick(0) {
+                if self.bus.ports.tick(skip as u32) {
                     self.cpu.irq_pending = true;
                 }
             }
@@ -857,11 +876,11 @@ impl Emu {
             // If user's first key IS ENTER, just let it through (don't inject another ENTER)
             // Otherwise, inject ENTER before processing their key
             if row == 6 && col == 0 {
-                log_event("BOOT_INIT: first key is ENTER, using it to dismiss boot screen");
+                log_evt!("BOOT_INIT: first key is ENTER, using it to dismiss boot screen");
                 self.boot_init_done = true;
                 // Continue to process user's ENTER press below
             } else {
-                log_event("BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER");
+                log_evt!("BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER");
                 // Press ENTER (row 6, col 0) to dismiss boot screen
                 self.bus.set_key(6, 0, true);
                 self.cpu.any_key_wake = true;
@@ -870,7 +889,7 @@ impl Emu {
                 self.bus.set_key(6, 0, false);
                 self.run_cycles_internal(3_000_000);
                 self.boot_init_done = true;
-                log_event("BOOT_INIT: boot screen dismissed, processing user key");
+                log_evt!("BOOT_INIT: boot screen dismissed, processing user key");
                 // Continue to process the original key press below
             }
         }
@@ -916,7 +935,7 @@ impl Emu {
     pub fn press_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
-        Self::log_event("ON_KEY pressed");
+        log_evt!("ON_KEY pressed");
         // Power on the calculator
         self.powered_on = true;
         // Set the wake signal - this wakes CPU from HALT regardless of IFF1
@@ -939,7 +958,7 @@ impl Emu {
     pub fn release_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
-        Self::log_event("ON_KEY released");
+        log_evt!("ON_KEY released");
         // Clear ON key in keypad matrix
         self.bus.set_key(2, 0, false);
 
@@ -993,26 +1012,10 @@ impl Emu {
         }
     }
 
-    /// Append an emulator event to a log callback or emu.log (best-effort).
-    fn log_event(message: &str) {
-        let cb_ptr = LOG_CALLBACK.load(Ordering::SeqCst);
-        if !cb_ptr.is_null() {
-            if let Ok(cstr) = CString::new(message) {
-                let cb: extern "C" fn(*const c_char) = unsafe { std::mem::transmute(cb_ptr) };
-                cb(cstr.as_ptr());
-            }
-            return;
-        }
-
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("emu.log") {
-            let _ = writeln!(file, "{message}");
-        }
-    }
-
     // ========== State Persistence ==========
 
-    /// State format version (v2 adds flash persistence)
-    const STATE_VERSION: u32 = 2;
+    /// State format version (v3: CPU snapshot grew from 64→67 bytes for SPS/SPL split)
+    const STATE_VERSION: u32 = 4;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
@@ -1106,7 +1109,7 @@ impl Emu {
         buffer[pos..pos+FLASH_SIZE].copy_from_slice(flash_data);
         pos += FLASH_SIZE;
 
-        Self::log_event(&format!("STATE_SAVED: {} bytes", pos));
+        log_evt!("STATE_SAVED: {} bytes", pos);
         Ok(pos)
     }
 
@@ -1186,7 +1189,7 @@ impl Emu {
         self.history.clear();
         self.last_stop = StopReason::CyclesComplete;
 
-        Self::log_event("STATE_LOADED");
+        log_evt!("STATE_LOADED");
         Ok(())
     }
 
@@ -1313,14 +1316,14 @@ impl Emu {
         self.poke_byte(CE_KEY_EXTEND, (key & 0xFF) as u8);
         self.poke_byte(CE_GRAPH_FLAGS2, flags | CE_KEY_READY);
 
-        // Debug: verify write succeeded
-        let verify_key = self.peek_byte(CE_KBD_KEY);
-        let verify_extend = self.peek_byte(CE_KEY_EXTEND);
-        let verify_flags = self.peek_byte(CE_GRAPH_FLAGS2);
-        eprintln!(
-            "SEND_KEY: key=0x{:04X} wrote kbdKey=0x{:02X} keyExtend=0x{:02X} flags=0x{:02X}",
-            key, verify_key, verify_extend, verify_flags
-        );
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let verify_key = self.peek_byte(CE_KBD_KEY);
+            let verify_extend = self.peek_byte(CE_KEY_EXTEND);
+            let verify_flags = self.peek_byte(CE_GRAPH_FLAGS2);
+            log_evt!("SEND_KEY: key=0x{:04X} wrote kbdKey=0x{:02X} keyExtend=0x{:02X} flags=0x{:02X}",
+                key, verify_key, verify_extend, verify_flags);
+        }
         true
     }
 
@@ -1414,6 +1417,11 @@ impl Emu {
     /// Get IRQ pending flag
     pub fn irq_pending(&self) -> bool {
         self.cpu.irq_pending
+    }
+
+    /// Get NMI pending flag
+    pub fn nmi_pending(&self) -> bool {
+        self.cpu.nmi_pending
     }
 
     /// Get ON-key wake flag

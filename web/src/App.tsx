@@ -8,7 +8,7 @@ function App() {
   if (isSandbox) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', justifyContent: 'center', padding: '2rem' }}>
-        <Calculator useBundledRom={false} defaultBackend="rust" />
+        <Calculator useBundledRom={false} defaultBackend="rust" fullscreen />
       </div>
     );
   }

@@ -10,6 +10,10 @@ export class WasmEmu {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Get diagnostic info for debugging freezes.
+     */
+    debug_status(): string;
+    /**
      * Get framebuffer height.
      */
     framebuffer_height(): number;
@@ -97,6 +101,7 @@ export interface InitOutput {
     readonly emu_set_log_callback: (a: number) => void;
     readonly emu_backend_get_current: () => number;
     readonly __wbg_wasmemu_free: (a: number, b: number) => void;
+    readonly wasmemu_debug_status: (a: number) => [number, number];
     readonly wasmemu_framebuffer_height: (a: number) => number;
     readonly wasmemu_framebuffer_width: (a: number) => number;
     readonly wasmemu_get_backlight: (a: number) => number;

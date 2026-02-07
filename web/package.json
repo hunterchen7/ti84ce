@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "wasm": "cd ../core && wasm-pack build --target web --release && cd ../web && rm -rf src/emu-core && cp -r ../core/pkg src/emu-core",
+    "wasm": "wasm-pack build ../core --target web --release --out-dir ../web/src/emu-core",
     "cemu": "make -f cemu-emscripten.mk wasm && cp build-cemu/WebCEmu.js build-cemu/WebCEmu.wasm src/cemu-core/",
     "dev": "npm run wasm && npm run cemu && vite",
     "dev:calc": "npm run wasm && vite",

@@ -17,6 +17,22 @@ export class WasmEmu {
         wasm.__wbg_wasmemu_free(ptr, 0);
     }
     /**
+     * Get diagnostic info for debugging freezes.
+     * @returns {string}
+     */
+    debug_status() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmemu_debug_status(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Get framebuffer height.
      * @returns {number}
      */
@@ -165,8 +181,15 @@ function __wbg_get_imports() {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
         },
+        __wbg_log_8161e84ca5c180b5: function(arg0, arg1) {
+            console.log(getStringFromWasm0(arg0, arg1));
+        },
         __wbg_new_8a6f238a6ece86ea: function() {
             const ret = new Error();
+            return ret;
+        },
+        __wbg_now_2f3496ca767ee9ef: function() {
+            const ret = performance.now();
             return ret;
         },
         __wbg_stack_0ed75d68575b0f3c: function(arg0, arg1) {
@@ -175,6 +198,9 @@ function __wbg_get_imports() {
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+        },
+        __wbg_warn_69b069cf4bf37f1f: function(arg0, arg1) {
+            console.warn(getStringFromWasm0(arg0, arg1));
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;

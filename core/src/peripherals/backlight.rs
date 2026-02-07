@@ -38,7 +38,7 @@ impl Backlight {
                     let old = self.brightness;
                     self.brightness = 0;
                     if old != 0 {
-                        crate::emu::log_event("BACKLIGHT: brightness OFF (via control register)");
+                        crate::emu::log_evt!("BACKLIGHT: brightness OFF (via control register)");
                     }
                 }
             }
@@ -47,12 +47,12 @@ impl Backlight {
                 let old = self.brightness;
                 self.brightness = value;
                 if old != value {
-                    crate::emu::log_event(&format!(
+                    crate::emu::log_evt!(
                         "BACKLIGHT: brightness 0x{:02X} -> 0x{:02X} ({}%)",
                         old,
                         value,
                         (value as u32 * 100) / 255
-                    ));
+                    );
                 }
             }
             _ => {}
