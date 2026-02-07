@@ -4,7 +4,7 @@
  */
 
 const DB_NAME = "calc-emulator";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_ROMS = "roms";
 const STORE_STATES = "states";
 const STORE_PREFS = "preferences";
@@ -36,6 +36,7 @@ function openDatabase(): Promise<IDBDatabase> {
 
     request.onupgradeneeded = (event) => {
       const db = (event.target as IDBOpenDBRequest).result;
+      const oldVersion = event.oldVersion;
 
       // Store for cached ROM copies (keyed by hash)
       if (!db.objectStoreNames.contains(STORE_ROMS)) {
@@ -50,6 +51,13 @@ function openDatabase(): Promise<IDBDatabase> {
       // Store for preferences
       if (!db.objectStoreNames.contains(STORE_PREFS)) {
         db.createObjectStore(STORE_PREFS);
+      }
+
+      // v1 → v2: clear stale save states (emulator state format changed)
+      if (oldVersion < 2 && db.objectStoreNames.contains(STORE_STATES)) {
+        const tx = (event.target as IDBOpenDBRequest).transaction!;
+        tx.objectStore(STORE_STATES).clear();
+        console.log("[StateStorage] Cleared stale save states (DB upgrade v1→v2)");
       }
     };
   });
@@ -148,6 +156,22 @@ export class StateStorage {
       const transaction = this.db!.transaction([STORE_STATES], "readwrite");
       const store = transaction.objectStore(STORE_STATES);
       const request = store.delete(this.stateKey(romHash, backend));
+
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve();
+    });
+  }
+
+  /**
+   * Clear all saved states.
+   */
+  async clearAllStates(): Promise<void> {
+    if (!this.db) throw new Error("Storage not initialized");
+
+    return new Promise((resolve, reject) => {
+      const transaction = this.db!.transaction([STORE_STATES], "readwrite");
+      const store = transaction.objectStore(STORE_STATES);
+      const request = store.clear();
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve();

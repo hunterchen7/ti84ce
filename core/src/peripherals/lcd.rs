@@ -31,10 +31,11 @@ const CYCLES_PER_FRAME: u32 = 800_000;
 
 /// Register offsets matching CEmu lcd.c
 mod regs {
-    pub const TIMING0: u32 = 0x00;
-    pub const TIMING1: u32 = 0x04;
-    pub const TIMING2: u32 = 0x08;
-    pub const TIMING3: u32 = 0x0C;
+    // TODO: Used when LCD timing is implemented (Milestone 6C)
+    pub const _TIMING0: u32 = 0x00;
+    pub const _TIMING1: u32 = 0x04;
+    pub const _TIMING2: u32 = 0x08;
+    pub const _TIMING3: u32 = 0x0C;
     pub const UPBASE: u32 = 0x10;
     pub const LPBASE: u32 = 0x14;
     pub const CONTROL: u32 = 0x18;

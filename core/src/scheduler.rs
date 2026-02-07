@@ -130,13 +130,12 @@ pub struct Scheduler {
     items: [SchedItem; EventId::Count as usize],
     /// Current time in base ticks
     pub base_ticks: u64,
-    /// CPU cycles counter (for conversion)
-    cpu_cycles: u64,
-    /// Accumulated offset from SCHED_SECOND resets
-    /// The scheduler tracks: actual_cpu_cycles = cpu_cycles + base_cycles_offset
-    base_cycles_offset: u64,
     /// Current CPU speed setting
     cpu_speed: u8,
+    /// Cached base ticks per CPU cycle (avoids expensive division on every advance)
+    cached_cpu_base_ticks: u64,
+    /// Cached earliest event timestamp (avoids scanning all events on every call)
+    next_event_ticks: u64,
 }
 
 impl Scheduler {
@@ -153,10 +152,15 @@ impl Scheduler {
                 SchedItem::new(EventId::Lcd, ClockId::Panel),
             ],
             base_ticks: 0,
-            cpu_cycles: 0,
-            base_cycles_offset: 0,
             cpu_speed: 0, // Default 6 MHz
+            cached_cpu_base_ticks: ClockId::Cpu.base_ticks_per_tick(0),
+            next_event_ticks: u64::MAX,
         }
+    }
+
+    /// Access scheduled items for debugging
+    pub fn items(&self) -> &[SchedItem; EventId::Count as usize] {
+        &self.items
     }
 
     /// Reset the scheduler
@@ -165,14 +169,15 @@ impl Scheduler {
             item.timestamp = INACTIVE_FLAG;
         }
         self.base_ticks = 0;
-        self.cpu_cycles = 0;
-        self.base_cycles_offset = 0;
         self.cpu_speed = 0;
+        self.cached_cpu_base_ticks = ClockId::Cpu.base_ticks_per_tick(0);
+        self.next_event_ticks = u64::MAX;
     }
 
     /// Update CPU speed setting
     pub fn set_cpu_speed(&mut self, speed: u8) {
         self.cpu_speed = speed;
+        self.cached_cpu_base_ticks = ClockId::Cpu.base_ticks_per_tick(speed);
     }
 
     /// Get current CPU speed
@@ -180,29 +185,31 @@ impl Scheduler {
         self.cpu_speed
     }
 
-    /// Convert the internal cpu_cycles counter and all CPU-clocked events
-    /// when CPU speed changes.
+    /// Recalculate the earliest event timestamp cache
+    fn recalc_next_event(&mut self) {
+        self.next_event_ticks = u64::MAX;
+        for item in &self.items {
+            if item.is_active() {
+                let ts = item.timestamp & !INACTIVE_FLAG;
+                if ts < self.next_event_ticks {
+                    self.next_event_ticks = ts;
+                }
+            }
+        }
+    }
+
+    /// Check if any events are pending without scanning (fast path)
+    #[inline(always)]
+    pub fn has_pending_events(&self) -> bool {
+        self.next_event_ticks <= self.base_ticks
+    }
+
+    /// Convert all CPU-clocked event timestamps when CPU speed changes.
     ///
-    /// CEmu's sched_set_clock() converts: new_cycles = old_cycles * new_rate / old_rate
-    /// and recalculates timestamps for all events on the changed clock.
-    pub fn convert_cpu_cycles(&mut self, new_rate_mhz: u32, old_rate_mhz: u32) {
+    /// CEmu's sched_set_clock() recalculates timestamps for all events on the changed clock.
+    pub fn convert_cpu_events(&mut self, new_rate_mhz: u32, old_rate_mhz: u32) {
         if old_rate_mhz == 0 || new_rate_mhz == old_rate_mhz {
             return;
-        }
-
-        // Convert internal cpu_cycles counter
-        let old_cycles = self.cpu_cycles;
-        self.cpu_cycles = old_cycles * new_rate_mhz as u64 / old_rate_mhz as u64;
-
-        // Adjust base_cycles_offset to account for the conversion
-        // The bus's actual total_cycles doesn't change, so:
-        // old: adjusted = bus_total - old_offset, where adjusted = old_cycles
-        // new: adjusted = bus_total - new_offset, where adjusted = new_cycles
-        // => new_offset = old_offset + (old_cycles - new_cycles)
-        if old_cycles >= self.cpu_cycles {
-            self.base_cycles_offset += old_cycles - self.cpu_cycles;
-        } else {
-            self.base_cycles_offset -= self.cpu_cycles - old_cycles;
         }
 
         // Convert all active events on CLOCK_CPU to new timestamps
@@ -219,30 +226,13 @@ impl Scheduler {
                 }
             }
         }
+        self.recalc_next_event();
     }
 
-    /// Convert CPU cycles to base ticks
-    fn cpu_cycles_to_base_ticks(&self, cycles: u64) -> u64 {
-        // base_ticks = cycles * (SCHED_BASE_CLOCK_RATE / cpu_rate)
-        cycles * ClockId::Cpu.base_ticks_per_tick(self.cpu_speed)
-    }
-
-    /// Convert base ticks to CPU cycles
-    #[allow(dead_code)]
-    fn base_ticks_to_cpu_cycles(&self, ticks: u64) -> u64 {
-        // cycles = ticks / (SCHED_BASE_CLOCK_RATE / cpu_rate)
-        ticks / ClockId::Cpu.base_ticks_per_tick(self.cpu_speed)
-    }
-
-    /// Advance time based on CPU cycles executed
-    /// cpu_cycles is the bus's total cycle counter (monotonically increasing)
-    pub fn advance(&mut self, cpu_cycles: u64) {
-        // Adjust for SCHED_SECOND resets: the scheduler's internal cpu_cycles
-        // is offset from the bus's counter
-        let adjusted = cpu_cycles - self.base_cycles_offset;
-        let delta_cycles = adjusted.saturating_sub(self.cpu_cycles);
-        self.cpu_cycles = adjusted;
-        self.base_ticks += self.cpu_cycles_to_base_ticks(delta_cycles);
+    /// Advance time by the given number of CPU cycles (delta, not absolute)
+    #[inline(always)]
+    pub fn advance(&mut self, delta_cpu_cycles: u64) {
+        self.base_ticks += delta_cpu_cycles * self.cached_cpu_base_ticks;
 
         // SCHED_SECOND: prevent overflow by subtracting one second's worth of
         // base ticks from all timestamps every second (matches CEmu schedule.c:393-410)
@@ -263,17 +253,18 @@ impl Scheduler {
             }
         }
 
-        // Subtract cpu_clock_rate from cpu_cycles and accumulate in offset
-        let cpu_clock_rate = ClockId::Cpu.rate(self.cpu_speed);
-        self.cpu_cycles = self.cpu_cycles.saturating_sub(cpu_clock_rate);
-        self.base_cycles_offset += cpu_clock_rate;
+        self.recalc_next_event();
     }
 
     /// Schedule an event to fire after `ticks` clock ticks
     pub fn set(&mut self, event: EventId, ticks: u64) {
         let item = &mut self.items[event as usize];
         let base_ticks_per_tick = item.clock.base_ticks_per_tick(self.cpu_speed);
-        item.timestamp = self.base_ticks + ticks * base_ticks_per_tick;
+        let ts = self.base_ticks + ticks * base_ticks_per_tick;
+        item.timestamp = ts;
+        if ts < self.next_event_ticks {
+            self.next_event_ticks = ts;
+        }
     }
 
     /// Repeat an event (reschedule after current timestamp)
@@ -282,12 +273,17 @@ impl Scheduler {
         let base_ticks_per_tick = item.clock.base_ticks_per_tick(self.cpu_speed);
         // Schedule relative to current timestamp, not current time
         let current = item.timestamp & !INACTIVE_FLAG;
-        item.timestamp = current + ticks * base_ticks_per_tick;
+        let ts = current + ticks * base_ticks_per_tick;
+        item.timestamp = ts;
+        if ts < self.next_event_ticks {
+            self.next_event_ticks = ts;
+        }
     }
 
     /// Clear/deactivate an event
     pub fn clear(&mut self, event: EventId) {
         self.items[event as usize].deactivate();
+        self.recalc_next_event();
     }
 
     /// Check if an event is active
@@ -319,7 +315,12 @@ impl Scheduler {
 
     /// Get the next event that needs processing (if any)
     /// Returns the event ID of the earliest pending event
-    pub fn next_pending_event(&self) -> Option<EventId> {
+    pub fn next_pending_event(&mut self) -> Option<EventId> {
+        // Fast path: no events can be ready if earliest is in the future
+        if self.next_event_ticks > self.base_ticks {
+            return None;
+        }
+
         let mut earliest: Option<(EventId, u64)> = None;
 
         for (idx, item) in self.items.iter().enumerate() {
@@ -337,6 +338,8 @@ impl Scheduler {
             }
         }
 
+        // If we found an event, recalculate next_event_ticks after it's handled
+        // (caller will clear/repeat the event, which updates the cache)
         earliest.map(|(event, _)| event)
     }
 
@@ -378,9 +381,8 @@ impl Scheduler {
         match earliest_timestamp {
             Some(ts) if ts > self.base_ticks => {
                 let base_ticks_remaining = ts - self.base_ticks;
-                let base_ticks_per_cpu_cycle = ClockId::Cpu.base_ticks_per_tick(self.cpu_speed);
                 // Ceiling division to ensure we reach the event
-                (base_ticks_remaining + base_ticks_per_cpu_cycle - 1) / base_ticks_per_cpu_cycle
+                (base_ticks_remaining + self.cached_cpu_base_ticks - 1) / self.cached_cpu_base_ticks
             }
             _ => 0, // Event already fired or no active events
         }
@@ -416,8 +418,8 @@ impl Scheduler {
 
 impl Scheduler {
     /// Size of scheduler state snapshot in bytes
-    /// 8 (base_ticks) + 8 (cpu_cycles) + 8 (base_cycles_offset) + 1 (cpu_speed) + 7*8 (item timestamps) = 81 bytes, round to 88
-    pub const SNAPSHOT_SIZE: usize = 88;
+    /// 8 (base_ticks) + 1 (cpu_speed) + 7*8 (item timestamps) = 65 bytes, round to 72
+    pub const SNAPSHOT_SIZE: usize = 72;
 
     /// Save scheduler state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -426,8 +428,6 @@ impl Scheduler {
 
         // Base timing state
         buf[pos..pos+8].copy_from_slice(&self.base_ticks.to_le_bytes()); pos += 8;
-        buf[pos..pos+8].copy_from_slice(&self.cpu_cycles.to_le_bytes()); pos += 8;
-        buf[pos..pos+8].copy_from_slice(&self.base_cycles_offset.to_le_bytes()); pos += 8;
         buf[pos] = self.cpu_speed; pos += 1;
 
         // Event timestamps (7 events × 8 bytes each)
@@ -448,9 +448,8 @@ impl Scheduler {
         let mut pos = 0;
 
         self.base_ticks = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
-        self.cpu_cycles = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
-        self.base_cycles_offset = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
         self.cpu_speed = buf[pos]; pos += 1;
+        self.cached_cpu_base_ticks = ClockId::Cpu.base_ticks_per_tick(self.cpu_speed);
 
         // Event timestamps
         for item in &mut self.items {
@@ -458,6 +457,7 @@ impl Scheduler {
             pos += 8;
         }
 
+        self.recalc_next_event();
         Ok(())
     }
 }

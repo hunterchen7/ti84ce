@@ -224,18 +224,10 @@ impl KeypadController {
             self.int_status |= status::ANY_KEY;
         }
 
-        // Log scan completion with results
-        static mut FINISH_COUNT: u32 = 0;
-        unsafe {
-            FINISH_COUNT += 1;
-            if FINISH_COUNT % 1000 == 1 || self.any_key_in_scan {
-                crate::emu::log_event(&format!(
-                    "KEYPAD_SCAN_DONE: mode={} any_key={} data_changed={} data={:?}",
-                    self.mode(), self.any_key_in_scan, self.data_changed_in_scan,
-                    self.current_scan_data.iter().take(8).collect::<Vec<_>>()
-                ));
-            }
-        }
+        crate::emu::log_evt!(
+            "KEYPAD_SCAN_DONE: mode={} any_key={} data_changed={}",
+            self.mode(), self.any_key_in_scan, self.data_changed_in_scan
+        );
 
         // Save current scan data as previous for next comparison
         self.prev_scan_data = self.current_scan_data;
@@ -260,14 +252,8 @@ impl KeypadController {
             return false;
         }
 
-        // Log scan activity (only occasionally to avoid spam)
-        static mut SCAN_LOG_COUNT: u32 = 0;
-        unsafe {
-            SCAN_LOG_COUNT += 1;
-            if SCAN_LOG_COUNT % 100000 == 1 {
-                crate::emu::log_event(&format!("KEYPAD_SCAN: active, mode={}, row={}", self.mode(), self.scan_row));
-            }
-        }
+        // Scan activity logging (no-op in WASM)
+        crate::emu::log_evt!("KEYPAD_SCAN: active, mode={}, row={}", self.mode(), self.scan_row);
 
         let mut cycles_left = cycles;
         let mut interrupt_pending = false;
@@ -291,11 +277,7 @@ impl KeypadController {
                     // Any key pressed = non-zero (active high)
                     if row_data != 0 {
                         self.any_key_in_scan = true;
-                        // Log when we detect a key during scan
-                        crate::emu::log_event(&format!(
-                            "KEYPAD_SCAN_KEY: row={} data=0x{:04X}",
-                            self.scan_row, row_data
-                        ));
+                        crate::emu::log_evt!("KEYPAD_SCAN_KEY: row={} data=0x{:04X}", self.scan_row, row_data);
                     }
 
                     // Check if data changed from previous scan
@@ -402,7 +384,7 @@ impl KeypadController {
     /// Read a register byte
     /// addr is offset from controller base (0-0x3F)
     /// key_state is the current keyboard matrix state
-    pub fn read(&mut self, addr: u32, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
+    pub fn read(&mut self, addr: u32, _key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
         match addr {
             regs::CONTROL => {
                 self.control
@@ -431,34 +413,6 @@ impl KeypadController {
                 if row < KEYPAD_ROWS {
                     // Read from stored data (populated by any_key_check or scan events)
                     let row_data = self.current_scan_data[row];
-
-                    // Log data reads - log all reads when any key is pressed
-                    static mut READ_LOG_COUNT: u32 = 0;
-                    static mut LAST_KEY_STATE_HASH: u64 = 0;
-                    #[allow(static_mut_refs)]
-                    unsafe {
-                        READ_LOG_COUNT += 1;
-                        // Hash of key state to detect changes
-                        let key_hash: u64 = key_state.iter()
-                            .enumerate()
-                            .flat_map(|(r, row)| row.iter().enumerate().map(move |(c, &v)| {
-                                if v { ((r as u64) << 8) | c as u64 } else { 0 }
-                            }))
-                            .fold(0, |acc, x| acc.wrapping_add(x));
-
-                        if row_data != 0 || (key_hash != 0 && key_hash != LAST_KEY_STATE_HASH) {
-                            LAST_KEY_STATE_HASH = key_hash;
-                            eprintln!(
-                                "KEYPAD_READ: row={} data=0x{:04X} mode={} key_state={:?} count={}",
-                                row, row_data, self.mode(),
-                                key_state[row].iter().enumerate()
-                                    .filter(|(_, &v)| v)
-                                    .map(|(i, _)| i)
-                                    .collect::<Vec<_>>(),
-                                READ_LOG_COUNT
-                            );
-                        }
-                    }
 
                     if byte == 0 {
                         row_data as u8
@@ -540,7 +494,7 @@ impl KeypadController {
 
                 // Log mode changes only
                 if old_mode != new_mode {
-                    crate::emu::log_event(&format!("KEYPAD_MODE: changed {} -> {}", old_mode, new_mode));
+                    crate::emu::log_evt!("KEYPAD_MODE: changed {} -> {}", old_mode, new_mode);
                 }
 
                 // CEmu: if (mode & 2) start scanning, else call any_key_check
@@ -636,16 +590,9 @@ impl KeypadController {
         let data_mask: u16 = (1 << col_limit) - 1;
         any &= data_mask;
 
-        // Debug: log any_key_check results
-        static mut ANY_KEY_CHECK_COUNT: u32 = 0;
-        unsafe {
-            ANY_KEY_CHECK_COUNT += 1;
-            if any != 0 || ANY_KEY_CHECK_COUNT % 10000 == 1 {
-                eprintln!(
-                    "ANY_KEY_CHECK #{}: any=0x{:04X} mask=0x{:04X} int_status=0x{:02X}",
-                    ANY_KEY_CHECK_COUNT, any, self.mask, self.int_status
-                );
-            }
+        if any != 0 {
+            crate::emu::log_evt!("ANY_KEY_CHECK: any=0x{:04X} mask=0x{:04X} int_status=0x{:02X}",
+                any, self.mask, self.int_status);
         }
 
         // CEmu: Store combined 'any' in ALL rows that are in the mask

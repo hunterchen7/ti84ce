@@ -19,6 +19,7 @@ export const emu_set_key: (a: number, b: number, c: number, d: number) => void;
 export const emu_set_log_callback: (a: number) => void;
 export const emu_backend_get_current: () => number;
 export const __wbg_wasmemu_free: (a: number, b: number) => void;
+export const wasmemu_debug_status: (a: number) => [number, number];
 export const wasmemu_framebuffer_height: (a: number) => number;
 export const wasmemu_framebuffer_width: (a: number) => number;
 export const wasmemu_get_backlight: (a: number) => number;

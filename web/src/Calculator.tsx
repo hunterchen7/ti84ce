@@ -208,10 +208,18 @@ export function Calculator({
           const result = await backend.loadRom(romDataRef.current);
           if (result === 0) {
             // Try to load saved state (namespaced by backend)
-            const savedState = await storage.loadState(romHash, backendType);
-            if (savedState && backend.loadState(savedState)) {
-              console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
-            } else {
+            let restored = false;
+            try {
+              const savedState = await storage.loadState(romHash, backendType);
+              if (savedState && backend.loadState(savedState)) {
+                console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
+                restored = true;
+              }
+            } catch (e) {
+              console.warn('[State] Failed to restore state, clearing stale data:', e);
+              await storage.deleteState(romHash, backendType).catch(() => {});
+            }
+            if (!restored) {
               backend.powerOn();
             }
             setRomLoaded(true);
@@ -234,10 +242,18 @@ export function Calculator({
               const result = await backend.loadRom(bundledData);
               if (result === 0) {
                 // Try to load saved state (namespaced by backend)
-                const savedState = await storage.loadState(romHash, backendType);
-                if (savedState && backend.loadState(savedState)) {
-                  console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
-                } else {
+                let restored = false;
+                try {
+                  const savedState = await storage.loadState(romHash, backendType);
+                  if (savedState && backend.loadState(savedState)) {
+                    console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
+                    restored = true;
+                  }
+                } catch (e) {
+                  console.warn('[State] Failed to restore state, clearing stale data:', e);
+                  await storage.deleteState(romHash, backendType).catch(() => {});
+                }
+                if (!restored) {
                   backend.powerOn();
                 }
                 setRomLoaded(true);
@@ -308,25 +324,31 @@ export function Calculator({
     try {
       const buffer = await file.arrayBuffer();
       const data = new Uint8Array(buffer);
+      console.log(`[ROM] File read: ${data.length} bytes`);
       romDataRef.current = data; // Store for backend switching
 
       // Compute ROM hash for state persistence
       const romHash = await storage.getRomHash(data);
       romHashRef.current = romHash;
+      console.log(`[ROM] Hash: ${romHash}`);
 
-      const result = await backend.loadRom(data);
+      // Clear all saved states to avoid stale format mismatches
+      await storage.clearAllStates().catch(() => {});
+
+      // Create a fresh backend instance to avoid poisoned WASM state
+      console.log('[ROM] Creating fresh backend...');
+      backend.destroy();
+      const freshBackend = createBackend(backendTypeRef.current);
+      await freshBackend.init();
+      backendRef.current = freshBackend;
+      console.log('[ROM] Fresh backend ready, calling loadRom...');
+
+      const result = await freshBackend.loadRom(data);
+      console.log(`[ROM] loadRom returned: ${result}`);
 
       if (result === 0) {
-        console.log("ROM loaded successfully");
-
-        // Try to load saved state (namespaced by backend)
-        const savedState = await storage.loadState(romHash, backendTypeRef.current);
-        if (savedState && backend.loadState(savedState)) {
-          console.log('[State] Restored state for ROM:', romHash, 'backend:', backendTypeRef.current);
-        } else {
-          console.log("No saved state, calling power_on...");
-          backend.powerOn();
-        }
+        console.log("ROM loaded successfully, calling powerOn...");
+        freshBackend.powerOn();
 
         setRomLoaded(true);
         setIsRunning(true); // Auto-start
@@ -335,6 +357,10 @@ export function Calculator({
         setError(`Failed to load ROM: error code ${result}`);
       }
     } catch (err) {
+      console.error('[ROM] Error during load:', err);
+      if (err instanceof Error) {
+        console.error('[ROM] Stack:', err.stack);
+      }
       setError(`Failed to read ROM file: ${err}`);
     }
   }, []);
@@ -376,6 +402,8 @@ export function Calculator({
     if (!isRunning || !romLoaded || !backendRef.current) return;
 
     let accumulator = 0;
+    let slowFrameCount = 0;
+    let totalFrames = 0;
 
     const loop = () => {
       const backend = backendRef.current;
@@ -387,7 +415,31 @@ export function Calculator({
         // Use accumulator for fractional speeds
         accumulator += speedRef.current / 2;
         while (accumulator >= 1) {
+          const t0 = performance.now();
           backend.runFrame();
+          const elapsed = performance.now() - t0;
+          totalFrames++;
+
+          // Detect slow frames (>100ms means we're blocking the UI thread)
+          if (elapsed > 100) {
+            slowFrameCount++;
+            const emu = (backend as any).emu;
+            const status = emu?.debug_status?.() ?? 'N/A';
+            console.warn(
+              `[EMU] Slow frame #${slowFrameCount}: ${elapsed.toFixed(0)}ms (frame ${totalFrames}) status: ${status}`
+            );
+            // If too many consecutive slow frames, something is wrong
+            if (slowFrameCount >= 5) {
+              console.error(
+                `[EMU] ${slowFrameCount} slow frames detected — possible infinite loop. Stopping.`
+              );
+              // Don't schedule next frame to prevent complete freeze
+              return;
+            }
+          } else {
+            slowFrameCount = 0; // Reset on good frame
+          }
+
           accumulator -= 1;
         }
 

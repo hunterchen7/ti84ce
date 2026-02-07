@@ -259,44 +259,18 @@ impl Peripherals {
             a if a >= KEYPAD_BASE && a < KEYPAD_END => {
                 let offset = a - KEYPAD_BASE;
 
-                // DIAGNOSTIC: Unconditional log to see if writes go through here
-                static mut WRITE_COUNT: u32 = 0;
-                #[allow(static_mut_refs)]
-                unsafe {
-                    WRITE_COUNT += 1;
-                    if WRITE_COUNT % 10000 == 1 {
-                        crate::emu::log_event(&format!(
-                            "PERIPHERALS_KEYPAD_WRITE: offset=0x{:02X} value=0x{:02X} count={}",
-                            offset, value, WRITE_COUNT
-                        ));
-                    }
-                }
-
                 let flag_before = self.keypad.needs_any_key_check;
                 self.keypad.write(offset, value);
                 let flag_after = self.keypad.needs_any_key_check;
 
-                // Debug: log flag state changes
                 if flag_after && !flag_before {
-                    crate::emu::log_event(&format!(
-                        "KEYPAD: offset=0x{:02X} set needs_any_key_check flag",
-                        offset
-                    ));
+                    crate::emu::log_evt!("KEYPAD: offset=0x{:02X} set needs_any_key_check flag", offset);
                 }
 
                 // CEmu calls keypad_any_check() after certain writes (STATUS, SIZE, CONTROL mode 0/1)
                 // This updates data registers with current key state
                 if self.keypad.needs_any_key_check {
                     self.keypad.needs_any_key_check = false;
-
-                    // Log which register triggered the check
-                    let reg_name = match offset {
-                        0x00 => "CONTROL",
-                        0x04..=0x07 => "SIZE",
-                        0x08 => "INT_STATUS",
-                        _ => "OTHER",
-                    };
-                    crate::emu::log_event(&format!("KEYPAD: {} write triggered any_key_check", reg_name));
 
                     let should_interrupt = self.keypad.any_key_check(&self.key_state);
 

@@ -243,13 +243,13 @@ impl ControlPorts {
                 self.power = value & 0x93;
                 // Log power register changes to detect APO (Auto Power Off)
                 if old != self.power {
-                    crate::emu::log_event(&format!(
+                    crate::emu::log_evt!(
                         "POWER register: 0x{:02X} -> 0x{:02X} (bit0={} bit1={} bit7={})",
                         old, self.power,
                         self.power & 1,
                         (self.power >> 1) & 1,
                         (self.power >> 7) & 1
-                    ));
+                    );
                 }
                 // Battery FSM transitions would go here if implemented
                 // For now we skip the FSM to ensure boot completes
@@ -305,12 +305,11 @@ impl ControlPorts {
                 self.lcd_enable = (value & 0x0F) << 4 | (value & 0x0F);
                 // Log LCD enable/disable (bit 3 controls LCD on/off)
                 if old != self.lcd_enable {
-                    let lcd_enabled = (self.lcd_enable & (1 << 3)) != 0;
-                    crate::emu::log_event(&format!(
+                    crate::emu::log_evt!(
                         "LCD_ENABLE: 0x{:02X} -> 0x{:02X} (LCD {})",
                         old, self.lcd_enable,
-                        if lcd_enabled { "ON" } else { "OFF" }
-                    ));
+                        if (self.lcd_enable & (1 << 3)) != 0 { "ON" } else { "OFF" }
+                    );
                 }
             }
             regs::USB_CONTROL => {

@@ -321,13 +321,6 @@ impl Ram {
         }
     }
 
-    /// Ensure RAM is allocated
-    fn ensure_allocated(&mut self) {
-        if self.data.is_empty() {
-            self.data = vec![0x00; addr::RAM_SIZE];
-        }
-    }
-
     /// Read a byte from RAM
     ///
     /// # Arguments

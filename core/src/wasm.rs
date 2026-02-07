@@ -5,6 +5,22 @@
 use wasm_bindgen::prelude::*;
 use crate::emu::Emu;
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    fn warn(s: &str);
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+    #[wasm_bindgen(js_namespace = performance)]
+    fn now() -> f64;
+}
+
+macro_rules! console_warn {
+    ($($arg:tt)*) => {
+        warn(&format!($($arg)*))
+    };
+}
+
 /// WASM-friendly wrapper around the emulator.
 /// Unlike the C FFI, this owns the emulator directly without mutex
 /// since WASM is single-threaded.
@@ -31,15 +47,23 @@ impl WasmEmu {
     /// Does NOT auto power-on - call power_on() separately.
     #[wasm_bindgen]
     pub fn load_rom(&mut self, data: &[u8]) -> i32 {
+        log(&format!("[WASM] load_rom: {} bytes", data.len()));
         match self.inner.load_rom(data) {
-            Ok(()) => 0,
-            Err(code) => code,
+            Ok(()) => {
+                log("[WASM] load_rom: success");
+                0
+            }
+            Err(code) => {
+                warn(&format!("[WASM] load_rom: error {}", code));
+                code
+            }
         }
     }
 
     /// Power on the emulator (simulates ON key press).
     #[wasm_bindgen]
     pub fn power_on(&mut self) {
+        log("[WASM] power_on");
         self.inner.power_on();
     }
 
@@ -56,9 +80,47 @@ impl WasmEmu {
         if cycles <= 0 {
             return 0;
         }
+        let t0 = now();
         let executed = self.inner.run_cycles(cycles as u32) as i32;
+        let t1 = now();
         self.inner.render_frame();
+        let t2 = now();
+
+        let emu_ms = t1 - t0;
+        let render_ms = t2 - t1;
+
+        // Warn if frame takes too long (>50ms means we're eating into frame budget)
+        if emu_ms > 50.0 || render_ms > 50.0 {
+            console_warn!(
+                "[EMU] Slow: emu={:.1}ms render={:.1}ms req={} exec={} halted={} pc={:06X} cycles={}",
+                emu_ms, render_ms, cycles, executed, self.inner.is_halted(), self.inner.pc(), self.inner.total_cycles()
+            );
+        }
+
+        // Diagnostic: warn if executed cycles diverge wildly from requested
+        if executed > cycles * 2 || executed < 0 {
+            console_warn!(
+                "[EMU] run_cycles anomaly: requested={} executed={} halted={} pc={:06X} total_cycles={}",
+                cycles, executed, self.inner.is_halted(), self.inner.pc(), self.inner.total_cycles()
+            );
+        }
+
         executed
+    }
+
+    /// Get diagnostic info for debugging freezes.
+    #[wasm_bindgen]
+    pub fn debug_status(&self) -> String {
+        format!(
+            "pc={:06X} halted={} total_cycles={} stop={:?} iff1={} irq={} nmi={}",
+            self.inner.pc(),
+            self.inner.is_halted(),
+            self.inner.total_cycles(),
+            self.inner.last_stop_reason(),
+            self.inner.iff1(),
+            self.inner.irq_pending(),
+            self.inner.nmi_pending(),
+        )
     }
 
     /// Get framebuffer width.
