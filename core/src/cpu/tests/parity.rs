@@ -34,16 +34,6 @@ use super::*;
 // Test Helpers
 // ============================================================================
 
-/// Test case for ALU operations with expected flag results
-struct AluTestCase {
-    a: u8,
-    operand: u8,
-    carry_in: bool,
-    expected_result: u8,
-    expected_flags: u8,
-    description: &'static str,
-}
-
 /// Verify flags match expected value with detailed error output
 fn assert_flags_exact(cpu: &Cpu, expected: u8, context: &str) {
     let actual = cpu.f;
@@ -887,14 +877,7 @@ fn test_bit_instruction_flags() {
             // PV = same as Z (undocumented but consistent)
             // N = 0
             // C = unchanged
-            let mut expected_flags = flags::H | flags::C; // H=1, C preserved
-            if z { expected_flags |= flags::Z | flags::PV; }
-            if bit == 7 && tested_bit != 0 { expected_flags |= flags::S; }
-
-            // Note: F3/F5 behavior for BIT is complex and implementation-defined
-            // CEmu behavior may differ from standard Z80 documentation
-
-            // For now, just verify the critical flags
+            // Verify the critical flags (F3/F5 behavior for BIT is implementation-defined)
             assert_eq!(cpu.flag_z(), z, "BIT {},{:#04x}: Z flag mismatch", bit, val);
             assert!(cpu.flag_h(), "BIT {},{:#04x}: H should be set", bit, val);
             assert!(!cpu.flag_n(), "BIT {},{:#04x}: N should be clear", bit, val);

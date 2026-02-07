@@ -360,7 +360,6 @@ mod tests {
     #[test]
     fn test_thread_safety() {
         use std::thread;
-        use std::sync::Arc;
 
         let emu = emu_create();
 
