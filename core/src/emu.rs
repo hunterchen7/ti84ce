@@ -1345,6 +1345,11 @@ impl Emu {
             log_evt!("WAKE: device off, clearing off + pulsing WAKE");
             self.bus.ports.control.wake();
             self.bus.ports.interrupt.pulse(sources::WAKE);
+            // Disable APD on every wake — if the OS put the device to sleep via APD,
+            // the APD timer is still expired. Without clearing apdAble, the OS will
+            // immediately re-sleep after the WAKE ISR runs, causing the screen to
+            // flash briefly and become unresponsive.
+            self.disable_apd();
         }
 
         // Ensure CPU sees a pending interrupt even if interrupts are disabled.
