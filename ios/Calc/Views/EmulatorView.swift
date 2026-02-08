@@ -18,7 +18,7 @@ struct EmulatorView: View {
     @State private var calculatorScale: CGFloat = 1.0
     @State private var calculatorYOffset: CGFloat = 0
 
-    private let sidebarWidth: CGFloat = 280
+    private let sidebarWidth: CGFloat = 170
     private let edgeSwipeWidth: CGFloat = 30
 
     /// Combined calculator body aspect ratio (bezel + keypad as one image)
@@ -288,7 +288,7 @@ struct EmulatorView: View {
                 }
             }
             .frame(width: sidebarWidth)
-            .background(Color(red: 0.102, green: 0.102, blue: 0.180)) // #1A1A2E
+            .background(Color(red: 0.102, green: 0.102, blue: 0.180).opacity(0.7)) // #1A1A2E @ 70%
             .offset(x: effectiveOffset - sidebarWidth)
             .gesture(
                 DragGesture(minimumDistance: 10)

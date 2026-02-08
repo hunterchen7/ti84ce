@@ -634,7 +634,8 @@ fun EmulatorView(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
-                drawerContainerColor = Color(0xFF1A1A2E)
+                drawerContainerColor = Color(0xFF1A1A2E).copy(alpha = 0.7f),
+                modifier = Modifier.fillMaxWidth(0.6f)
             ) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Text(
