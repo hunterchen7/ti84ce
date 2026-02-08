@@ -522,6 +522,44 @@ impl LcdController {
         ticks.max(base_ticks)
     }
 
+    /// Fast-forward LCD DMA state by `count` events worth of pixel/UPCURR advancement.
+    /// Used to skip bulk catch-up events in O(1) instead of processing each one individually.
+    /// This only advances the pixel/scanline counters and UPCURR — DMA timestamp
+    /// accounting is handled by the caller.
+    pub fn fast_forward_dma_events(&mut self, count: u64) {
+        if self.prefill || count == 0 || self.cpl == 0 {
+            return;
+        }
+
+        let fill_bytes: u32 = if self.wtrmrk != 0 { 64 } else { 32 };
+        let words: u32 = if self.wtrmrk != 0 { 16 } else { 8 };
+        let pixels_per_event = words << (5 - self.bpp);
+
+        // Calculate how many events until frame complete
+        let remaining_pixels = if self.cur_row < self.lpp {
+            (self.lpp - self.cur_row) as u64 * self.cpl as u64
+                - self.cur_col.min(self.cpl) as u64
+        } else {
+            0
+        };
+        let events_to_end = if pixels_per_event > 0 && remaining_pixels > 0 {
+            (remaining_pixels + pixels_per_event as u64 - 1) / pixels_per_event as u64
+        } else {
+            0
+        };
+
+        let actual = count.min(events_to_end);
+        if actual == 0 {
+            return;
+        }
+
+        let total_pixels = actual * pixels_per_event as u64;
+        let new_abs = self.cur_col as u64 + total_pixels;
+        self.cur_col = (new_abs % self.cpl as u64) as u32;
+        self.cur_row += (new_abs / self.cpl as u64) as u32;
+        self.upcurr = self.upcurr.wrapping_add(actual as u32 * fill_bytes);
+    }
+
     /// Read a register byte
     /// addr is offset from controller base (0x000-0xFFF)
     pub fn read(&self, addr: u32) -> u8 {
@@ -665,6 +703,67 @@ impl LcdController {
             3 => LcdCompare::BackPorch,
             _ => LcdCompare::ActiveVideo,
         };
+    }
+
+    /// Set timing registers directly (for state restore)
+    pub fn set_timing(&mut self, timing: [u32; 4]) {
+        self.timing = timing;
+    }
+
+    /// Set UPCURR directly (for state restore)
+    pub fn set_upcurr(&mut self, value: u32) {
+        self.upcurr = value;
+    }
+
+    /// Get current DMA row
+    pub fn cur_row(&self) -> u32 {
+        self.cur_row
+    }
+
+    /// Set current DMA row (for state restore)
+    pub fn set_cur_row(&mut self, value: u32) {
+        self.cur_row = value;
+    }
+
+    /// Get current DMA column
+    pub fn cur_col(&self) -> u32 {
+        self.cur_col
+    }
+
+    /// Set current DMA column (for state restore)
+    pub fn set_cur_col(&mut self, value: u32) {
+        self.cur_col = value;
+    }
+
+    /// Get prefill flag
+    pub fn prefill(&self) -> bool {
+        self.prefill
+    }
+
+    /// Set prefill flag (for state restore)
+    pub fn set_prefill(&mut self, value: bool) {
+        self.prefill = value;
+    }
+
+    /// Get FIFO position
+    pub fn pos(&self) -> u8 {
+        self.pos
+    }
+
+    /// Set FIFO position (for state restore)
+    pub fn set_pos(&mut self, value: u8) {
+        self.pos = value;
+    }
+
+    /// Get UPCURR value
+    pub fn upcurr(&self) -> u32 {
+        self.upcurr
+    }
+
+    /// Re-derive timing parameters from timing registers.
+    /// Must be called after restoring timing registers from a state snapshot.
+    pub fn recompute_timing(&mut self) {
+        self.extract_timing();
     }
 }
 

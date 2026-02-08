@@ -25,6 +25,7 @@ typedef void (*destroy_fn)(Emu*);
 typedef void (*set_log_callback_fn)(emu_log_cb_t);
 typedef int (*load_rom_fn)(Emu*, const uint8_t*, size_t);
 typedef void (*reset_fn)(Emu*);
+typedef void (*power_on_fn)(Emu*);
 typedef int (*run_cycles_fn)(Emu*, int);
 typedef const uint32_t* (*framebuffer_fn)(const Emu*, int*, int*);
 typedef void (*set_key_fn)(Emu*, int, int, int);
@@ -42,6 +43,7 @@ typedef struct {
     set_log_callback_fn set_log_callback;
     load_rom_fn load_rom;
     reset_fn reset;
+    power_on_fn power_on;
     run_cycles_fn run_cycles;
     framebuffer_fn framebuffer;
     set_key_fn set_key;
@@ -59,6 +61,7 @@ extern void rust_emu_destroy(Emu*);
 extern void rust_emu_set_log_callback(emu_log_cb_t);
 extern int rust_emu_load_rom(Emu*, const uint8_t*, size_t);
 extern void rust_emu_reset(Emu*);
+extern void rust_emu_power_on(Emu*);
 extern int rust_emu_run_cycles(Emu*, int);
 extern const uint32_t* rust_emu_framebuffer(const Emu*, int*, int*);
 extern void rust_emu_set_key(Emu*, int, int, int);
@@ -75,6 +78,7 @@ static const BackendInterface rust_backend = {
     .set_log_callback = rust_emu_set_log_callback,
     .load_rom = rust_emu_load_rom,
     .reset = rust_emu_reset,
+    .power_on = rust_emu_power_on,
     .run_cycles = rust_emu_run_cycles,
     .framebuffer = rust_emu_framebuffer,
     .set_key = rust_emu_set_key,
@@ -93,6 +97,7 @@ extern void cemu_emu_destroy(Emu*);
 extern void cemu_emu_set_log_callback(emu_log_cb_t);
 extern int cemu_emu_load_rom(Emu*, const uint8_t*, size_t);
 extern void cemu_emu_reset(Emu*);
+extern void cemu_emu_power_on(Emu*);
 extern int cemu_emu_run_cycles(Emu*, int);
 extern const uint32_t* cemu_emu_framebuffer(const Emu*, int*, int*);
 extern void cemu_emu_set_key(Emu*, int, int, int);
@@ -109,6 +114,7 @@ static const BackendInterface cemu_backend = {
     .set_log_callback = cemu_emu_set_log_callback,
     .load_rom = cemu_emu_load_rom,
     .reset = cemu_emu_reset,
+    .power_on = cemu_emu_power_on,
     .run_cycles = cemu_emu_run_cycles,
     .framebuffer = cemu_emu_framebuffer,
     .set_key = cemu_emu_set_key,
@@ -236,6 +242,12 @@ int emu_load_rom(Emu* emu, const uint8_t* data, size_t len) {
 void emu_reset(Emu* emu) {
     if (current_backend && emu) {
         current_backend->reset(emu);
+    }
+}
+
+void emu_power_on(Emu* emu) {
+    if (current_backend && emu) {
+        current_backend->power_on(emu);
     }
 }
 

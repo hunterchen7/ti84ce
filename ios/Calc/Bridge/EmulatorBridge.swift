@@ -146,6 +146,18 @@ class EmulatorBridge {
         }
     }
 
+    /// Power on the emulator (simulate ON key press+release to wake from reset).
+    /// Must be called after loadRom() to start execution.
+    func powerOn() {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let h = handle {
+            Self.logger.info("Powering on emulator")
+            emu_power_on(h)
+        }
+    }
+
     // MARK: - Execution
 
     /// Run emulation for the specified number of cycles.

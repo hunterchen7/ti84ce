@@ -182,6 +182,16 @@ class EmulatorBridge {
     }
 
     /**
+     * Power on the emulator (simulate ON key press+release).
+     * Must be called after loadRom() to start execution.
+     */
+    fun powerOn() {
+        if (handle != 0L) {
+            nativePowerOn(handle)
+        }
+    }
+
+    /**
      * Run emulation for the specified number of cycles.
      * @param cycles Number of cycles to execute
      * @return Number of cycles actually executed
@@ -325,6 +335,7 @@ class EmulatorBridge {
     private external fun nativeDestroy(handle: Long)
     private external fun nativeLoadRom(handle: Long, romBytes: ByteArray): Int
     private external fun nativeReset(handle: Long)
+    private external fun nativePowerOn(handle: Long)
     private external fun nativeRunCycles(handle: Long, cycles: Int): Int
     private external fun nativeGetWidth(handle: Long): Int
     private external fun nativeGetHeight(handle: Long): Int

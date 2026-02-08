@@ -253,6 +253,17 @@ impl Scheduler {
         }
     }
 
+    /// CPU cycles remaining before the next SCHED_SECOND event fires.
+    /// Used to cap HALT batch advances so they don't overshoot the boundary,
+    /// which would cause event timestamps to saturate to 0 in process_second.
+    pub fn cycles_until_sched_second(&self) -> u64 {
+        if self.base_ticks >= SCHED_BASE_CLOCK_RATE {
+            return 0;
+        }
+        let remaining = SCHED_BASE_CLOCK_RATE - self.base_ticks;
+        (remaining + self.cached_cpu_base_ticks - 1) / self.cached_cpu_base_ticks
+    }
+
     /// Process the SCHED_SECOND event: subtract one second from all timestamps
     /// to prevent u64 overflow. CEmu does this via a dedicated scheduler event.
     fn process_second(&mut self) {
@@ -293,6 +304,31 @@ impl Scheduler {
         if ts < self.next_event_ticks {
             self.next_event_ticks = ts;
         }
+    }
+
+    /// Repeat an event with catch-up: if the new timestamp is still in the past,
+    /// fast-forward it to the present. Returns the number of skipped event firings.
+    /// Used by LcdDma to avoid catch-up storms where thousands of events would
+    /// otherwise fire one-by-one in the process_scheduler_events loop.
+    pub fn repeat_catchup(&mut self, event: EventId, ticks: u64) -> u64 {
+        let item = &mut self.items[event as usize];
+        let btp = item.clock.base_ticks_per_tick(self.cpu_speed);
+        let current = item.timestamp & !INACTIVE_FLAG;
+        let period = ticks * btp;
+        let mut ts = current + period;
+
+        let mut skipped = 0;
+        if period > 0 && ts < self.base_ticks {
+            let gap = self.base_ticks - ts;
+            skipped = gap / period;
+            ts += skipped * period;
+        }
+
+        item.timestamp = ts;
+        if ts < self.next_event_ticks {
+            self.next_event_ticks = ts;
+        }
+        skipped
     }
 
     /// Schedule an event relative to another event's timestamp, using the reference

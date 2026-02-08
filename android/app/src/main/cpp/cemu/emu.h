@@ -28,6 +28,9 @@ int  emu_load_rom(Emu* emu, const uint8_t* data, size_t len);
 
 void emu_reset(Emu* emu);
 
+// Power on (simulate ON key press+release)
+void emu_power_on(Emu* emu);
+
 // Execution
 int  emu_run_cycles(Emu* emu, int cycles);
 

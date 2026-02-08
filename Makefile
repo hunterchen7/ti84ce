@@ -149,7 +149,7 @@ log-android:
 	@echo "Capturing Android emulator logs..."
 	@echo "Press Ctrl+C to stop logging"
 	@adb logcat -c
-	@adb logcat EmuCore:V EmuJNI:V EmuBackend:V EmulatorBridge:V MainActivity:D *:S | tee emulator_logs.txt
+	@adb logcat EmuCore:V EmuJNI:V EmuBackend:V EmulatorBridge:V MainActivity:D StateManager:V EmulatorScreen:V *:S | tee emulator_logs.txt
 
 # Run Rust tests
 test:

@@ -3,6 +3,21 @@
 import type { EmulatorBackend } from './types';
 import init, { WasmEmu } from '../emu-core/emu_core';
 
+// Singleton promise so concurrent init() calls (e.g. React StrictMode
+// double-mount) don't race and corrupt the shared WASM module state.
+// On failure, reset so the next attempt retries the WASM load.
+let wasmInitPromise: Promise<void> | null = null;
+
+function initWasm(): Promise<void> {
+  if (!wasmInitPromise) {
+    wasmInitPromise = init().catch((err) => {
+      wasmInitPromise = null;
+      throw err;
+    });
+  }
+  return wasmInitPromise;
+}
+
 export class RustBackend implements EmulatorBackend {
   readonly name = 'Rust (Custom)';
   private emu: WasmEmu | null = null;
@@ -18,8 +33,15 @@ export class RustBackend implements EmulatorBackend {
   }
 
   async init(): Promise<void> {
-    await init();
-    this.emu = new WasmEmu();
+    await initWasm();
+    try {
+      this.emu = new WasmEmu();
+    } catch (e) {
+      // Retry once — handles stale WASM state after HMR or StrictMode
+      console.warn('RustBackend: WasmEmu creation failed, retrying:', e);
+      await new Promise((r) => setTimeout(r, 0));
+      this.emu = new WasmEmu();
+    }
     this._isInitialized = true;
   }
 

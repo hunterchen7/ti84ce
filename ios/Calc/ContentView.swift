@@ -140,7 +140,8 @@ class EmulatorState: ObservableObject {
                 Self.logger.info("Restored saved state for ROM \(hash)")
                 // State restored - cycles are part of saved state
             } else {
-                Self.logger.info("Starting fresh (no saved state)")
+                Self.logger.info("Starting fresh (no saved state), powering on")
+                emulator.powerOn()
                 totalCyclesExecuted = 0
             }
 
