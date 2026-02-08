@@ -213,7 +213,6 @@ export function Calculator({
           if (cancelled) return;
 
           if (result === 0) {
-            let restored = false;
             try {
               const savedState = await storage.loadState(romHash, backendType);
               if (savedState && currentBackend.loadState(savedState)) {
@@ -223,7 +222,6 @@ export function Calculator({
                   "backend:",
                   backendType,
                 );
-                restored = true;
               }
             } catch (e) {
               console.warn(
@@ -251,9 +249,6 @@ export function Calculator({
                 if (!cancelled) setError(`Backend recovery failed: ${retryErr}`);
                 return;
               }
-            }
-            if (!restored) {
-              currentBackend.powerOn();
             }
             if (!cancelled) {
               setRomLoaded(true);
@@ -355,8 +350,7 @@ export function Calculator({
       console.log(`[ROM] loadRom returned: ${result}`);
 
       if (result === 0) {
-        console.log("ROM loaded successfully, calling powerOn...");
-        freshBackend.powerOn();
+        console.log("ROM loaded successfully, waiting for ON key press...");
 
         setRomLoaded(true);
         setIsRunning(true); // Auto-start

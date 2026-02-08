@@ -133,15 +133,14 @@ class EmulatorState: ObservableObject {
                 EmulatorPreferences.lastRomName = name
             }
 
-            // Try to restore saved state
+            // Try to restore saved state or wait for ON key press
             if let hash = currentRomHash,
                StateManager.shared.hasState(for: hash),
                StateManager.shared.loadState(emulator: emulator, romHash: hash) {
                 Self.logger.info("Restored saved state for ROM \(hash)")
                 // State restored - cycles are part of saved state
             } else {
-                Self.logger.info("Starting fresh (no saved state), powering on")
-                emulator.powerOn()
+                Self.logger.info("Starting fresh (no saved state), waiting for ON key press")
                 totalCyclesExecuted = 0
             }
 

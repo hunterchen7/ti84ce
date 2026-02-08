@@ -188,12 +188,11 @@ fun EmulatorScreen(
                     currentRomHash = savedRomHash
                     onRomLoaded(savedRomHash)
 
-                    // Restore saved state or power on fresh
+                    // Restore saved state or wait for ON key press
                     if (stateManager.loadState(emulator, savedRomHash)) {
                         Log.i("EmulatorScreen", "Auto-restored saved state for ROM: $savedRomHash")
                     } else {
-                        Log.i("EmulatorScreen", "No saved state, powering on fresh")
-                        emulator.powerOn()
+                        Log.i("EmulatorScreen", "No saved state, waiting for ON key press")
                     }
 
                     isRunning = true
@@ -288,12 +287,11 @@ fun EmulatorScreen(
                         frameCounter = 0
                         logLines.clear()
 
-                        // Try to restore saved state or power on fresh
+                        // Try to restore saved state or wait for ON key press
                         if (stateManager.loadState(emulator, hash)) {
                             Log.i("EmulatorScreen", "Restored saved state for ROM: $hash")
                         } else {
-                            Log.i("EmulatorScreen", "No saved state, powering on fresh")
-                            emulator.powerOn()
+                            Log.i("EmulatorScreen", "No saved state, waiting for ON key press")
                         }
 
                         isRunning = true  // Auto-start
