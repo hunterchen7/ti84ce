@@ -36,6 +36,10 @@ Thumbs.db
 *.log
 *.ppm
 *.png
+# But keep asset PNGs
+!assets/**/*.png
+!ios/Calc/Resources/Assets.xcassets/**/*.png
+!web/public/buttons/**/*.png
 
 # iOS build artifacts
 /ios/cemu/build-device/

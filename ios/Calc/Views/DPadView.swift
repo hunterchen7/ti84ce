@@ -86,20 +86,14 @@ struct DPadView: View {
                 .frame(width: size * 0.25, height: size * 0.25)
             }
             .frame(width: size, height: size)
-            .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
             .contentShape(Circle())
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
-                        let center = CGPoint(x: geometry.size.width / 2, y: geometry.size.height / 2)
                         let hitSize = CGSize(width: size, height: size)
-                        let adjustedLocation = CGPoint(
-                            x: value.location.x - center.x + size / 2,
-                            y: value.location.y - center.y + size / 2
-                        )
 
                         if let hit = hitTestDPad(
-                            point: adjustedLocation,
+                            point: value.location,
                             size: hitSize,
                             sweepAngle: sweepAngle,
                             innerRadiusScale: innerRadiusScale,
@@ -129,6 +123,7 @@ struct DPadView: View {
                         }
                     }
             )
+            .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
         }
     }
 
@@ -191,13 +186,15 @@ struct DPadView: View {
         var angle = atan2(dy, dx) * 180 / .pi
         if angle < 0 { angle += 360 }
 
-        var end = startAngle + sweepAngle
+        var start = startAngle
+        if start < 0 { start += 360 }
+        var end = start + sweepAngle
         if end >= 360 { end -= 360 }
 
-        if startAngle <= end {
-            return angle >= startAngle && angle <= end
+        if start <= end {
+            return angle >= start && angle <= end
         } else {
-            return angle >= startAngle || angle <= end
+            return angle >= start || angle <= end
         }
     }
 }

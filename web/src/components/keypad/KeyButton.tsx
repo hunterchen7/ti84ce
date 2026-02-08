@@ -1,8 +1,8 @@
-import { useState, useCallback } from 'react';
-import type { CSSProperties } from 'react';
-import type { KeyDef } from './types';
-import { KEY_STYLE_COLORS, SECONDARY_LABEL_COLORS, isNumberKey } from './types';
-import { darkenColor, lightenColor } from './utils';
+import { useState, useCallback } from "react";
+import type { CSSProperties } from "react";
+import type { KeyDef } from "./types";
+import { KEY_STYLE_COLORS, SECONDARY_LABEL_COLORS, isNumberKey } from "./types";
+import { darkenColor, lightenColor } from "./utils";
 
 interface KeyButtonProps {
   keyDef: KeyDef;
@@ -15,28 +15,43 @@ interface KeyButtonProps {
 const LABEL_HEIGHT = 15;
 const LABEL_FONT_SIZE = 12;
 
-export function KeyButton({ keyDef, onDown, onUp, width, height }: KeyButtonProps) {
+export function KeyButton({
+  keyDef,
+  onDown,
+  onUp,
+  width,
+  height,
+}: KeyButtonProps) {
   const [isPressed, setIsPressed] = useState(false);
 
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    setIsPressed(true);
-    onDown();
-  }, [onDown]);
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      setIsPressed(true);
+      onDown();
+    },
+    [onDown],
+  );
 
-  const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    setIsPressed(false);
-    onUp();
-  }, [onUp]);
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      setIsPressed(false);
+      onUp();
+    },
+    [onUp],
+  );
 
-  const handlePointerCancel = useCallback((e: React.PointerEvent) => {
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    setIsPressed(false);
-    onUp();
-  }, [onUp]);
+  const handlePointerCancel = useCallback(
+    (e: React.PointerEvent) => {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      setIsPressed(false);
+      onUp();
+    },
+    [onUp],
+  );
 
   const styleColors = KEY_STYLE_COLORS[keyDef.style];
   const baseColor = styleColors.background;
@@ -50,17 +65,17 @@ export function KeyButton({ keyDef, onDown, onUp, width, height }: KeyButtonProp
     : darkenColor(baseColor, 0.18);
 
   const containerStyle: CSSProperties = {
-    display: 'flex',
-    flexDirection: 'column',
-    width: width ?? '100%',
-    height: height ?? '100%',
+    display: "flex",
+    flexDirection: "column",
+    width: width ?? "100%",
+    height: height ?? "100%",
     gap: 0,
   };
 
   const labelRowStyle: CSSProperties = {
-    display: 'flex',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
     height: LABEL_HEIGHT,
     paddingLeft: 3,
     paddingRight: 3,
@@ -70,43 +85,47 @@ export function KeyButton({ keyDef, onDown, onUp, width, height }: KeyButtonProp
 
   const buttonStyle: CSSProperties = {
     flex: 1,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
     background: `linear-gradient(to bottom, ${topColor}, ${bottomColor})`,
     border: `${styleColors.borderWidth}px solid ${borderColor}`,
     borderRadius: styleColors.cornerRadius,
-    cursor: 'pointer',
-    touchAction: 'none',
-    userSelect: 'none',
-    WebkitUserSelect: 'none',
-    transition: 'transform 0.05s',
-    transform: isPressed ? 'scale(0.97)' : 'scale(1)',
+    cursor: "pointer",
+    touchAction: "none",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+    transition: "transform 0.05s",
+    transform: isPressed ? "scale(0.97)" : "scale(1)",
   };
 
   const labelStyle: CSSProperties = {
     color: styleColors.text,
     fontSize: isNumberKey(keyDef.label) ? 22 : 13,
-    fontWeight: keyDef.style === 'white' || keyDef.style === 'blue' ? 700 : 600,
+    fontWeight: keyDef.style === "white" || keyDef.style === "blue" ? 700 : 600,
     lineHeight: 1,
-    whiteSpace: 'nowrap',
+    whiteSpace: "nowrap",
   };
 
   return (
     <div style={containerStyle}>
       {/* Secondary labels row */}
       <div style={labelRowStyle}>
-        <span style={{
-          color: keyDef.secondLabelColor ?? SECONDARY_LABEL_COLORS.second,
-          opacity: keyDef.secondLabel ? 1 : 0,
-        }}>
-          {keyDef.secondLabel ?? ' '}
+        <span
+          style={{
+            color: keyDef.secondLabelColor ?? SECONDARY_LABEL_COLORS.second,
+            opacity: keyDef.secondLabel ? 1 : 0,
+          }}
+        >
+          {keyDef.secondLabel ?? " "}
         </span>
-        <span style={{
-          color: keyDef.alphaLabelColor ?? SECONDARY_LABEL_COLORS.alpha,
-          opacity: keyDef.alphaLabel ? 1 : 0,
-        }}>
-          {keyDef.alphaLabel ?? ' '}
+        <span
+          style={{
+            color: keyDef.alphaLabelColor ?? SECONDARY_LABEL_COLORS.alpha,
+            opacity: keyDef.alphaLabel ? 1 : 0,
+          }}
+        >
+          {keyDef.alphaLabel ?? " "}
         </span>
       </div>
 

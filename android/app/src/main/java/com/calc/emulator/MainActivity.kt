@@ -7,7 +7,11 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -34,6 +38,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -44,6 +49,11 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.size
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
+import androidx.compose.ui.res.painterResource
 import com.calc.emulator.ui.theme.TI84EmulatorTheme
 import kotlinx.coroutines.*
 import java.io.InputStream
@@ -71,6 +81,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Immersive fullscreen: hide both status bar and navigation bar
+        enableEdgeToEdge()
+        val insetsController = WindowCompat.getInsetsController(window, window.decorView)
+        insetsController.hide(WindowInsetsCompat.Type.systemBars())
+        insetsController.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
         // Initialize state manager
         stateManager = StateManager.getInstance(applicationContext)
@@ -195,6 +212,10 @@ fun EmulatorScreen(
 
     // Speed control (1x = 800K cycles, adjustable 1-10x)
     var speedMultiplier by remember { mutableStateOf(1f) } // Default 1x (real-time)
+
+    // Display adjustment
+    var calculatorScale by remember { mutableStateOf(1f) }
+    var calculatorYOffset by remember { mutableStateOf(0f) }
 
     // Framebuffer bitmap
     val bitmap = remember {
@@ -413,6 +434,10 @@ fun EmulatorScreen(
             onToggleDebug = { showDebug = !showDebug },
             speedMultiplier = speedMultiplier,
             onSpeedChange = { speedMultiplier = it },
+            calculatorScale = calculatorScale,
+            onScaleChange = { calculatorScale = it },
+            calculatorYOffset = calculatorYOffset,
+            onYOffsetChange = { calculatorYOffset = it },
             lastKeyPress = lastKeyPress,
             logs = logLines,
             currentBackend = currentBackend,
@@ -554,6 +579,10 @@ fun EmulatorView(
     onToggleDebug: () -> Unit,
     speedMultiplier: Float,
     onSpeedChange: (Float) -> Unit,
+    calculatorScale: Float,
+    onScaleChange: (Float) -> Unit,
+    calculatorYOffset: Float,
+    onYOffsetChange: (Float) -> Unit,
     lastKeyPress: String,
     logs: List<String>,
     currentBackend: String,
@@ -682,6 +711,49 @@ fun EmulatorView(
                     )
                 )
 
+                Divider(
+                    modifier = Modifier.padding(vertical = 8.dp),
+                    color = Color(0xFF333344)
+                )
+
+                // Calculator scale
+                Text(
+                    text = "Scale: ${(calculatorScale * 100).toInt()}%",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Slider(
+                    value = calculatorScale,
+                    onValueChange = { onScaleChange(it) },
+                    valueRange = 0.75f..1.25f,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF2196F3),
+                        activeTrackColor = Color(0xFF2196F3),
+                        inactiveTrackColor = Color(0xFF333344)
+                    )
+                )
+
+                // Calculator Y offset
+                Text(
+                    text = "Y Offset: ${calculatorYOffset.toInt()}",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Slider(
+                    value = calculatorYOffset,
+                    onValueChange = { onYOffsetChange(it) },
+                    valueRange = -150f..150f,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                    colors = SliderDefaults.colors(
+                        thumbColor = Color(0xFF2196F3),
+                        activeTrackColor = Color(0xFF2196F3),
+                        inactiveTrackColor = Color(0xFF333344)
+                    )
+                )
+
                 // Backend selection (only if multiple backends available)
                 if (hasMultipleBackends) {
                     Divider(
@@ -752,39 +824,84 @@ fun EmulatorView(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(8.dp),
+                    .background(Color.Black),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Screen display
+                // Combined calculator body (bezel + keypad as one image, includes branding)
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(320f / 240f)
-                        .background(Color.Black, RoundedCornerShape(4.dp))
-                        .padding(4.dp)
+                        .weight(1f)
+                        .aspectRatio(BODY_ASPECT_RATIO)
+                        .graphicsLayer(
+                            scaleX = calculatorScale,
+                            scaleY = calculatorScale
+                        )
+                        .offset(y = calculatorYOffset.dp)
                 ) {
-                    // Only show framebuffer when LCD is on; otherwise show black (matching CEmu)
-                    if (isLcdOn) {
-                        Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = "Emulator screen",
+                    // Background: combined calculator body photo
+                    Image(
+                        painter = painterResource(id = R.drawable.calculator_body),
+                        contentDescription = "Calculator body",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.FillBounds
+                    )
+
+                    // LCD positioned within combined body
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .layout { measurable, constraints ->
+                                val parentW = constraints.maxWidth
+                                val parentH = constraints.maxHeight
+                                val w = (parentW * LCD_WIDTH / 100f).roundToInt()
+                                val h = (parentH * LCD_HEIGHT / 100f).roundToInt()
+                                val placeable = measurable.measure(
+                                    constraints.copy(minWidth = w, maxWidth = w, minHeight = h, maxHeight = h)
+                                )
+                                layout(parentW, parentH) {
+                                    val x = (parentW * LCD_LEFT / 100f).roundToInt()
+                                    val y = (parentH * LCD_TOP / 100f).roundToInt()
+                                    placeable.place(x, y)
+                                }
+                            }
+                    ) {
+                        if (isLcdOn) {
+                            Image(
+                                bitmap = bitmap.asImageBitmap(),
+                                contentDescription = "Emulator screen",
+                                modifier = Modifier.fillMaxSize(),
+                                contentScale = ContentScale.FillBounds,
+                                filterQuality = FilterQuality.None
+                            )
+                        }
+                    }
+
+                    // Keypad buttons overlay (positioned over keypad portion)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .layout { measurable, constraints ->
+                                val parentW = constraints.maxWidth
+                                val parentH = constraints.maxHeight
+                                val w = parentW
+                                val h = (parentH * KEYPAD_HEIGHT / 100f).roundToInt()
+                                val placeable = measurable.measure(
+                                    constraints.copy(minWidth = w, maxWidth = w, minHeight = h, maxHeight = h)
+                                )
+                                layout(parentW, parentH) {
+                                    val y = (parentH * KEYPAD_TOP / 100f).roundToInt()
+                                    placeable.place(0, y)
+                                }
+                            }
+                    ) {
+                        ImageKeypad(
                             modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Fit,
-                            filterQuality = FilterQuality.None
+                            onKeyDown = onKeyDown,
+                            onKeyUp = onKeyUp
                         )
                     }
                 }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Keypad
-                Keypad(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
-                    onKeyDown = onKeyDown,
-                    onKeyUp = onKeyUp
-                )
             }
 
             // Floating debug overlay - can be dragged anywhere on screen
@@ -883,6 +1000,234 @@ private fun formatCycles(cycles: Long): String {
 }
 
 // Key definition with styling info
+// ── Image-based keypad data ──
+
+private data class ImageButtonRegion(
+    val name: String,
+    val row: Int,
+    val col: Int,
+    val left: Float,   // percentage of container width
+    val top: Float,    // percentage of container height
+    val width: Float,  // percentage of container width
+    val height: Float, // percentage of container height
+    val drawableRes: Int // R.drawable.btn_xxx
+)
+
+private const val KEYPAD_ASPECT_RATIO = 0.657338f
+private const val BODY_ASPECT_RATIO = 963f / 2239f
+private const val LCD_LEFT = 11.53f
+private const val LCD_TOP = 6.92f
+private const val LCD_WIDTH = 76.74f
+private const val LCD_HEIGHT = 24.92f
+private const val KEYPAD_TOP = 34.57f
+private const val KEYPAD_HEIGHT = 65.43f
+
+private data class DPadRegion(
+    val left: Float,
+    val top: Float,
+    val width: Float,
+    val height: Float,
+)
+
+private val IMAGE_DPAD_REGION = DPadRegion(
+    left = 63.97f, top = 13.72f, width = 22.01f, height = 14.74f
+)
+
+@Composable
+private fun imageButtonRegions(): List<ImageButtonRegion> {
+    data class RegionDef(
+        val name: String, val row: Int, val col: Int,
+        val left: Float, val top: Float, val width: Float, val height: Float,
+        val img: String
+    )
+
+    val defs = listOf(
+        // Function row
+        RegionDef("y=",     1, 4, 11.32f, 5.12f,  11.01f, 4.03f, "btn_y_eq"),
+        RegionDef("window", 1, 3, 27.73f, 5.12f,  11.32f, 4.03f, "btn_window"),
+        RegionDef("zoom",   1, 2, 44.76f, 5.12f,  10.80f, 4.03f, "btn_zoom"),
+        RegionDef("trace",  1, 1, 61.37f, 5.12f,  10.70f, 4.03f, "btn_trace"),
+        RegionDef("graph",  1, 0, 77.78f, 5.12f,  11.01f, 4.03f, "btn_graph"),
+        // Control row 1
+        RegionDef("2nd",    1, 5, 11.32f, 14.20f, 11.01f, 5.32f, "btn_2nd"),
+        RegionDef("mode",   1, 6, 27.73f, 14.20f, 11.01f, 5.32f, "btn_mode"),
+        RegionDef("del",    1, 7, 44.65f, 14.20f, 11.01f, 5.32f, "btn_del"),
+        // Control row 2
+        RegionDef("alpha",  2, 7, 11.32f, 22.73f, 11.01f, 5.32f, "btn_alpha"),
+        RegionDef("xttn",   3, 7, 27.73f, 22.53f, 11.01f, 5.53f, "btn_xttn"),
+        RegionDef("stat",   4, 7, 44.65f, 22.73f, 11.01f, 5.32f, "btn_stat"),
+        // Math row
+        RegionDef("math",   2, 6, 11.11f, 31.13f, 11.11f, 5.46f, "btn_math"),
+        RegionDef("apps",   3, 6, 28.04f, 31.13f, 10.70f, 5.46f, "btn_apps"),
+        RegionDef("prgm",   4, 6, 44.65f, 31.19f, 11.01f, 5.32f, "btn_prgm"),
+        RegionDef("vars",   5, 6, 61.37f, 31.19f, 10.70f, 5.32f, "btn_vars"),
+        RegionDef("clear",  6, 6, 77.47f, 31.19f, 11.32f, 5.46f, "btn_clear"),
+        // Trig row
+        RegionDef("x_inv",  2, 5, 11.01f, 39.66f, 11.32f, 5.67f, "btn_x_inv"),
+        RegionDef("sin",    3, 5, 28.04f, 39.66f, 10.70f, 5.32f, "btn_sin"),
+        RegionDef("cos",    4, 5, 44.65f, 39.66f, 11.01f, 5.32f, "btn_cos"),
+        RegionDef("tan",    5, 5, 61.37f, 39.66f, 10.70f, 5.32f, "btn_tan"),
+        RegionDef("pow",    6, 5, 77.78f, 39.66f, 11.01f, 5.46f, "btn_pow"),
+        // Special row
+        RegionDef("x_sq",   2, 4, 11.32f, 48.19f, 11.01f, 5.32f, "btn_x_sq"),
+        RegionDef("comma",  3, 4, 28.04f, 48.19f, 10.70f, 5.32f, "btn_comma"),
+        RegionDef("lparen", 4, 4, 44.65f, 48.40f, 11.01f, 5.12f, "btn_lparen"),
+        RegionDef("rparen", 5, 4, 61.37f, 48.40f, 10.70f, 5.12f, "btn_rparen"),
+        RegionDef("div",    6, 4, 77.67f, 48.19f, 11.11f, 5.32f, "btn_div"),
+        // Number block row 1
+        RegionDef("log",    2, 3, 11.32f, 56.93f, 11.01f, 5.12f, "btn_log"),
+        RegionDef("7",      3, 3, 27.93f, 56.79f, 11.01f, 6.21f, "btn_7"),
+        RegionDef("8",      4, 3, 44.65f, 56.66f, 11.01f, 6.21f, "btn_8"),
+        RegionDef("9",      5, 3, 61.16f, 56.93f, 11.01f, 6.21f, "btn_9"),
+        RegionDef("mul",    6, 3, 77.78f, 56.79f, 11.01f, 5.19f, "btn_mul"),
+        // Number block row 2
+        RegionDef("ln",     2, 2, 11.32f, 65.12f, 11.11f, 5.53f, "btn_ln"),
+        RegionDef("4",      3, 2, 27.93f, 66.35f, 11.01f, 6.21f, "btn_4"),
+        RegionDef("5",      4, 2, 44.65f, 66.35f, 11.01f, 6.21f, "btn_5"),
+        RegionDef("6",      5, 2, 61.16f, 66.35f, 11.01f, 6.21f, "btn_6"),
+        RegionDef("sub",    6, 2, 77.78f, 65.39f, 11.01f, 5.12f, "btn_sub"),
+        // Number block row 3
+        RegionDef("sto",    2, 1, 11.01f, 73.52f, 11.63f, 5.67f, "btn_sto"),
+        RegionDef("1",      3, 1, 27.93f, 76.04f, 11.01f, 6.21f, "btn_1"),
+        RegionDef("2",      4, 1, 44.65f, 76.04f, 11.01f, 6.21f, "btn_2"),
+        RegionDef("3",      5, 1, 61.16f, 75.84f, 11.01f, 6.21f, "btn_3"),
+        RegionDef("add",    6, 1, 77.78f, 73.58f, 11.01f, 5.32f, "btn_add"),
+        // Number block row 4
+        RegionDef("on",     2, 0, 11.11f, 81.91f, 11.11f, 5.94f, "btn_on"),
+        RegionDef("0",      3, 0, 27.93f, 85.80f, 11.01f, 6.21f, "btn_0"),
+        RegionDef("dot",    4, 0, 44.65f, 85.80f, 11.01f, 6.21f, "btn_dot"),
+        RegionDef("neg",    5, 0, 61.16f, 85.80f, 11.01f, 6.21f, "btn_neg"),
+        RegionDef("enter",  6, 0, 77.78f, 82.39f, 11.01f, 5.12f, "btn_enter"),
+    )
+
+    val context = LocalContext.current
+    return remember {
+        defs.map { d ->
+            val resId = context.resources.getIdentifier(d.img, "drawable", context.packageName)
+            ImageButtonRegion(
+                name = d.name, row = d.row, col = d.col,
+                left = d.left, top = d.top, width = d.width, height = d.height,
+                drawableRes = resId
+            )
+        }
+    }
+}
+
+// ── ImageKeypad composable ──
+
+@Composable
+fun ImageKeypad(
+    modifier: Modifier = Modifier,
+    onKeyDown: (row: Int, col: Int) -> Unit,
+    onKeyUp: (row: Int, col: Int) -> Unit
+) {
+    val regions = imageButtonRegions()
+
+    Box(
+        modifier = modifier
+    ) {
+        // Button overlays (no background — parent shows combined image)
+        regions.forEach { region ->
+            ImageKeyButton(
+                region = region,
+                onDown = { onKeyDown(region.row, region.col) },
+                onUp = { onKeyUp(region.row, region.col) }
+            )
+        }
+
+        // D-pad overlay
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .layout { measurable, constraints ->
+                    val parentW = constraints.maxWidth
+                    val parentH = constraints.maxHeight
+                    val w = (parentW * IMAGE_DPAD_REGION.width / 100f).roundToInt()
+                    val h = (parentH * IMAGE_DPAD_REGION.height / 100f).roundToInt()
+                    val placeable = measurable.measure(
+                        constraints.copy(minWidth = w, maxWidth = w, minHeight = h, maxHeight = h)
+                    )
+                    layout(parentW, parentH) {
+                        val x = (parentW * IMAGE_DPAD_REGION.left / 100f).roundToInt()
+                        val y = (parentH * IMAGE_DPAD_REGION.top / 100f).roundToInt()
+                        placeable.place(x, y)
+                    }
+                }
+        ) {
+            DPad(
+                modifier = Modifier.fillMaxSize(),
+                onKeyDown = onKeyDown,
+                onKeyUp = onKeyUp
+            )
+        }
+    }
+}
+
+@Composable
+private fun ImageKeyButton(
+    region: ImageButtonRegion,
+    onDown: () -> Unit,
+    onUp: () -> Unit
+) {
+    var isPressed by remember { mutableStateOf(false) }
+
+    val travelPx = with(LocalDensity.current) { 2.dp.toPx() }
+    val darkenMatrix = remember {
+        ColorMatrix(floatArrayOf(
+            0.82f, 0f, 0f, 0f, 0f,
+            0f, 0.82f, 0f, 0f, 0f,
+            0f, 0f, 0.82f, 0f, 0f,
+            0f, 0f, 0f, 1f, 0f
+        ))
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .layout { measurable, constraints ->
+                val parentW = constraints.maxWidth
+                val parentH = constraints.maxHeight
+                val w = (parentW * region.width / 100f).roundToInt()
+                val h = (parentH * region.height / 100f).roundToInt()
+                val placeable = measurable.measure(
+                    constraints.copy(minWidth = w, maxWidth = w, minHeight = h, maxHeight = h)
+                )
+                layout(parentW, parentH) {
+                    val x = (parentW * region.left / 100f).roundToInt()
+                    val y = (parentH * region.top / 100f).roundToInt() +
+                        if (isPressed) travelPx.roundToInt() else 0
+                    placeable.place(x, y)
+                }
+            }
+            .pointerInput(Unit) {
+                detectTapGestures(
+                    onPress = {
+                        isPressed = true
+                        onDown()
+                        try {
+                            awaitRelease()
+                        } finally {
+                            isPressed = false
+                            onUp()
+                        }
+                    }
+                )
+            }
+    ) {
+        if (region.drawableRes != 0) {
+            Image(
+                painter = painterResource(region.drawableRes),
+                contentDescription = region.name,
+                contentScale = ContentScale.FillBounds,
+                colorFilter = if (isPressed) ColorFilter.colorMatrix(darkenMatrix) else null,
+                modifier = Modifier.fillMaxSize()
+            )
+        }
+    }
+}
+
+// ── Legacy keypad (kept for reference) ──
+
 data class KeyDef(
     val label: String,
     val row: Int,

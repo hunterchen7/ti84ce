@@ -5,6 +5,10 @@ import {
   type BackendType,
 } from "./emulator";
 import { Keypad } from "./components/keypad";
+import {
+  BODY_ASPECT_RATIO,
+  LCD_POSITION,
+} from "./components/keypad/buttonRegions";
 import { getStateStorage, type StateStorage } from "./storage/StateStorage";
 
 // Lazy-load ROM module - not downloaded until needed
@@ -144,10 +148,15 @@ export function Calculator({
       const stateData = backend.saveState();
       if (stateData) {
         await storage.saveState(romHash, stateData, backendTypeRef.current);
-        console.log('[State] Saved state for ROM:', romHash, 'backend:', backendTypeRef.current);
+        console.log(
+          "[State] Saved state for ROM:",
+          romHash,
+          "backend:",
+          backendTypeRef.current,
+        );
       }
     } catch (err) {
-      console.error('[State] Failed to save state:', err);
+      console.error("[State] Failed to save state:", err);
     }
   }, [romLoaded]);
 
@@ -212,11 +221,19 @@ export function Calculator({
             try {
               const savedState = await storage.loadState(romHash, backendType);
               if (savedState && backend.loadState(savedState)) {
-                console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
+                console.log(
+                  "[State] Restored state for ROM:",
+                  romHash,
+                  "backend:",
+                  backendType,
+                );
                 restored = true;
               }
             } catch (e) {
-              console.warn('[State] Failed to restore state, clearing stale data:', e);
+              console.warn(
+                "[State] Failed to restore state, clearing stale data:",
+                e,
+              );
               await storage.deleteState(romHash, backendType).catch(() => {});
             }
             if (!restored) {
@@ -244,14 +261,27 @@ export function Calculator({
                 // Try to load saved state (namespaced by backend)
                 let restored = false;
                 try {
-                  const savedState = await storage.loadState(romHash, backendType);
+                  const savedState = await storage.loadState(
+                    romHash,
+                    backendType,
+                  );
                   if (savedState && backend.loadState(savedState)) {
-                    console.log('[State] Restored state for ROM:', romHash, 'backend:', backendType);
+                    console.log(
+                      "[State] Restored state for ROM:",
+                      romHash,
+                      "backend:",
+                      backendType,
+                    );
                     restored = true;
                   }
                 } catch (e) {
-                  console.warn('[State] Failed to restore state, clearing stale data:', e);
-                  await storage.deleteState(romHash, backendType).catch(() => {});
+                  console.warn(
+                    "[State] Failed to restore state, clearing stale data:",
+                    e,
+                  );
+                  await storage
+                    .deleteState(romHash, backendType)
+                    .catch(() => {});
                 }
                 if (!restored) {
                   backend.powerOn();
@@ -284,7 +314,7 @@ export function Calculator({
   // Auto-save on visibility change and page unload
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
+      if (document.visibilityState === "hidden") {
         saveState();
       }
     };
@@ -293,12 +323,12 @@ export function Calculator({
       saveState();
     };
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
     };
   }, [saveState]);
 
@@ -336,12 +366,12 @@ export function Calculator({
       await storage.clearAllStates().catch(() => {});
 
       // Create a fresh backend instance to avoid poisoned WASM state
-      console.log('[ROM] Creating fresh backend...');
+      console.log("[ROM] Creating fresh backend...");
       backend.destroy();
       const freshBackend = createBackend(backendTypeRef.current);
       await freshBackend.init();
       backendRef.current = freshBackend;
-      console.log('[ROM] Fresh backend ready, calling loadRom...');
+      console.log("[ROM] Fresh backend ready, calling loadRom...");
 
       const result = await freshBackend.loadRom(data);
       console.log(`[ROM] loadRom returned: ${result}`);
@@ -357,9 +387,9 @@ export function Calculator({
         setError(`Failed to load ROM: error code ${result}`);
       }
     } catch (err) {
-      console.error('[ROM] Error during load:', err);
+      console.error("[ROM] Error during load:", err);
       if (err instanceof Error) {
-        console.error('[ROM] Stack:', err.stack);
+        console.error("[ROM] Stack:", err.stack);
       }
       setError(`Failed to read ROM file: ${err}`);
     }
@@ -424,14 +454,14 @@ export function Calculator({
           if (elapsed > 100) {
             slowFrameCount++;
             const emu = (backend as any).emu;
-            const status = emu?.debug_status?.() ?? 'N/A';
+            const status = emu?.debug_status?.() ?? "N/A";
             console.warn(
-              `[EMU] Slow frame #${slowFrameCount}: ${elapsed.toFixed(0)}ms (frame ${totalFrames}) status: ${status}`
+              `[EMU] Slow frame #${slowFrameCount}: ${elapsed.toFixed(0)}ms (frame ${totalFrames}) status: ${status}`,
             );
             // If too many consecutive slow frames, something is wrong
             if (slowFrameCount >= 5) {
               console.error(
-                `[EMU] ${slowFrameCount} slow frames detected — possible infinite loop. Stopping.`
+                `[EMU] ${slowFrameCount} slow frames detected — possible infinite loop. Stopping.`,
               );
               // Don't schedule next frame to prevent complete freeze
               return;
@@ -685,73 +715,58 @@ export function Calculator({
 
       {(romLoaded || useBundledRom) && (
         <>
-          {/* Calculator container with screen and keypad */}
+          {/* Calculator — single combined image (bezel + keypad) */}
           <div
             style={{
-              background: "#1B1B1B",
-              borderRadius: fullscreen ? "12px" : "16px",
-              padding: fullscreen ? "12px" : "16px",
               boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
               width: containerWidth,
+              borderBottomLeftRadius: "48px",
+              borderBottomRightRadius: "48px",
+              borderTopLeftRadius: 56,
+              borderTopRightRadius: 56,
+              overflow: "hidden",
+              position: "relative",
+              aspectRatio: `${BODY_ASPECT_RATIO}`,
+              backgroundImage: "url(/buttons/calculator_body.png)",
+              backgroundSize: "100% 100%",
             }}
           >
-            {/* Branding */}
-            <div
+            {/* LCD canvas positioned within combined body */}
+            <canvas
+              ref={canvasRef}
+              width={320}
+              height={240}
               style={{
-                color: "#fff",
-                fontSize: "1.3rem",
-                fontWeight: 600,
-                letterSpacing: "0.02em",
-                marginBottom: "10px",
-                fontFamily: "system-ui, sans-serif",
-                textAlign: "center",
+                position: "absolute",
+                left: `${LCD_POSITION.left}%`,
+                top: `${LCD_POSITION.top}%`,
+                width: `${LCD_POSITION.width}%`,
+                height: `${LCD_POSITION.height}%`,
+                imageRendering: "pixelated",
               }}
-            >
-              <span style={{ fontWeight: 700 }}>TI-84</span>{" "}
-              <span style={{ fontWeight: 300 }}>Plus CE</span>
-            </div>
-
-            {/* Screen */}
-            <div
-              style={{
-                background: "#000",
-                padding: "8px",
-                borderRadius: "8px",
-                marginBottom: "12px",
-                position: "relative",
-              }}
-            >
-              <canvas
-                ref={canvasRef}
-                width={320}
-                height={240}
+            />
+            {!romLoaded && useBundledRom && (
+              <div
                 style={{
-                  imageRendering: "pixelated",
-                  width: "100%",
-                  height: "auto",
-                  display: "block",
+                  position: "absolute",
+                  left: `${LCD_POSITION.left}%`,
+                  top: `${LCD_POSITION.top}%`,
+                  width: `${LCD_POSITION.width}%`,
+                  height: `${LCD_POSITION.height}%`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "#000",
+                  color: "#888",
+                  fontSize: "1rem",
+                  fontFamily: "system-ui, sans-serif",
                 }}
-              />
-              {!romLoaded && useBundledRom && (
-                <div
-                  style={{
-                    position: "absolute",
-                    inset: 0,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    background: "#000",
-                    color: "#888",
-                    fontSize: "1rem",
-                    fontFamily: "system-ui, sans-serif",
-                  }}
-                >
-                  Loading...
-                </div>
-              )}
-            </div>
+              >
+                Loading...
+              </div>
+            )}
 
-            {/* Keypad */}
+            {/* Keypad buttons overlay (positioned over keypad portion) */}
             <Keypad onKeyDown={handleKeypadDown} onKeyUp={handleKeypadUp} />
           </div>
 

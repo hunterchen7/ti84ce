@@ -1,13 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
-import type { CSSProperties } from 'react';
-import { darkenColor, lightenColor } from './utils';
+import { useState, useCallback, useRef, useEffect } from "react";
+import type { CSSProperties } from "react";
+import { darkenColor, lightenColor } from "./utils";
 
-type DPadDirection = 'up' | 'down' | 'left' | 'right';
+type DPadDirection = "up" | "down" | "left" | "right";
 
 interface DPadProps {
   onKeyDown: (row: number, col: number) => void;
   onKeyUp: (row: number, col: number) => void;
-  size?: number;
 }
 
 // D-pad key coordinates (row, col)
@@ -27,102 +26,136 @@ const DIRECTION_ANGLES: Record<DPadDirection, number> = {
 };
 
 // Colors
-const SEGMENT_COLOR = '#E3E3E3';
-const PRESSED_COLOR = '#CECECE';
-const BORDER_COLOR = '#B5B5B5';
-const ARROW_COLOR = '#2B2B2B';
-const GAP_COLOR = '#1B1B1B';
-const CENTER_COLOR = '#1B1B1B';
+const SEGMENT_COLOR = "#E3E3E3";
+const PRESSED_COLOR = "#CECECE";
+const BORDER_COLOR = "#B5B5B5";
+const ARROW_COLOR = "#2B2B2B";
+const GAP_COLOR = "#1B1B1B";
+const CENTER_COLOR = "#1B1B1B";
 
 // Configuration
 const SWEEP_ANGLE = 90;
 const INNER_RADIUS_SCALE = 0.45;
 const GAP_WIDTH_SCALE = 0.16;
 
-export function DPad({ onKeyDown, onKeyUp, size = 120 }: DPadProps) {
-  const [pressedDirection, setPressedDirection] = useState<DPadDirection | null>(null);
+export function DPad({ onKeyDown, onKeyUp }: DPadProps) {
+  const [pressedDirection, setPressedDirection] =
+    useState<DPadDirection | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [canvasSize, setCanvasSize] = useState(120);
+
+  // Observe container size
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        setCanvasSize(Math.min(width, height));
+      }
+    });
+
+    observer.observe(container);
+    // Initial size
+    const { width, height } = container.getBoundingClientRect();
+    setCanvasSize(Math.min(width, height));
+
+    return () => observer.disconnect();
+  }, []);
 
   // Hit test for D-pad segments
-  const hitTest = useCallback((x: number, y: number): DPadDirection | null => {
-    const center = size / 2;
-    const dx = x - center;
-    const dy = y - center;
-    const radius = Math.sqrt(dx * dx + dy * dy);
+  const hitTest = useCallback(
+    (clientX: number, clientY: number): DPadDirection | null => {
+      const canvas = canvasRef.current;
+      if (!canvas) return null;
 
-    const outerRadius = size / 2;
-    const innerRadius = outerRadius * INNER_RADIUS_SCALE;
+      const rect = canvas.getBoundingClientRect();
+      const x = (clientX - rect.left) * (canvasSize / rect.width);
+      const y = (clientY - rect.top) * (canvasSize / rect.height);
 
-    // Check radius bounds
-    if (radius < innerRadius || radius > outerRadius) {
-      return null;
-    }
+      const center = canvasSize / 2;
+      const dx = x - center;
+      const dy = y - center;
+      const radius = Math.sqrt(dx * dx + dy * dy);
 
-    // Check if in gap (diagonal lines)
-    const gapWidth = outerRadius * GAP_WIDTH_SCALE;
-    const threshold = gapWidth * 0.5 * 1.41421356;
-    if (Math.abs(dy - dx) < threshold || Math.abs(dy + dx) < threshold) {
-      return null;
-    }
+      const outerRadius = canvasSize / 2;
+      const innerRadius = outerRadius * INNER_RADIUS_SCALE;
 
-    // Calculate angle
-    let angle = Math.atan2(dy, dx) * 180 / Math.PI;
-    if (angle < 0) angle += 360;
+      if (radius < innerRadius || radius > outerRadius) return null;
 
-    // Check which segment
-    const directions: DPadDirection[] = ['up', 'down', 'left', 'right'];
-    for (const dir of directions) {
-      const dirAngle = DIRECTION_ANGLES[dir];
-      const startAngle = (dirAngle - SWEEP_ANGLE / 2 + 360) % 360;
-      let endAngle = (dirAngle + SWEEP_ANGLE / 2) % 360;
+      const gapWidth = outerRadius * GAP_WIDTH_SCALE;
+      const threshold = gapWidth * 0.5 * 1.41421356;
+      if (Math.abs(dy - dx) < threshold || Math.abs(dy + dx) < threshold)
+        return null;
 
-      if (startAngle <= endAngle) {
-        if (angle >= startAngle && angle <= endAngle) return dir;
-      } else {
-        if (angle >= startAngle || angle <= endAngle) return dir;
+      let angle = (Math.atan2(dy, dx) * 180) / Math.PI;
+      if (angle < 0) angle += 360;
+
+      const directions: DPadDirection[] = ["up", "down", "left", "right"];
+      for (const dir of directions) {
+        const dirAngle = DIRECTION_ANGLES[dir];
+        const startAngle = (dirAngle - SWEEP_ANGLE / 2 + 360) % 360;
+        const endAngle = (dirAngle + SWEEP_ANGLE / 2) % 360;
+
+        if (startAngle <= endAngle) {
+          if (angle >= startAngle && angle <= endAngle) return dir;
+        } else {
+          if (angle >= startAngle || angle <= endAngle) return dir;
+        }
       }
-    }
 
-    return null;
-  }, [size]);
+      return null;
+    },
+    [canvasSize],
+  );
 
   // Draw the D-pad
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    // Clear
+    const size = canvasSize;
     ctx.clearRect(0, 0, size, size);
 
     const center = size / 2;
-    const outerRadius = size / 2 - 2; // Small margin
+    const outerRadius = size / 2 - 2;
     const innerRadius = outerRadius * INNER_RADIUS_SCALE;
     const strokeWidth = outerRadius * 0.035;
 
-    // Draw segments
-    const directions: DPadDirection[] = ['up', 'down', 'left', 'right'];
+    const directions: DPadDirection[] = ["up", "down", "left", "right"];
     for (const dir of directions) {
       const isPressed = pressedDirection === dir;
       const fillColor = isPressed ? PRESSED_COLOR : SEGMENT_COLOR;
       const dirAngle = DIRECTION_ANGLES[dir];
-      const startAngle = (dirAngle - SWEEP_ANGLE / 2) * Math.PI / 180;
-      const endAngle = (dirAngle + SWEEP_ANGLE / 2) * Math.PI / 180;
+      const startAngle = ((dirAngle - SWEEP_ANGLE / 2) * Math.PI) / 180;
+      const endAngle = ((dirAngle + SWEEP_ANGLE / 2) * Math.PI) / 180;
 
-      // Create segment path
       ctx.beginPath();
-      ctx.arc(center, center, outerRadius - strokeWidth * 0.2, startAngle, endAngle);
-      ctx.arc(center, center, innerRadius + strokeWidth * 0.15, endAngle, startAngle, true);
+      ctx.arc(
+        center,
+        center,
+        outerRadius - strokeWidth * 0.2,
+        startAngle,
+        endAngle,
+      );
+      ctx.arc(
+        center,
+        center,
+        innerRadius + strokeWidth * 0.15,
+        endAngle,
+        startAngle,
+        true,
+      );
       ctx.closePath();
 
-      // Fill
       ctx.fillStyle = fillColor;
       ctx.fill();
 
-      // Border
       const rimColor = isPressed
         ? darkenColor(BORDER_COLOR, 0.35)
         : lightenColor(BORDER_COLOR, 0.35);
@@ -130,9 +163,9 @@ export function DPad({ onKeyDown, onKeyUp, size = 120 }: DPadProps) {
       ctx.lineWidth = strokeWidth;
       ctx.stroke();
 
-      // Draw arrow
+      // Arrow
       const arrowRadius = (innerRadius + outerRadius) * 0.5;
-      const angleRad = dirAngle * Math.PI / 180;
+      const angleRad = (dirAngle * Math.PI) / 180;
       const arrowCenterX = center + Math.cos(angleRad) * arrowRadius;
       const arrowCenterY = center + Math.sin(angleRad) * arrowRadius;
 
@@ -168,23 +201,21 @@ export function DPad({ onKeyDown, onKeyUp, size = 120 }: DPadProps) {
       ctx.fill();
     }
 
-    // Draw gaps
+    // Gaps
     const gapWidth = outerRadius * GAP_WIDTH_SCALE;
     const rectLength = outerRadius * 2.1;
 
     ctx.fillStyle = GAP_COLOR;
 
-    // 45 degree gap
     ctx.save();
     ctx.translate(center, center);
-    ctx.rotate(45 * Math.PI / 180);
+    ctx.rotate((45 * Math.PI) / 180);
     ctx.fillRect(-gapWidth / 2, -rectLength / 2, gapWidth, rectLength);
     ctx.restore();
 
-    // -45 degree gap
     ctx.save();
     ctx.translate(center, center);
-    ctx.rotate(-45 * Math.PI / 180);
+    ctx.rotate((-45 * Math.PI) / 180);
     ctx.fillRect(-gapWidth / 2, -rectLength / 2, gapWidth, rectLength);
     ctx.restore();
 
@@ -193,74 +224,71 @@ export function DPad({ onKeyDown, onKeyUp, size = 120 }: DPadProps) {
     ctx.arc(center, center, size * 0.125, 0, Math.PI * 2);
     ctx.fillStyle = CENTER_COLOR;
     ctx.fill();
-  }, [size, pressedDirection]);
+  }, [canvasSize, pressedDirection]);
 
-  // Redraw when pressed state changes
   useEffect(() => {
     draw();
   }, [draw]);
 
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      (e.target as HTMLElement).setPointerCapture(e.pointerId);
 
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const hit = hitTest(x, y);
-
-    if (hit) {
-      setPressedDirection(hit);
-      const coords = DIRECTION_COORDS[hit];
-      onKeyDown(coords[0], coords[1]);
-    }
-  }, [hitTest, onKeyDown]);
-
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    if (pressedDirection === null) return;
-
-    const rect = containerRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    const hit = hitTest(x, y);
-
-    if (hit !== pressedDirection) {
-      // Release previous
-      if (pressedDirection) {
-        const coords = DIRECTION_COORDS[pressedDirection];
-        onKeyUp(coords[0], coords[1]);
-      }
-      // Press new (if any)
+      const hit = hitTest(e.clientX, e.clientY);
       if (hit) {
         setPressedDirection(hit);
         const coords = DIRECTION_COORDS[hit];
         onKeyDown(coords[0], coords[1]);
-      } else {
+      }
+    },
+    [hitTest, onKeyDown],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (pressedDirection === null) return;
+
+      const hit = hitTest(e.clientX, e.clientY);
+      if (hit !== pressedDirection) {
+        if (pressedDirection) {
+          const coords = DIRECTION_COORDS[pressedDirection];
+          onKeyUp(coords[0], coords[1]);
+        }
+        if (hit) {
+          setPressedDirection(hit);
+          const coords = DIRECTION_COORDS[hit];
+          onKeyDown(coords[0], coords[1]);
+        } else {
+          setPressedDirection(null);
+        }
+      }
+    },
+    [pressedDirection, hitTest, onKeyDown, onKeyUp],
+  );
+
+  const handlePointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+      if (pressedDirection) {
+        const coords = DIRECTION_COORDS[pressedDirection];
+        onKeyUp(coords[0], coords[1]);
         setPressedDirection(null);
       }
-    }
-  }, [pressedDirection, hitTest, onKeyDown, onKeyUp]);
-
-  const handlePointerUp = useCallback((e: React.PointerEvent) => {
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-    if (pressedDirection) {
-      const coords = DIRECTION_COORDS[pressedDirection];
-      onKeyUp(coords[0], coords[1]);
-      setPressedDirection(null);
-    }
-  }, [pressedDirection, onKeyUp]);
+    },
+    [pressedDirection, onKeyUp],
+  );
 
   const containerStyle: CSSProperties = {
-    width: size,
-    height: size,
-    touchAction: 'none',
-    userSelect: 'none',
-    WebkitUserSelect: 'none',
-    cursor: 'pointer',
+    width: "100%",
+    height: "100%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    touchAction: "none",
+    userSelect: "none",
+    WebkitUserSelect: "none",
+    cursor: "pointer",
   };
 
   return (
@@ -277,7 +305,12 @@ export function DPad({ onKeyDown, onKeyUp, size = 120 }: DPadProps) {
         }
       }}
     >
-      <canvas ref={canvasRef} width={size} height={size} />
+      <canvas
+        ref={canvasRef}
+        width={canvasSize}
+        height={canvasSize}
+        style={{ width: canvasSize, height: canvasSize }}
+      />
     </div>
   );
 }
