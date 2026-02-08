@@ -83,22 +83,6 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
-    readonly __wbg_wasmemu_free: (a: number, b: number) => void;
-    readonly wasmemu_debug_status: (a: number) => [number, number];
-    readonly wasmemu_framebuffer_height: (a: number) => number;
-    readonly wasmemu_framebuffer_width: (a: number) => number;
-    readonly wasmemu_get_backlight: (a: number) => number;
-    readonly wasmemu_get_framebuffer_rgba: (a: number) => [number, number];
-    readonly wasmemu_is_lcd_on: (a: number) => number;
-    readonly wasmemu_load_rom: (a: number, b: number, c: number) => number;
-    readonly wasmemu_load_state: (a: number, b: number, c: number) => number;
-    readonly wasmemu_new: () => number;
-    readonly wasmemu_power_on: (a: number) => void;
-    readonly wasmemu_reset: (a: number) => void;
-    readonly wasmemu_run_cycles: (a: number, b: number) => number;
-    readonly wasmemu_save_state: (a: number) => [number, number];
-    readonly wasmemu_save_state_size: (a: number) => number;
-    readonly wasmemu_set_key: (a: number, b: number, c: number, d: number) => void;
     readonly emu_backend_count: () => number;
     readonly emu_backend_get_available: () => number;
     readonly emu_backend_set: (a: number) => number;
@@ -117,6 +101,22 @@ export interface InitOutput {
     readonly emu_set_key: (a: number, b: number, c: number, d: number) => void;
     readonly emu_set_log_callback: (a: number) => void;
     readonly emu_backend_get_current: () => number;
+    readonly __wbg_wasmemu_free: (a: number, b: number) => void;
+    readonly wasmemu_debug_status: (a: number) => [number, number];
+    readonly wasmemu_framebuffer_height: (a: number) => number;
+    readonly wasmemu_framebuffer_width: (a: number) => number;
+    readonly wasmemu_get_backlight: (a: number) => number;
+    readonly wasmemu_get_framebuffer_rgba: (a: number) => [number, number];
+    readonly wasmemu_is_lcd_on: (a: number) => number;
+    readonly wasmemu_load_rom: (a: number, b: number, c: number) => number;
+    readonly wasmemu_load_state: (a: number, b: number, c: number) => number;
+    readonly wasmemu_new: () => number;
+    readonly wasmemu_power_on: (a: number) => void;
+    readonly wasmemu_reset: (a: number) => void;
+    readonly wasmemu_run_cycles: (a: number, b: number) => number;
+    readonly wasmemu_save_state: (a: number) => [number, number];
+    readonly wasmemu_save_state_size: (a: number) => number;
+    readonly wasmemu_set_key: (a: number, b: number, c: number, d: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

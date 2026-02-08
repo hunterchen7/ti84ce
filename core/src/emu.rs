@@ -1277,22 +1277,34 @@ impl Emu {
 
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
     /// Also raises the ON_KEY and WAKE interrupts for normal interrupt handling
+    ///
+    /// Matches CEmu's keypad_on_check(): when device is off, pulses INT_WAKE
+    /// and clears control.off. The pulse (set then clear) handles the case where
+    /// the OS has configured WAKE as inverted — the clear step sets the status bit.
+    /// wake() also sets readBatteryStatus = 0xFE so the OS WAKE ISR sees a valid battery.
     pub fn press_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
         log_evt!("ON_KEY pressed");
         // Power on the calculator
         self.powered_on = true;
-        // Set the wake signal - this wakes CPU from HALT regardless of IFF1
+        // Set the one-shot wake signal — consumed on first cpu.step() call.
         self.cpu.on_key_wake = true;
 
         // Set ON key in keypad matrix (row 2, col 0)
         self.bus.set_key(2, 0, true);
 
-        // Raise both ON_KEY and WAKE interrupts
-        // WAKE is the power-on wake signal (bit 19)
+        // Raise INT_ON (matches CEmu: intrpt_set(INT_ON, onState) with onState truthy)
         self.bus.ports.interrupt.raise(sources::ON_KEY);
-        self.bus.ports.interrupt.raise(sources::WAKE);
+
+        // Handle WAKE interrupt — only when device is off (matches CEmu exactly).
+        // CEmu's keypad_on_check(): if (control.off && onState) { control.off=false; intrpt_pulse(INT_WAKE); }
+        // wake() clears off and sets readBatteryStatus=0xFE so the OS ISR sees valid battery.
+        if self.bus.ports.control.is_off() {
+            log_evt!("WAKE: device off, clearing off + pulsing WAKE");
+            self.bus.ports.control.wake();
+            self.bus.ports.interrupt.pulse(sources::WAKE);
+        }
 
         // Ensure CPU sees a pending interrupt even if interrupts are disabled.
         // ON key wake is special: ROM expects an interrupt path to run after wake.
@@ -1300,15 +1312,14 @@ impl Emu {
     }
 
     /// Release the ON key
-    /// Does NOT clear ON_KEY/WAKE interrupts — the ISR needs to read the pending
-    /// status to handle the wake event. The OS ISR will modify the enabled mask
-    /// after processing (disabling WAKE since the calc is now awake), which
-    /// naturally stops irq_pending from re-triggering. Without this, on platforms
-    /// where press+release both fire between frames (mobile/web), the interrupt
-    /// would be cleared before the ISR ever reads the controller status.
+    /// Clears ON_KEY raw (matches CEmu: intrpt_set(INT_ON, false) on release).
+    /// WAKE is NOT touched on release — CEmu only pulses WAKE on press when off.
+    /// on_key_wake is one-shot (consumed in step()), no need to clear here.
     pub fn release_on_key(&mut self) {
+        use crate::peripherals::interrupt::sources;
         log_evt!("ON_KEY released");
         self.bus.set_key(2, 0, false);
+        self.bus.ports.interrupt.clear_raw(sources::ON_KEY);
     }
 
     /// Simulate initial power-on sequence
@@ -2228,6 +2239,7 @@ mod tests {
 
         // Press ON key - should wake CPU even though interrupts are disabled
         emu.press_on_key();
+        assert!(emu.cpu.on_key_wake); // One-shot signal set
 
         // Run some more cycles - CPU should wake and execute NOPs
         let cycles_before = emu.total_cycles;
@@ -2237,6 +2249,7 @@ mod tests {
         assert!(!emu.cpu.halted);
         assert!(emu.total_cycles > cycles_before);
         assert!(emu.cpu.pc > 2); // PC moved past HALT
+        assert!(!emu.cpu.on_key_wake); // One-shot consumed by step()
     }
 
     #[test]
@@ -2254,13 +2267,16 @@ mod tests {
 
         // Press ON key to wake
         emu.press_on_key();
+        assert!(emu.cpu.on_key_wake); // One-shot set
 
         // Manually step once to process the wake path
+        // on_key_wake path: consumes one-shot, clears halted, enables IFF, adds 1 cycle
         let cycles = emu.cpu.step(&mut emu.bus);
-        assert_eq!(cycles, 4);
+        assert_eq!(cycles, 1);
         assert!(!emu.cpu.halted);
         assert!(emu.cpu.iff1);
         assert!(emu.cpu.irq_pending);
+        assert!(!emu.cpu.on_key_wake); // One-shot consumed
     }
 
     #[test]
@@ -2280,33 +2296,55 @@ mod tests {
     }
 
     #[test]
-    fn test_on_key_release_preserves_interrupts_for_isr() {
+    fn test_on_key_interrupt_behavior() {
         use crate::peripherals::interrupt::sources;
 
         let mut emu = Emu::new();
         let rom = vec![0x00; 16]; // NOPs
         emu.load_rom(&rom).unwrap();
 
-        // Press and release ON key (simulates quick tap between frames)
+        // Press ON key — should set ON_KEY in interrupt status.
+        // WAKE is NOT raised when device is not off (matches CEmu).
         emu.press_on_key();
-        emu.release_on_key();
 
-        // ON_KEY and WAKE interrupts should persist after release — the ISR needs
-        // to read the controller status to determine why it was woken.
         let status = emu.bus.ports.interrupt.read(0x00);
         assert_ne!(status & (sources::ON_KEY as u8), 0,
-            "ON_KEY status should persist after release for ISR to read");
+            "ON_KEY status should be set after press");
 
-        // WAKE should also persist (it's in the upper bits — read byte 2 for bits 16-23)
+        // Release ON key — ON_KEY raw clears (matches CEmu: intrpt_set(INT_ON, false))
+        emu.release_on_key();
+
+        // ON_KEY should clear after release (non-latched follows raw)
+        let status_after = emu.bus.ports.interrupt.read(0x00);
+        assert_eq!(status_after & (sources::ON_KEY as u8), 0,
+            "ON_KEY status should clear after release (non-latched)");
+    }
+
+    #[test]
+    fn test_on_key_wake_from_off() {
+        use crate::peripherals::interrupt::sources;
+
+        let mut emu = Emu::new();
+        let rom = vec![0x00; 16]; // NOPs
+        emu.load_rom(&rom).unwrap();
+
+        // Simulate device being off (OS wrote bit 6 to port 0x00)
+        emu.bus.ports.control.write(0x00, 0x40); // Set bit 6 → off=true
+        assert!(emu.bus.ports.control.is_off());
+
+        // Configure WAKE as inverted (matches what the OS does before sleeping)
+        // Inverted register is at offset 0x10 in interrupt controller
+        // WAKE is bit 19 → byte 2 (bits 16-23), bit 3
+        emu.bus.ports.interrupt.write(0x12, (sources::WAKE >> 16) as u8);
+
+        // Press ON key — should pulse WAKE and clear off
+        emu.press_on_key();
+
+        assert!(!emu.bus.ports.control.is_off(), "off should be cleared after wake");
+        // For inverted WAKE, pulse sets status via the clear step
         let wake_byte = emu.bus.ports.interrupt.read(0x02); // status bits 16-23
         assert_ne!(wake_byte & ((sources::WAKE >> 16) as u8), 0,
-            "WAKE status should persist after release for ISR to read");
-
-        // After running cycles, interrupts should STILL be set (emu loop doesn't clear them)
-        emu.run_cycles(100);
-        let status_after = emu.bus.ports.interrupt.read(0x00);
-        assert_ne!(status_after & (sources::ON_KEY as u8), 0,
-            "ON_KEY should persist — ISR handles clearing via controller registers");
+            "WAKE status should be set after pulse (inverted logic)");
     }
 
     #[test]

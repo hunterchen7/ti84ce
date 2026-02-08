@@ -106,8 +106,9 @@ pub struct Cpu {
     pub irq_pending: bool,
     /// Pending NMI
     pub nmi_pending: bool,
-    /// ON key wake signal - wakes CPU from HALT even with interrupts disabled
-    /// This is a TI-84 CE specific feature where the ON key can always wake the calculator
+    /// ON key wake signal — one-shot, consumed on first cpu.step() call.
+    /// Wakes CPU from HALT even with interrupts disabled (DI+HALT).
+    /// Set by press_on_key(), consumed in step().
     pub on_key_wake: bool,
     /// Any key wake signal - wakes CPU from HALT when any key is pressed
     /// Like CEmu's CPU_SIGNAL_ANY_KEY, this allows keys to wake the CPU
@@ -333,22 +334,10 @@ impl Cpu {
         }
 
         // Check for ON key wake - can wake CPU even with interrupts disabled
-        // This is a TI-84 CE specific feature
-        //
-        // On the real TI-84 CE, the ON key can wake the CPU from HALT regardless of IFF1.
-        // When woken, if there's a pending interrupt (ON_KEY or WAKE), we need to
-        // enable interrupts so the interrupt handler can run properly.
-        //
-        // Without this, the ROM code path after HALT expects to have been entered
-        // via interrupt (so RETI has a valid return address), but with DI active
-        // no interrupt is taken and RETI pops garbage.
-        //
-        // Solution: When ON key wakes with a pending interrupt, enable IFF1/IFF2
-        // so the interrupt is taken on the next step() call.
+        // This is a TI-84 CE specific feature: the ON key can wake the CPU from
+        // HALT regardless of IFF1. One-shot signal consumed immediately.
         if self.on_key_wake {
             self.on_key_wake = false;
-            // ON key can wake from HALT or from powered-off loop (running with interrupts disabled)
-            // In both cases, if there's a pending interrupt, enable interrupts so it gets taken
             if self.irq_pending {
                 self.iff1 = true;
                 self.iff2 = true;
@@ -358,8 +347,6 @@ impl Cpu {
                 bus.add_cycles(1); // Wake from halt cycle cost
                 return cycle_delta(start_cycles, bus.total_cycles());
             }
-            // If not halted, CPU is running in powered-off loop - interrupts now enabled,
-            // so ON_KEY interrupt will fire on next iteration
         }
 
         // Check for any key wake - wakes CPU from HALT like CEmu's CPU_SIGNAL_ANY_KEY
