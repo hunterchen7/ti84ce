@@ -339,23 +339,54 @@ CMAKEOF
         echo "==> Built libemu_cemu.a"
     fi
 
-    # Determine Xcode scheme to use
+    # Determine Xcode scheme and configuration
     if [ "$BUILD_RUST" = true ] && [ "$BUILD_CEMU" = true ]; then
         XCODE_SCHEME="Calc-Both"
+        XCODE_CONFIG_SUFFIX="Both"
     elif [ "$BUILD_CEMU" = true ]; then
         XCODE_SCHEME="Calc-CEmu"
+        XCODE_CONFIG_SUFFIX="CEmu"
     else
         XCODE_SCHEME="Calc-Rust"
+        XCODE_CONFIG_SUFFIX="Rust"
+    fi
+
+    if [ "$BUILD_CONFIG" = "Release" ]; then
+        XCODE_CONFIG="Release-$XCODE_CONFIG_SUFFIX"
+    else
+        XCODE_CONFIG="Debug-$XCODE_CONFIG_SUFFIX"
+    fi
+
+    if [ "$TARGET" = "simulator" ]; then
+        XCODE_DEST="platform=iOS Simulator,arch=arm64"
+    else
+        XCODE_DEST="generic/platform=iOS"
     fi
 
     echo ""
-    echo "==> Backend build complete!"
+    echo "==> Backend libraries built!"
     echo "    Output: $DEST_DIR"
     [ "$BUILD_RUST" = true ] && echo "      - libemu_rust.a (Rust backend)"
     [ "$BUILD_CEMU" = true ] && echo "      - libemu_cemu.a (CEmu backend)"
+
+    # Build the Xcode project with the correct scheme
     echo ""
-    echo "In Xcode, select the '$XCODE_SCHEME' scheme, then build and run."
-    echo "  (backend_bridge.c is compiled by Xcode with the correct preprocessor flags)"
+    echo "==> Building Xcode project (scheme=$XCODE_SCHEME, config=$XCODE_CONFIG)..."
+    xcodebuild \
+        -project "$PROJECT_ROOT/ios/Calc.xcodeproj" \
+        -scheme "$XCODE_SCHEME" \
+        -configuration "$XCODE_CONFIG" \
+        -destination "$XCODE_DEST" \
+        build \
+        | tail -20
+
+    echo ""
+    echo "==> Build complete! Scheme: $XCODE_SCHEME"
+
+    if [ "$OPEN_XCODE" = true ]; then
+        echo "==> Opening Xcode..."
+        open "$PROJECT_ROOT/ios/Calc.xcodeproj"
+    fi
 }
 
 # Run the appropriate build

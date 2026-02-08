@@ -1,0 +1,9 @@
+// Backend: Both (Rust + CEmu) with runtime switching
+// Pre-build: ./scripts/build.sh ios --both [--sim]
+//
+// Links against libemu_rust.a and libemu_cemu.a (both with prefixed symbols).
+// backend_bridge.c (compiled by Xcode) provides the unprefixed emu_* API
+// and runtime backend switching via emu_backend_set().
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) HAS_RUST_BACKEND=1 HAS_CEMU_BACKEND=1
+OTHER_LDFLAGS = $(inherited) -lemu_rust -lemu_cemu

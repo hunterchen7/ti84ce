@@ -1,0 +1,8 @@
+// Backend: CEmu only
+// Pre-build: ./scripts/build.sh ios --cemu [--sim]
+//
+// Links against libemu_cemu.a (CEmu adapter with prefixed symbols).
+// backend_bridge.c (compiled by Xcode) provides the unprefixed emu_* API.
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) HAS_CEMU_BACKEND=1
+OTHER_LDFLAGS = $(inherited) -lemu_cemu

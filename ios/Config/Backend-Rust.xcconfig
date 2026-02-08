@@ -1,0 +1,8 @@
+// Backend: Rust only
+// Pre-build: ./scripts/build.sh ios --rust [--sim]
+//
+// Links against libemu_rust.a (Rust core with prefixed symbols).
+// backend_bridge.c (compiled by Xcode) provides the unprefixed emu_* API.
+
+GCC_PREPROCESSOR_DEFINITIONS = $(inherited) HAS_RUST_BACKEND=1
+OTHER_LDFLAGS = $(inherited) -lemu_rust
