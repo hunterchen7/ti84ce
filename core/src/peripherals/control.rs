@@ -252,6 +252,29 @@ impl ControlPorts {
                     self.off = true;
                 }
 
+                // Battery FSM — CEmu control.c lines 93-106
+                // The ROM probes battery by writing patterns to port 0x00 and
+                // reading transitions in readBatteryStatus via port 0x02.
+                match self.read_battery_status {
+                    3 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_0 { 0 }
+                            else if value & 0x80 != 0 { 5 } else { 0 };
+                    }
+                    5 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_1 { 0 }
+                            else if value & 0x80 != 0 { 0 } else { 7 };
+                    }
+                    7 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_2 { 0 }
+                            else if value & 0x80 != 0 { 9 } else { 0 };
+                    }
+                    9 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_3 { 0 }
+                            else if value & 0x80 != 0 { 0 } else { 11 };
+                    }
+                    _ => {}
+                }
+
                 if old != self.power || (value & (1 << 6) != 0) {
                     crate::emu::log_evt!(
                         "POWER register: 0x{:02X} -> 0x{:02X} (bit0={} bit1={} bit7={} off={})",
@@ -287,13 +310,17 @@ impl ControlPorts {
                 }
             }
             regs::BATTERY_CONFIG => {
-                // CEmu: writing bit 4 or 7 starts battery probe
-                // Skip FSM for now - just store value
+                // CEmu control.c line 141: writing bit 4 or 7 starts battery probe
+                self.read_battery_status = if value & 0x90 != 0 { 1 } else { 0 };
                 self.battery_config = value;
             }
             regs::FIXED_7F => {} // Read-only
             regs::PANEL_CONTROL => {
-                // Skip battery FSM - just store value
+                // Battery FSM state 1 — CEmu control.c lines 145-148
+                if self.read_battery_status == 1 {
+                    self.read_battery_status = if self.set_battery_status == battery::DISCHARGED { 0 }
+                        else if value & 0x80 != 0 { 0 } else { 3 };
+                }
                 self.panel_control = value;
             }
             regs::BATTERY_CHECK => {
