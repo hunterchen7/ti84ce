@@ -10,12 +10,12 @@ let wasmInitPromise: Promise<void> | null = null;
 
 function initWasm(): Promise<void> {
   if (!wasmInitPromise) {
-    wasmInitPromise = init().catch((err) => {
+    wasmInitPromise = init().then(() => {}).catch((err) => {
       wasmInitPromise = null;
       throw err;
     });
   }
-  return wasmInitPromise;
+  return wasmInitPromise!;
 }
 
 export class RustBackend implements EmulatorBackend {
