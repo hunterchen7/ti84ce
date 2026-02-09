@@ -512,6 +512,25 @@ impl Peripherals {
             pos += 1;
         }
 
+        // LCD DMA state (32 bytes) — timing registers + DMA progress
+        // Without these, LCD DMA runs with zero timing after state restore,
+        // causing ~100x faster refresh cycles and massive CPU overhead.
+        let timing = self.lcd.timing();
+        for t in &timing {
+            buf[pos..pos+4].copy_from_slice(&t.to_le_bytes()); pos += 4;
+        }
+        buf[pos..pos+4].copy_from_slice(&self.lcd.upcurr().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.lcd.cur_row().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.lcd.cur_col().to_le_bytes()); pos += 4;
+        buf[pos] = if self.lcd.prefill() { 1 } else { 0 }; pos += 1;
+        buf[pos] = self.lcd.pos(); pos += 1;
+        pos += 2; // Padding to 32 bytes
+
+        // Timer control/status/mask words (12 bytes)
+        buf[pos..pos+4].copy_from_slice(&self.timers.control_word().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timers.status_word().to_le_bytes()); pos += 4;
+        buf[pos..pos+4].copy_from_slice(&self.timers.mask_word().to_le_bytes());
+
         buf
     }
 
@@ -591,6 +610,27 @@ impl Peripherals {
             }
             pos += 1;
         }
+
+        // LCD DMA state (32 bytes) — timing registers + DMA progress
+        let mut timing = [0u32; 4];
+        for t in &mut timing {
+            *t = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos += 4;
+        }
+        self.lcd.set_timing(timing);
+        self.lcd.set_upcurr(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_cur_row(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_cur_col(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.lcd.set_prefill(buf[pos] != 0); pos += 1;
+        self.lcd.set_pos(buf[pos]); pos += 1;
+        pos += 2; // Skip padding
+
+        // Re-derive timing parameters from restored timing registers
+        self.lcd.recompute_timing();
+
+        // Timer control/status/mask words (12 bytes)
+        self.timers.set_control_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timers.set_status_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timers.set_mask_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()));
 
         Ok(())
     }

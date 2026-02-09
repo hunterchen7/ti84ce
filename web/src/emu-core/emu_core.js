@@ -68,6 +68,15 @@ export class WasmEmu {
         return v1;
     }
     /**
+     * Check if device is off (sleeping).
+     * Returns true when the OS has put the device to sleep.
+     * @returns {boolean}
+     */
+    is_device_off() {
+        const ret = wasm.wasmemu_is_device_off(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * Check if LCD is on (should display content).
      * @returns {boolean}
      */

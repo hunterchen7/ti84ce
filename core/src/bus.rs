@@ -1069,6 +1069,12 @@ impl Bus {
         self.cycles += count;
     }
 
+    /// Set total cycle count directly (used by load_state to sync bus with restored metadata)
+    pub fn set_total_cycles(&mut self, total: u64) {
+        self.cycles = total;
+        self.mem_cycles = 0;
+    }
+
     /// Add memory timing cycles (for memory access wait states)
     pub fn add_mem_cycles(&mut self, count: u64) {
         self.mem_cycles += count;

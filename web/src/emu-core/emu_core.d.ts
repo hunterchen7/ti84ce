@@ -31,6 +31,11 @@ export class WasmEmu {
      */
     get_framebuffer_rgba(): Uint8Array;
     /**
+     * Check if device is off (sleeping).
+     * Returns true when the OS has put the device to sleep.
+     */
+    is_device_off(): boolean;
+    /**
      * Check if LCD is on (should display content).
      */
     is_lcd_on(): boolean;
@@ -93,6 +98,7 @@ export interface InitOutput {
     readonly emu_is_lcd_on: (a: number) => number;
     readonly emu_load_rom: (a: number, b: number, c: number) => number;
     readonly emu_load_state: (a: number, b: number, c: number) => number;
+    readonly emu_power_on: (a: number) => void;
     readonly emu_reset: (a: number) => void;
     readonly emu_run_cycles: (a: number, b: number) => number;
     readonly emu_save_state: (a: number, b: number, c: number) => number;
@@ -106,6 +112,7 @@ export interface InitOutput {
     readonly wasmemu_framebuffer_width: (a: number) => number;
     readonly wasmemu_get_backlight: (a: number) => number;
     readonly wasmemu_get_framebuffer_rgba: (a: number) => [number, number];
+    readonly wasmemu_is_device_off: (a: number) => number;
     readonly wasmemu_is_lcd_on: (a: number) => number;
     readonly wasmemu_load_rom: (a: number, b: number, c: number) => number;
     readonly wasmemu_load_state: (a: number, b: number, c: number) => number;

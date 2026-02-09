@@ -91,6 +91,22 @@ pub const SCREEN_HEIGHT: usize = 240;
 /// Boot completes at ~62M cycles; we wait a bit longer to ensure TI-OS is ready
 const BOOT_COMPLETE_CYCLES: u64 = 65_000_000;
 
+/// TI-OS Automatic Power Down (APD) disable address.
+///
+/// On a real TI-84 CE, the OS puts the device to sleep after ~5 minutes of
+/// inactivity. In the emulator this is undesirable because:
+///   1. The host device (phone/browser) has its own power/sleep management
+///   2. Without proper APD handling, the emulator flashes or becomes unresponsive
+///
+/// The OS stores APD control in the `apdFlags` byte at (flags + 0x08) = 0xD00088.
+/// Bit 2 (`apdAble`) enables the APD countdown timer. Clearing it prevents the OS
+/// from ever triggering inactivity sleep, while still allowing manual power-off
+/// via 2nd+ON (which writes POWER register bit 6 directly).
+///
+/// Reference: TI-84 CE SDK — flags = 0xD00080, apdFlags = flags + 0x08
+const APD_FLAGS_ADDR: u32 = 0xD00088;
+const APD_ABLE_BIT: u8 = 2;
+
 /// Number of entries in the PC/opcode history ring buffer
 const HISTORY_SIZE: usize = 64;
 
@@ -366,7 +382,6 @@ impl Emu {
         self.halt_logged = false;
         self.boot_init_done = false;
         self.powered_on = false; // Require ON key press to power on again
-
         // Initialize CPU prefetch buffer - charges cycles for first instruction's first byte
         // This matches CEmu's cpu_inst_start() call at the beginning of cpu_execute()
         self.cpu.init_prefetch(&mut self.bus);
@@ -399,9 +414,13 @@ impl Emu {
     /// screen ("TI-84 Plus CE", OS version, "RAM Cleared") to remain visible until the user
     /// presses their first key. See `set_key()` documentation for details.
     pub fn run_cycles(&mut self, cycles: u32) -> u32 {
-        if !self.rom_loaded || !self.powered_on {
+        if !self.rom_loaded || !self.powered_on || self.is_off() {
             return 0;
         }
+
+        // Sync check: bus.cycles should match total_cycles
+        debug_assert_eq!(self.total_cycles, self.bus.total_cycles(),
+            "total_cycles desync: emu={} bus={}", self.total_cycles, self.bus.total_cycles());
 
         let mut cycles_remaining = cycles as i32;
         let start_cycles = self.total_cycles;
@@ -504,6 +523,11 @@ impl Emu {
                 self.cpu.irq_pending = true;
             }
 
+            // Stop if device went off (OS wrote POWER bit 6 during this instruction)
+            if self.is_off() {
+                break;
+            }
+
             // CEmu HALT fast-forward: when halted, advance cycles to next scheduled event.
             // This matches CEmu's cpu_halt() which sets cpu.cycles = cpu.next.
             // We must do this AFTER processing scheduler events above, so we know what's next.
@@ -519,6 +543,9 @@ impl Emu {
                 let mut peripheral_debt: u64 = 0;
 
                 loop {
+                    // Stop if device went off during this frame (OS wrote POWER bit 6)
+                    if self.is_off() { break; }
+
                     let skip = self.scheduler.cycles_until_next_event();
                     if skip == 0 {
                         if !self.cpu.iff1 && !self.cpu.nmi_pending {
@@ -530,10 +557,33 @@ impl Emu {
                             );
                             break; // Nothing can wake the CPU
                         }
-                        // iff1 is true but no events — need tick_peripherals to
-                        // advance the OS Timer which may generate an interrupt.
-                        // Advance one batch worth so the OS Timer can fire.
-                        let batch = HALT_TICK_BATCH.min(cycles_remaining.max(0) as u64);
+
+                        // Process any pending events first (e.g. LcdDma in the
+                        // past after DMA stealing advanced base_ticks). Without
+                        // this, the batch path would advance base_ticks further
+                        // without processing the pending event, growing the gap
+                        // and causing a DMA catch-up storm on HALT exit.
+                        self.process_scheduler_events();
+                        let dma_stolen = self.process_dma_stealing();
+                        if dma_stolen > 0 {
+                            cycles_remaining -= dma_stolen as i32;
+                            peripheral_debt += dma_stolen;
+                        }
+
+                        // Check if processing events made a future event available
+                        let new_skip = self.scheduler.cycles_until_next_event();
+                        if new_skip > 0 {
+                            continue; // Retry with the new skip value
+                        }
+
+                        // Genuinely no events — batch advance so tick_peripherals
+                        // can generate an OS Timer interrupt to wake the CPU.
+                        // Cap at SCHED_SECOND boundary to prevent process_second()
+                        // from saturating event timestamps to 0 (causes DMA catch-up storm).
+                        let to_sched_second = self.scheduler.cycles_until_sched_second();
+                        let batch = HALT_TICK_BATCH
+                            .min(to_sched_second.max(1))
+                            .min(cycles_remaining.max(0) as u64);
                         if batch == 0 { break; }
                         self.bus.add_cycles(batch);
                         cycles_remaining -= batch as i32;
@@ -543,6 +593,7 @@ impl Emu {
                             self.cpu.irq_pending = true;
                             break; // Interrupt will wake CPU on next step()
                         }
+                        peripheral_debt = 0; // batch already ticked peripherals
                         continue;
                     }
 
@@ -1053,7 +1104,16 @@ impl Emu {
                         .base_ticks_per_tick(self.scheduler.cpu_speed());
                     if let Some(ticks) = result.repeat_ticks {
                         self.scheduler.dma_last_mem_timestamp += ticks * tick_unit;
-                        self.scheduler.repeat(EventId::LcdDma, ticks);
+                        let skipped = self.scheduler.repeat_catchup(EventId::LcdDma, ticks);
+                        if skipped > 0 {
+                            // Fast-forward LCD DMA state for the skipped events
+                            // (advances cur_col, cur_row, upcurr in O(1)).
+                            // Do NOT add dma_last_mem_timestamp for skipped events:
+                            // the bus contention didn't actually happen, and adding
+                            // it would cause process_dma_stealing to advance base_ticks
+                            // past the rescheduled event, creating a feedback loop.
+                            self.bus.ports.lcd.fast_forward_dma_events(skipped);
+                        }
                     } else if let Some(offset) = result.schedule_relative {
                         // Schedule relative to LCD event
                         self.scheduler.repeat_relative(
@@ -1187,6 +1247,7 @@ impl Emu {
             if row == 6 && col == 0 {
                 log_evt!("BOOT_INIT: first key is ENTER, using it to dismiss boot screen");
                 self.boot_init_done = true;
+                self.disable_apd();
                 // Continue to process user's ENTER press below
             } else {
                 log_evt!("BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER");
@@ -1198,6 +1259,7 @@ impl Emu {
                 self.bus.set_key(6, 0, false);
                 self.run_cycles_internal(3_000_000);
                 self.boot_init_done = true;
+                self.disable_apd();
                 log_evt!("BOOT_INIT: boot screen dismissed, processing user key");
                 // Continue to process the original key press below
             }
@@ -1224,6 +1286,14 @@ impl Emu {
         }
     }
 
+    /// Disable TI-OS Automatic Power Down (APD) by clearing the `apdAble` flag
+    /// in the OS system flags area. See APD_FLAGS_ADDR constant for details.
+    fn disable_apd(&mut self) {
+        let flags = self.bus.peek_byte(APD_FLAGS_ADDR);
+        self.bus.poke_byte(APD_FLAGS_ADDR, flags & !(1 << APD_ABLE_BIT));
+        log_evt!("APD disabled: apdFlags 0x{:02X} -> 0x{:02X}", flags, flags & !(1 << APD_ABLE_BIT));
+    }
+
     /// Get the backlight brightness level (0-255).
     /// Returns 0 when backlight is off (screen should appear black).
     pub fn get_backlight(&self) -> u8 {
@@ -1239,24 +1309,48 @@ impl Emu {
         self.bus.ports.control.lcd_flag_enabled() && self.bus.ports.lcd.is_powered()
     }
 
+    /// Check if the device is in the "off" (sleep) state.
+    /// The OS writes bit 6 of the POWER register to enter sleep mode.
+    /// The device stays off until an ON key press triggers a WAKE interrupt.
+    pub fn is_off(&self) -> bool {
+        self.bus.ports.control.is_off()
+    }
+
     /// Press the ON key - wakes CPU from HALT even with interrupts disabled
     /// Also raises the ON_KEY and WAKE interrupts for normal interrupt handling
+    ///
+    /// Matches CEmu's keypad_on_check(): when device is off, pulses INT_WAKE
+    /// and clears control.off. The pulse (set then clear) handles the case where
+    /// the OS has configured WAKE as inverted — the clear step sets the status bit.
+    /// wake() also sets readBatteryStatus = 0xFE so the OS WAKE ISR sees a valid battery.
     pub fn press_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
 
         log_evt!("ON_KEY pressed");
         // Power on the calculator
         self.powered_on = true;
-        // Set the wake signal - this wakes CPU from HALT regardless of IFF1
+        // Set the one-shot wake signal — consumed on first cpu.step() call.
         self.cpu.on_key_wake = true;
 
         // Set ON key in keypad matrix (row 2, col 0)
         self.bus.set_key(2, 0, true);
 
-        // Raise both ON_KEY and WAKE interrupts
-        // WAKE is the power-on wake signal (bit 19)
+        // Raise INT_ON (matches CEmu: intrpt_set(INT_ON, onState) with onState truthy)
         self.bus.ports.interrupt.raise(sources::ON_KEY);
-        self.bus.ports.interrupt.raise(sources::WAKE);
+
+        // Handle WAKE interrupt — only when device is off (matches CEmu exactly).
+        // CEmu's keypad_on_check(): if (control.off && onState) { control.off=false; intrpt_pulse(INT_WAKE); }
+        // wake() clears off and sets readBatteryStatus=0xFE so the OS ISR sees valid battery.
+        if self.bus.ports.control.is_off() {
+            log_evt!("WAKE: device off, clearing off + pulsing WAKE");
+            self.bus.ports.control.wake();
+            self.bus.ports.interrupt.pulse(sources::WAKE);
+            // Disable APD on every wake — if the OS put the device to sleep via APD,
+            // the APD timer is still expired. Without clearing apdAble, the OS will
+            // immediately re-sleep after the WAKE ISR runs, causing the screen to
+            // flash briefly and become unresponsive.
+            self.disable_apd();
+        }
 
         // Ensure CPU sees a pending interrupt even if interrupts are disabled.
         // ON key wake is special: ROM expects an interrupt path to run after wake.
@@ -1264,24 +1358,23 @@ impl Emu {
     }
 
     /// Release the ON key
+    /// Clears ON_KEY raw (matches CEmu: intrpt_set(INT_ON, false) on release).
+    /// WAKE is NOT touched on release — CEmu only pulses WAKE on press when off.
+    /// on_key_wake is one-shot (consumed in step()), no need to clear here.
     pub fn release_on_key(&mut self) {
         use crate::peripherals::interrupt::sources;
-
         log_evt!("ON_KEY released");
-        // Clear ON key in keypad matrix
         self.bus.set_key(2, 0, false);
-
-        // Clear the raw ON_KEY and WAKE state (source inactive)
         self.bus.ports.interrupt.clear_raw(sources::ON_KEY);
-        self.bus.ports.interrupt.clear_raw(sources::WAKE);
     }
 
     /// Simulate initial power-on sequence
     /// Call this after loading ROM but before run_cycles to simulate
     /// the calculator being turned on via the ON key
     pub fn power_on(&mut self) {
-        // Simulate the ON key being pressed (this is what turns on the calculator)
+        // Simulate the ON key being pressed and released.
         self.press_on_key();
+        self.release_on_key();
     }
 
     /// Get current keypad mode (for debugging)
@@ -1294,29 +1387,41 @@ impl Emu {
     pub fn render_frame(&mut self) {
         let upbase = self.bus.ports.lcd.upbase();
 
-        // Read VRAM and convert to ARGB8888
-        for y in 0..SCREEN_HEIGHT {
-            for x in 0..SCREEN_WIDTH {
-                let pixel_offset = (y * SCREEN_WIDTH + x) * 2;
-                let vram_addr = upbase + pixel_offset as u32;
+        // VRAM lives in the RAM region — read directly from the backing store
+        // instead of 153,600 peek_byte calls through the bus decode path.
+        let ram_offset = upbase.wrapping_sub(crate::memory::addr::RAM_START) as usize;
+        let needed = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
+        let ram_data = self.bus.ram.data();
 
-                // Read RGB565 pixel (little-endian)
-                let lo = self.bus.peek_byte(vram_addr) as u16;
-                let hi = self.bus.peek_byte(vram_addr + 1) as u16;
-                let rgb565 = lo | (hi << 8);
-
-                // Convert RGB565 to ARGB8888
+        if ram_offset < ram_data.len() && ram_offset + needed <= ram_data.len() {
+            let vram = &ram_data[ram_offset..ram_offset + needed];
+            for (i, chunk) in vram.chunks_exact(2).enumerate() {
+                let rgb565 = u16::from_le_bytes([chunk[0], chunk[1]]);
                 let r = ((rgb565 >> 11) & 0x1F) as u8;
                 let g = ((rgb565 >> 5) & 0x3F) as u8;
                 let b = (rgb565 & 0x1F) as u8;
-
-                // Expand to 8-bit (replicate high bits into low bits)
                 let r8 = (r << 3) | (r >> 2);
                 let g8 = (g << 2) | (g >> 4);
                 let b8 = (b << 3) | (b >> 2);
-
-                let argb = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
-                self.framebuffer[y * SCREEN_WIDTH + x] = argb;
+                self.framebuffer[i] = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+            }
+        } else {
+            // Fallback for out-of-range UPBASE (e.g. before LCD is configured)
+            for y in 0..SCREEN_HEIGHT {
+                for x in 0..SCREEN_WIDTH {
+                    let pixel_offset = (y * SCREEN_WIDTH + x) * 2;
+                    let vram_addr = upbase + pixel_offset as u32;
+                    let lo = self.bus.peek_byte(vram_addr) as u16;
+                    let hi = self.bus.peek_byte(vram_addr + 1) as u16;
+                    let rgb565 = lo | (hi << 8);
+                    let r = ((rgb565 >> 11) & 0x1F) as u8;
+                    let g = ((rgb565 >> 5) & 0x3F) as u8;
+                    let b = (rgb565 & 0x1F) as u8;
+                    let r8 = (r << 3) | (r >> 2);
+                    let g8 = (g << 2) | (g >> 4);
+                    let b8 = (b << 3) | (b >> 2);
+                    self.framebuffer[y * SCREEN_WIDTH + x] = 0xFF000000 | ((r8 as u32) << 16) | ((g8 as u32) << 8) | (b8 as u32);
+                }
             }
         }
     }
@@ -1324,7 +1429,7 @@ impl Emu {
     // ========== State Persistence ==========
 
     /// State format version (v7: DMA scheduling, scheduler grew from 88→96 bytes for DMA state)
-    const STATE_VERSION: u32 = 7;
+    const STATE_VERSION: u32 = 8;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
@@ -1492,13 +1597,34 @@ impl Emu {
         // Load Flash
         self.bus.flash.load_data(&buffer[pos..pos+FLASH_SIZE]);
 
+        // Sync bus cycle counter with restored total_cycles.
+        // load_rom() → reset() zeroed bus.cycles, but total_cycles was restored
+        // from metadata. Without this sync, the first self.total_cycles =
+        // self.bus.total_cycles() in run_cycles() would overwrite the restored
+        // value, causing the `executed` return to wrap.
+        self.bus.set_total_cycles(self.total_cycles);
+
+        // Clear stale cpu_speed_written flag left by from_bytes calling
+        // control.write(0x01, ...).  Without this, the next control-port
+        // write would trigger a spurious cycle conversion on already-correct
+        // scheduler timestamps.
+        self.bus.ports.control.cpu_speed_changed();
+
         // Reset transient state
         self.rom_loaded = true;
         self.halt_logged = false;
         self.history.clear();
         self.last_stop = StopReason::CyclesComplete;
 
-        log_evt!("STATE_LOADED");
+        log_evt!(
+            "STATE_LOADED total_cycles={} bus_cycles={} base_ticks={} dma_ts={} cpu_speed={} pc={:06X}",
+            self.total_cycles,
+            self.bus.total_cycles(),
+            self.scheduler.base_ticks,
+            self.scheduler.dma_last_mem_timestamp,
+            self.scheduler.cpu_speed(),
+            self.cpu.pc
+        );
         Ok(())
     }
 
@@ -2159,6 +2285,7 @@ mod tests {
 
         // Press ON key - should wake CPU even though interrupts are disabled
         emu.press_on_key();
+        assert!(emu.cpu.on_key_wake); // One-shot signal set
 
         // Run some more cycles - CPU should wake and execute NOPs
         let cycles_before = emu.total_cycles;
@@ -2168,6 +2295,7 @@ mod tests {
         assert!(!emu.cpu.halted);
         assert!(emu.total_cycles > cycles_before);
         assert!(emu.cpu.pc > 2); // PC moved past HALT
+        assert!(!emu.cpu.on_key_wake); // One-shot consumed by step()
     }
 
     #[test]
@@ -2185,13 +2313,16 @@ mod tests {
 
         // Press ON key to wake
         emu.press_on_key();
+        assert!(emu.cpu.on_key_wake); // One-shot set
 
         // Manually step once to process the wake path
+        // on_key_wake path: consumes one-shot, clears halted, enables IFF, adds 1 cycle
         let cycles = emu.cpu.step(&mut emu.bus);
-        assert_eq!(cycles, 4);
+        assert_eq!(cycles, 1);
         assert!(!emu.cpu.halted);
         assert!(emu.cpu.iff1);
         assert!(emu.cpu.irq_pending);
+        assert!(!emu.cpu.on_key_wake); // One-shot consumed
     }
 
     #[test]
@@ -2211,20 +2342,55 @@ mod tests {
     }
 
     #[test]
-    fn test_on_key_release_clears_raw() {
+    fn test_on_key_interrupt_behavior() {
         use crate::peripherals::interrupt::sources;
 
         let mut emu = Emu::new();
-        let rom = vec![0x00]; // NOP
+        let rom = vec![0x00; 16]; // NOPs
         emu.load_rom(&rom).unwrap();
 
-        // Press and release ON key
+        // Press ON key — should set ON_KEY in interrupt status.
+        // WAKE is NOT raised when device is not off (matches CEmu).
         emu.press_on_key();
+
+        let status = emu.bus.ports.interrupt.read(0x00);
+        assert_ne!(status & (sources::ON_KEY as u8), 0,
+            "ON_KEY status should be set after press");
+
+        // Release ON key — ON_KEY raw clears (matches CEmu: intrpt_set(INT_ON, false))
         emu.release_on_key();
 
-        // Raw state should be cleared
-        let raw = emu.bus.ports.interrupt.read(0x08); // RAW register
-        assert_eq!(raw & (sources::ON_KEY as u8), 0);
+        // ON_KEY should clear after release (non-latched follows raw)
+        let status_after = emu.bus.ports.interrupt.read(0x00);
+        assert_eq!(status_after & (sources::ON_KEY as u8), 0,
+            "ON_KEY status should clear after release (non-latched)");
+    }
+
+    #[test]
+    fn test_on_key_wake_from_off() {
+        use crate::peripherals::interrupt::sources;
+
+        let mut emu = Emu::new();
+        let rom = vec![0x00; 16]; // NOPs
+        emu.load_rom(&rom).unwrap();
+
+        // Simulate device being off (OS wrote bit 6 to port 0x00)
+        emu.bus.ports.control.write(0x00, 0x40); // Set bit 6 → off=true
+        assert!(emu.bus.ports.control.is_off());
+
+        // Configure WAKE as inverted (matches what the OS does before sleeping)
+        // Inverted register is at offset 0x10 in interrupt controller
+        // WAKE is bit 19 → byte 2 (bits 16-23), bit 3
+        emu.bus.ports.interrupt.write(0x12, (sources::WAKE >> 16) as u8);
+
+        // Press ON key — should pulse WAKE and clear off
+        emu.press_on_key();
+
+        assert!(!emu.bus.ports.control.is_off(), "off should be cleared after wake");
+        // For inverted WAKE, pulse sets status via the clear step
+        let wake_byte = emu.bus.ports.interrupt.read(0x02); // status bits 16-23
+        assert_ne!(wake_byte & ((sources::WAKE >> 16) as u8), 0,
+            "WAKE status should be set after pulse (inverted logic)");
     }
 
     #[test]

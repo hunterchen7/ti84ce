@@ -128,6 +128,20 @@ pub extern "C" fn emu_reset(emu: *mut SyncEmu) {
     emu.reset();
 }
 
+/// Power on the emulator (simulate ON key press+release).
+/// Must be called after load_rom() to start execution.
+#[no_mangle]
+#[cfg_attr(feature = "ios_prefixed", export_name = "rust_emu_power_on")]
+pub extern "C" fn emu_power_on(emu: *mut SyncEmu) {
+    if emu.is_null() {
+        return;
+    }
+
+    let sync_emu = unsafe { &*emu };
+    let mut emu = sync_emu.inner.lock().unwrap();
+    emu.power_on();
+}
+
 /// Run the emulator for the specified number of cycles.
 /// Returns the number of cycles actually executed.
 /// Also updates the framebuffer with current VRAM contents.

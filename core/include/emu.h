@@ -19,6 +19,9 @@ int  emu_load_rom(Emu*, const uint8_t* data, size_t len); // 0 ok, else error co
 
 void emu_reset(Emu*);
 
+// Power on (simulate ON key press+release to wake from reset)
+void emu_power_on(Emu*);
+
 // execution
 int  emu_run_cycles(Emu*, int cycles); // returns executed cycles
 

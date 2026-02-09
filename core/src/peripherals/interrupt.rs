@@ -96,6 +96,16 @@ impl InterruptController {
         self.set_source(source, false);
     }
 
+    /// Pulse an interrupt (set then clear raw).
+    /// This creates a proper edge transition that works regardless of polarity:
+    /// - Non-inverted + latched: set step sets status, clear step can't remove (latched)
+    /// - Inverted: clear step sets status (inverted logic: raw LOW → status HIGH)
+    /// Matches CEmu's intrpt_pulse() used for WAKE interrupt on ON key press.
+    pub fn pulse(&mut self, mask: u32) {
+        self.set_source(mask, true);
+        self.set_source(mask, false);
+    }
+
     /// Acknowledge (clear) interrupt status bits
     pub fn acknowledge(&mut self, mask: u32) {
         for bank in &mut self.banks {

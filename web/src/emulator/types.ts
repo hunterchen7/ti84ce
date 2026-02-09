@@ -28,6 +28,9 @@ export interface EmulatorBackend {
   saveState(): Uint8Array | null;
   loadState(data: Uint8Array): boolean;
 
+  // State queries
+  isLcdOn(): boolean;
+
   // Info
   readonly name: string;
   readonly isInitialized: boolean;

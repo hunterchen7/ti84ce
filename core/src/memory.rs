@@ -403,7 +403,10 @@ impl Ram {
 
     /// Load RAM data from save state
     pub fn load_data(&mut self, data: &[u8]) {
-        let len = data.len().min(addr::RAM_SIZE);
+        if self.data.is_empty() {
+            self.data = vec![0x00; addr::RAM_SIZE];
+        }
+        let len = data.len().min(self.data.len());
         self.data[..len].copy_from_slice(&data[..len]);
     }
 

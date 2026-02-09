@@ -30,6 +30,7 @@ typedef void (*backend_destroy_fn)(Emu*);
 typedef void (*backend_set_log_callback_fn)(emu_log_cb_t);
 typedef int (*backend_load_rom_fn)(Emu*, const uint8_t*, size_t);
 typedef void (*backend_reset_fn)(Emu*);
+typedef void (*backend_power_on_fn)(Emu*);
 typedef int (*backend_run_cycles_fn)(Emu*, int);
 typedef const uint32_t* (*backend_framebuffer_fn)(const Emu*, int*, int*);
 typedef void (*backend_set_key_fn)(Emu*, int, int, int);
@@ -51,6 +52,7 @@ struct BackendInterface {
     backend_set_log_callback_fn set_log_callback = nullptr;
     backend_load_rom_fn load_rom = nullptr;
     backend_reset_fn reset = nullptr;
+    backend_power_on_fn power_on = nullptr;
     backend_run_cycles_fn run_cycles = nullptr;
     backend_framebuffer_fn framebuffer = nullptr;
     backend_set_key_fn set_key = nullptr;
@@ -126,6 +128,7 @@ static bool loadBackend(const std::string& backendName) {
     LOAD_FUNC(set_log_callback)
     LOAD_FUNC(load_rom)
     LOAD_FUNC(reset)
+    LOAD_FUNC(power_on)
     LOAD_FUNC(run_cycles)
     LOAD_FUNC(framebuffer)
     LOAD_FUNC(set_key)
@@ -350,6 +353,18 @@ Java_com_calc_emulator_EmulatorBridge_nativeReset(JNIEnv* env, jobject thiz, jlo
         if (g_backend.isLoaded()) {
             LOGI("Resetting emulator");
             g_backend.reset(emu);
+        }
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_calc_emulator_EmulatorBridge_nativePowerOn(JNIEnv* env, jobject thiz, jlong handle) {
+    Emu* emu = toEmu(handle);
+    if (emu != nullptr) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (g_backend.isLoaded()) {
+            LOGI("Powering on emulator");
+            g_backend.power_on(emu);
         }
     }
 }

@@ -34,6 +34,7 @@ void emu_set_log_callback(emu_log_cb_t cb);
 
 int  emu_load_rom(Emu*, const uint8_t* data, size_t len);
 void emu_reset(Emu*);
+void emu_power_on(Emu*);
 
 int  emu_run_cycles(Emu*, int cycles);
 

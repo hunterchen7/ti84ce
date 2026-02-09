@@ -166,24 +166,15 @@ export function Calculator({
     const oldBackend = backendRef.current;
     const oldAnimation = animationRef.current;
 
-    // Clean up old backend synchronously first
+    // Clean up old backend synchronously
     if (oldAnimation) {
       cancelAnimationFrame(oldAnimation);
       animationRef.current = 0;
     }
-
-    // Clear the ref before destroying to prevent any in-flight calls
+    if (oldBackend) {
+      oldBackend.destroy();
+    }
     backendRef.current = null;
-
-    // Small delay to let any pending operations complete
-    const cleanup = () => {
-      if (oldBackend) {
-        oldBackend.destroy();
-      }
-    };
-
-    // Defer cleanup to next tick to avoid race conditions
-    setTimeout(cleanup, 0);
 
     const initBackend = async () => {
       setInitialized(false);
@@ -200,8 +191,9 @@ export function Calculator({
         await backend.init();
 
         if (cancelled) {
-          // Component unmounted or backend changed during init
-          backend.destroy();
+          // Don't call destroy()/free() here — the WASM allocator may reuse
+          // the freed pointer for the next WasmEmu, corrupting its borrow state.
+          // The FinalizationRegistry will clean up the orphaned object safely.
           return;
         }
 
@@ -209,25 +201,27 @@ export function Calculator({
         setBackendName(backend.name);
         setInitialized(true);
 
-        // If we had a ROM loaded, reload it
-        if (romDataRef.current) {
-          const romHash = await storage.getRomHash(romDataRef.current);
+        // Helper to load ROM into the backend with state restore
+        const loadRomIntoBackend = async (data: Uint8Array) => {
+          if (cancelled) return;
+
+          const romHash = await storage.getRomHash(data);
           romHashRef.current = romHash;
 
-          const result = await backend.loadRom(romDataRef.current);
+          let currentBackend = backend;
+          const result = await currentBackend.loadRom(data);
+          if (cancelled) return;
+
           if (result === 0) {
-            // Try to load saved state (namespaced by backend)
-            let restored = false;
             try {
               const savedState = await storage.loadState(romHash, backendType);
-              if (savedState && backend.loadState(savedState)) {
+              if (savedState && currentBackend.loadState(savedState)) {
                 console.log(
                   "[State] Restored state for ROM:",
                   romHash,
                   "backend:",
                   backendType,
                 );
-                restored = true;
               }
             } catch (e) {
               console.warn(
@@ -235,62 +229,48 @@ export function Calculator({
                 e,
               );
               await storage.deleteState(romHash, backendType).catch(() => {});
-            }
-            if (!restored) {
-              backend.powerOn();
-            }
-            setRomLoaded(true);
-            setIsRunning(true); // Auto-start after backend switch
-          } else {
-            setError(
-              `Failed to load ROM with ${backend.name}: error code ${result}`,
-            );
-          }
-        } else if (useBundledRom) {
-          // Defer ROM loading to let UI render first
-          setTimeout(async () => {
-            if (cancelled) return;
-            const bundledData = await loadBundledRom();
-            if (bundledData) {
-              romDataRef.current = bundledData;
-              const romHash = await storage.getRomHash(bundledData);
-              romHashRef.current = romHash;
 
-              const result = await backend.loadRom(bundledData);
-              if (result === 0) {
-                // Try to load saved state (namespaced by backend)
-                let restored = false;
-                try {
-                  const savedState = await storage.loadState(
-                    romHash,
-                    backendType,
-                  );
-                  if (savedState && backend.loadState(savedState)) {
-                    console.log(
-                      "[State] Restored state for ROM:",
-                      romHash,
-                      "backend:",
-                      backendType,
-                    );
-                    restored = true;
-                  }
-                } catch (e) {
-                  console.warn(
-                    "[State] Failed to restore state, clearing stale data:",
-                    e,
-                  );
-                  await storage
-                    .deleteState(romHash, backendType)
-                    .catch(() => {});
+              // Backend may be poisoned after a WASM panic — recreate it
+              try {
+                currentBackend.destroy();
+                const freshBackend = createBackend(backendType);
+                await freshBackend.init();
+                if (cancelled) return;
+                const reloadResult = await freshBackend.loadRom(data);
+                if (reloadResult !== 0) {
+                  if (!cancelled) setError(`Failed to reload ROM: error code ${reloadResult}`);
+                  return;
                 }
-                if (!restored) {
-                  backend.powerOn();
-                }
-                setRomLoaded(true);
-                setIsRunning(true);
+                currentBackend = freshBackend;
+                backendRef.current = freshBackend;
+                setBackendName(freshBackend.name);
+              } catch (retryErr) {
+                console.error("[State] Failed to recreate backend after state restore failure:", retryErr);
+                if (!cancelled) setError(`Backend recovery failed: ${retryErr}`);
+                return;
               }
             }
-          }, 0);
+            if (!cancelled) {
+              setRomLoaded(true);
+              setIsRunning(true);
+            }
+          } else {
+            if (!cancelled) {
+              setError(
+                `Failed to load ROM with ${currentBackend.name}: error code ${result}`,
+              );
+            }
+          }
+        };
+
+        if (romDataRef.current) {
+          await loadRomIntoBackend(romDataRef.current);
+        } else if (useBundledRom) {
+          const bundledData = await loadBundledRom();
+          if (bundledData && !cancelled) {
+            romDataRef.current = bundledData;
+            await loadRomIntoBackend(bundledData);
+          }
         }
       } catch (err) {
         if (!cancelled) {
@@ -307,7 +287,12 @@ export function Calculator({
         cancelAnimationFrame(animationRef.current);
         animationRef.current = 0;
       }
-      // Don't destroy here - will be handled on next init or unmount
+      // Destroy backend on unmount/re-run — next effect invocation
+      // will also destroy via oldBackend above, but this covers final unmount.
+      if (backendRef.current) {
+        backendRef.current.destroy();
+        backendRef.current = null;
+      }
     };
   }, [backendType, useBundledRom]);
 
@@ -332,18 +317,6 @@ export function Calculator({
     };
   }, [saveState]);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
-      }
-      if (backendRef.current) {
-        backendRef.current.destroy();
-        backendRef.current = null;
-      }
-    };
-  }, []);
 
   // Handle ROM file loading
   const handleRomLoad = useCallback(async (file: File) => {
@@ -377,8 +350,7 @@ export function Calculator({
       console.log(`[ROM] loadRom returned: ${result}`);
 
       if (result === 0) {
-        console.log("ROM loaded successfully, calling powerOn...");
-        freshBackend.powerOn();
+        console.log("ROM loaded successfully, waiting for ON key press...");
 
         setRomLoaded(true);
         setIsRunning(true); // Auto-start
@@ -407,6 +379,13 @@ export function Calculator({
 
       const width = backend.getFramebufferWidth();
       const height = backend.getFramebufferHeight();
+
+      // Show black screen when LCD is off (sleeping or disabled)
+      if (!backend.isLcdOn()) {
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, width, height);
+        return;
+      }
 
       // Get framebuffer as RGBA
       const rgba = backend.getFramebufferRGBA();

@@ -54,6 +54,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.res.painterResource
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.calc.emulator.ui.theme.TI84EmulatorTheme
 import kotlinx.coroutines.*
 import java.io.InputStream
@@ -132,13 +135,16 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         super.onPause()
         // Save state when going to background
-        currentRomHash?.let { hash ->
+        val hash = currentRomHash
+        if (hash != null) {
             Log.i(TAG, "Saving state on pause for ROM: $hash")
             if (stateManager.saveState(emulator, hash)) {
                 Log.i(TAG, "State saved successfully")
             } else {
                 Log.w(TAG, "Failed to save state")
             }
+        } else {
+            Log.d(TAG, "onPause: no ROM hash, skipping state save")
         }
     }
 
@@ -157,6 +163,7 @@ fun EmulatorScreen(
     getCurrentRomHash: () -> String?
 ) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     // Emulator state
     var isRunning by remember { mutableStateOf(false) }
@@ -181,9 +188,11 @@ fun EmulatorScreen(
                     currentRomHash = savedRomHash
                     onRomLoaded(savedRomHash)
 
-                    // Restore saved state
+                    // Restore saved state or wait for ON key press
                     if (stateManager.loadState(emulator, savedRomHash)) {
                         Log.i("EmulatorScreen", "Auto-restored saved state for ROM: $savedRomHash")
+                    } else {
+                        Log.i("EmulatorScreen", "No saved state, waiting for ON key press")
                     }
 
                     isRunning = true
@@ -194,6 +203,29 @@ fun EmulatorScreen(
             } else {
                 Log.i("EmulatorScreen", "No saved ROM found for hash: $savedRomHash")
             }
+        }
+    }
+
+    // Pause emulation when app goes to background, resume when foregrounded
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_PAUSE -> {
+                    Log.d("EmulatorScreen", "Lifecycle ON_PAUSE: pausing emulation")
+                    isRunning = false
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    if (romLoaded) {
+                        Log.d("EmulatorScreen", "Lifecycle ON_RESUME: resuming emulation")
+                        isRunning = true
+                    }
+                }
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
         }
     }
 
@@ -255,9 +287,11 @@ fun EmulatorScreen(
                         frameCounter = 0
                         logLines.clear()
 
-                        // Try to restore saved state
+                        // Try to restore saved state or wait for ON key press
                         if (stateManager.loadState(emulator, hash)) {
                             Log.i("EmulatorScreen", "Restored saved state for ROM: $hash")
+                        } else {
+                            Log.i("EmulatorScreen", "No saved state, waiting for ON key press")
                         }
 
                         isRunning = true  // Auto-start
@@ -600,7 +634,8 @@ fun EmulatorView(
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
-                drawerContainerColor = Color(0xFF1A1A2E)
+                drawerContainerColor = Color(0xFF1A1A2E).copy(alpha = 0.7f),
+                modifier = Modifier.fillMaxWidth(0.6f)
             ) {
                 Spacer(modifier = Modifier.height(24.dp))
                 Text(

@@ -179,6 +179,13 @@ impl WasmEmu {
         self.inner.is_lcd_on()
     }
 
+    /// Check if device is off (sleeping).
+    /// Returns true when the OS has put the device to sleep.
+    #[wasm_bindgen]
+    pub fn is_device_off(&self) -> bool {
+        self.inner.is_off()
+    }
+
     /// Get the size needed for a save state buffer.
     #[wasm_bindgen]
     pub fn save_state_size(&self) -> usize {

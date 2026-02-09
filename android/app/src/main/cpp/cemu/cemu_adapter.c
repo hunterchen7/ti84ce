@@ -356,6 +356,15 @@ void EMU_FUNC(emu_reset)(Emu* emu) {
     }
 }
 
+void EMU_FUNC(emu_power_on)(Emu* emu) {
+    if (!emu || emu != g_instance || !emu->initialized) {
+        return;
+    }
+    // Simulate ON key press and release to wake from reset
+    emu_keypad_event(0, 0, true);   // ON key down
+    emu_keypad_event(0, 0, false);  // ON key up
+}
+
 int EMU_FUNC(emu_run_cycles)(Emu* emu, int cycles) {
     if (!emu || emu != g_instance || !emu->initialized || cycles <= 0) {
         return 0;

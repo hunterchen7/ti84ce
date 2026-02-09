@@ -119,6 +119,10 @@ pub struct ControlPorts {
     /// Protection status (NMI cause bits)
     /// Bit 0: stack limit violation, Bit 1: protected memory violation
     protection_status: u8,
+    /// CEmu: control.off — device is in power-off state.
+    /// Set when OS writes bit 6 to port 0x00 (checked on original byte before 0x93 mask).
+    /// Cleared by ON key wake (keypad_on_check in CEmu).
+    off: bool,
 }
 
 impl ControlPorts {
@@ -153,6 +157,7 @@ impl ControlPorts {
             set_battery_status: battery::LEVEL_4, // Full battery
             battery_charging: false,
             protection_status: 0,
+            off: false,
         }
     }
 
@@ -171,10 +176,9 @@ impl ControlPorts {
             }
             regs::CPU_SPEED => self.cpu_speed,
             regs::BATTERY_STATUS => {
-                // For now, always return 0 which indicates battery probe complete
-                // The FSM is complex and our implementation might not match CEmu exactly
-                // TODO: Implement proper battery FSM if needed for specific ROM behavior
-                0
+                // CEmu: returns control.readBatteryStatus
+                // Set to 0xFE (~1) on wake from off, 0 otherwise
+                self.read_battery_status
             }
             regs::DEVICE_TYPE => self.device_type,
             regs::CONTROL_FLAGS => self.control_flags,
@@ -237,22 +241,50 @@ impl ControlPorts {
     pub fn write(&mut self, addr: u32, value: u8) {
         match addr {
             regs::POWER => {
-                // Bit 4 is read-only (power stable indicator)
-                // Only bits 0, 1, 7 are writable (0x93 mask per CEmu)
+                // CEmu: control.ports[0] = byte & 0x93 (bits 0,1,4,7 writable)
+                // Bit 6 checked on ORIGINAL byte (before mask) for control.off
                 let old = self.power;
                 self.power = value & 0x93;
-                // Log power register changes to detect APO (Auto Power Off)
-                if old != self.power {
+
+                // CEmu: if (byte & (1 << 6)) { control.off = true; }
+                // Bit 6 triggers power-off. Checked on original value, NOT masked.
+                if value & (1 << 6) != 0 {
+                    self.off = true;
+                }
+
+                // Battery FSM — CEmu control.c lines 93-106
+                // The ROM probes battery by writing patterns to port 0x00 and
+                // reading transitions in readBatteryStatus via port 0x02.
+                match self.read_battery_status {
+                    3 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_0 { 0 }
+                            else if value & 0x80 != 0 { 5 } else { 0 };
+                    }
+                    5 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_1 { 0 }
+                            else if value & 0x80 != 0 { 0 } else { 7 };
+                    }
+                    7 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_2 { 0 }
+                            else if value & 0x80 != 0 { 9 } else { 0 };
+                    }
+                    9 => {
+                        self.read_battery_status = if self.set_battery_status == battery::LEVEL_3 { 0 }
+                            else if value & 0x80 != 0 { 0 } else { 11 };
+                    }
+                    _ => {}
+                }
+
+                if old != self.power || (value & (1 << 6) != 0) {
                     crate::emu::log_evt!(
-                        "POWER register: 0x{:02X} -> 0x{:02X} (bit0={} bit1={} bit7={})",
+                        "POWER register: 0x{:02X} -> 0x{:02X} (bit0={} bit1={} bit7={} off={})",
                         old, self.power,
                         self.power & 1,
                         (self.power >> 1) & 1,
-                        (self.power >> 7) & 1
+                        (self.power >> 7) & 1,
+                        self.off
                     );
                 }
-                // Battery FSM transitions would go here if implemented
-                // For now we skip the FSM to ensure boot completes
             }
             regs::CPU_SPEED => {
                 // CEmu: control.ports[index] = byte & 19 (0x13)
@@ -278,13 +310,17 @@ impl ControlPorts {
                 }
             }
             regs::BATTERY_CONFIG => {
-                // CEmu: writing bit 4 or 7 starts battery probe
-                // Skip FSM for now - just store value
+                // CEmu control.c line 141: writing bit 4 or 7 starts battery probe
+                self.read_battery_status = if value & 0x90 != 0 { 1 } else { 0 };
                 self.battery_config = value;
             }
             regs::FIXED_7F => {} // Read-only
             regs::PANEL_CONTROL => {
-                // Skip battery FSM - just store value
+                // Battery FSM state 1 — CEmu control.c lines 145-148
+                if self.read_battery_status == 1 {
+                    self.read_battery_status = if self.set_battery_status == battery::DISCHARGED { 0 }
+                        else if value & 0x80 != 0 { 0 } else { 3 };
+                }
                 self.panel_control = value;
             }
             regs::BATTERY_CHECK => {
@@ -348,6 +384,20 @@ impl ControlPorts {
             0x3E => self.protection_status &= !value,
             _ => {}
         }
+    }
+
+    /// Check if device is in "off" (sleep) state.
+    /// CEmu: control.off — set when OS writes bit 6 to port 0x00.
+    pub fn is_off(&self) -> bool {
+        self.off
+    }
+
+    /// Wake device from "off" state.
+    /// CEmu: control.off = false; control.readBatteryStatus = ~1;
+    /// Clears the off flag and resets battery status FSM.
+    pub fn wake(&mut self) {
+        self.off = false;
+        self.read_battery_status = 0xFE; // CEmu: ~1
     }
 
     /// Get current CPU speed setting (0=6MHz, 1=12MHz, 2=24MHz, 3=48MHz)
@@ -587,6 +637,20 @@ mod tests {
         let initial = ctrl.read(regs::BATTERY_STATUS);
         ctrl.write(regs::BATTERY_STATUS, 0xFF);
         assert_eq!(ctrl.read(regs::BATTERY_STATUS), initial);
+    }
+
+    #[test]
+    fn test_battery_status_after_wake() {
+        let mut ctrl = ControlPorts::new();
+        // Initially 0
+        assert_eq!(ctrl.read(regs::BATTERY_STATUS), 0);
+        // Set device off
+        ctrl.write(regs::POWER, 0x40);
+        assert!(ctrl.is_off());
+        // Wake sets readBatteryStatus to 0xFE
+        ctrl.wake();
+        assert!(!ctrl.is_off());
+        assert_eq!(ctrl.read(regs::BATTERY_STATUS), 0xFE);
     }
 
     #[test]

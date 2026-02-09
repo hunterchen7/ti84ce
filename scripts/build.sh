@@ -339,28 +339,13 @@ CMAKEOF
         echo "==> Built libemu_cemu.a"
     fi
 
-    # Determine Xcode scheme and configuration
+    # Determine Xcode scheme to use
     if [ "$BUILD_RUST" = true ] && [ "$BUILD_CEMU" = true ]; then
         XCODE_SCHEME="Calc-Both"
-        XCODE_CONFIG_SUFFIX="Both"
     elif [ "$BUILD_CEMU" = true ]; then
         XCODE_SCHEME="Calc-CEmu"
-        XCODE_CONFIG_SUFFIX="CEmu"
     else
         XCODE_SCHEME="Calc-Rust"
-        XCODE_CONFIG_SUFFIX="Rust"
-    fi
-
-    if [ "$BUILD_CONFIG" = "Release" ]; then
-        XCODE_CONFIG="Release-$XCODE_CONFIG_SUFFIX"
-    else
-        XCODE_CONFIG="Debug-$XCODE_CONFIG_SUFFIX"
-    fi
-
-    if [ "$TARGET" = "simulator" ]; then
-        XCODE_DEST="platform=iOS Simulator,arch=arm64"
-    else
-        XCODE_DEST="generic/platform=iOS"
     fi
 
     echo ""
@@ -369,10 +354,7 @@ CMAKEOF
     [ "$BUILD_RUST" = true ] && echo "      - libemu_rust.a (Rust backend)"
     [ "$BUILD_CEMU" = true ] && echo "      - libemu_cemu.a (CEmu backend)"
     echo ""
-    echo "    Xcode scheme: $XCODE_SCHEME"
-    echo "    Xcode config: $XCODE_CONFIG"
-    echo ""
-    echo "Open ios/Calc.xcodeproj in Xcode and select the '$XCODE_SCHEME' scheme to build."
+    echo "In Xcode, select the '$XCODE_SCHEME' scheme, then build and run."
 
     if [ "$OPEN_XCODE" = true ]; then
         echo "==> Opening Xcode..."

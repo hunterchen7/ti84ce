@@ -48,6 +48,10 @@ void backend_reset(Emu* emu) {
     emu_reset(emu);
 }
 
+void backend_power_on(Emu* emu) {
+    emu_power_on(emu);
+}
+
 int backend_run_cycles(Emu* emu, int cycles) {
     return emu_run_cycles(emu, cycles);
 }

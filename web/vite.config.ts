@@ -9,6 +9,7 @@ export default defineConfig({
     exclude: ['emu-core']
   },
   server: {
+    port: 8484,
     fs: {
       // Allow serving files from the wasm package
       allow: ['..']
