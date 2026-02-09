@@ -27,6 +27,7 @@ pub mod cpu;
 pub mod peripherals;
 pub mod scheduler;
 pub mod disasm;
+pub mod ti_file;
 mod emu;
 
 #[cfg(target_arch = "wasm32")]
