@@ -17,6 +17,8 @@ class EmulatorPreferences {
     private static let autoSaveKey = "autoSaveEnabled"
     private static let lastRomHashKey = "lastRomHash"
     private static let lastRomNameKey = "lastRomName"
+    private static let calculatorScaleKey = "calculatorScale"
+    private static let calculatorYOffsetKey = "calculatorYOffset"
 
     // MARK: - Backend
 
@@ -59,6 +61,25 @@ class EmulatorPreferences {
         set {
             UserDefaults.standard.set(newValue, forKey: speedMultiplierKey)
         }
+    }
+
+    // MARK: - Display
+
+    /// Calculator scale (default 1.0)
+    static var calculatorScale: Float {
+        get {
+            let value = UserDefaults.standard.float(forKey: calculatorScaleKey)
+            return value > 0 ? value : 1.0
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: calculatorScaleKey)
+        }
+    }
+
+    /// Calculator Y offset (default 0)
+    static var calculatorYOffset: Float {
+        get { UserDefaults.standard.float(forKey: calculatorYOffsetKey) }
+        set { UserDefaults.standard.set(newValue, forKey: calculatorYOffsetKey) }
     }
 
     // MARK: - Auto-save

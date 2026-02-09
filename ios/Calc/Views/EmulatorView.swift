@@ -15,8 +15,8 @@ struct EmulatorView: View {
     @State private var showingBackendPicker = false
     @State private var sidebarDragOffset: CGFloat = 0
     @State private var isDraggingToClose = false
-    @State private var calculatorScale: CGFloat = 1.0
-    @State private var calculatorYOffset: CGFloat = 0
+    @State private var calculatorScale: CGFloat = CGFloat(EmulatorPreferences.calculatorScale)
+    @State private var calculatorYOffset: CGFloat = CGFloat(EmulatorPreferences.calculatorYOffset)
 
     private let sidebarWidth: CGFloat = 170
     private let edgeSwipeWidth: CGFloat = 30
@@ -253,6 +253,9 @@ struct EmulatorView: View {
                     )
                     .tint(Color(red: 0.129, green: 0.588, blue: 0.953))
                     .padding(.horizontal, 16)
+                    .onChange(of: calculatorScale) { _, newValue in
+                        EmulatorPreferences.calculatorScale = Float(newValue)
+                    }
                 }
 
                 // Calculator Y offset
@@ -269,6 +272,9 @@ struct EmulatorView: View {
                     )
                     .tint(Color(red: 0.129, green: 0.588, blue: 0.953))
                     .padding(.horizontal, 16)
+                    .onChange(of: calculatorYOffset) { _, newValue in
+                        EmulatorPreferences.calculatorYOffset = Float(newValue)
+                    }
                 }
 
                 Spacer()

@@ -246,8 +246,8 @@ fun EmulatorScreen(
     var speedMultiplier by remember { mutableStateOf(1f) } // Default 1x (real-time)
 
     // Display adjustment
-    var calculatorScale by remember { mutableStateOf(1f) }
-    var calculatorYOffset by remember { mutableStateOf(0f) }
+    var calculatorScale by remember { mutableStateOf(EmulatorPreferences.getCalculatorScale(context)) }
+    var calculatorYOffset by remember { mutableStateOf(EmulatorPreferences.getCalculatorYOffset(context)) }
 
     // Framebuffer bitmap
     val bitmap = remember {
@@ -469,9 +469,9 @@ fun EmulatorScreen(
             speedMultiplier = speedMultiplier,
             onSpeedChange = { speedMultiplier = it },
             calculatorScale = calculatorScale,
-            onScaleChange = { calculatorScale = it },
+            onScaleChange = { calculatorScale = it; EmulatorPreferences.setCalculatorScale(context, it) },
             calculatorYOffset = calculatorYOffset,
-            onYOffsetChange = { calculatorYOffset = it },
+            onYOffsetChange = { calculatorYOffset = it; EmulatorPreferences.setCalculatorYOffset(context, it) },
             lastKeyPress = lastKeyPress,
             logs = logLines,
             currentBackend = currentBackend,

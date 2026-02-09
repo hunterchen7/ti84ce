@@ -10,6 +10,8 @@ object EmulatorPreferences {
     private const val PREFS_NAME = "emulator_prefs"
     private const val KEY_BACKEND = "backend"
     private const val KEY_LAST_ROM_HASH = "last_rom_hash"
+    private const val KEY_CALCULATOR_SCALE = "calculator_scale"
+    private const val KEY_CALCULATOR_Y_OFFSET = "calculator_y_offset"
 
     private fun getPrefs(context: Context): SharedPreferences {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -62,6 +64,23 @@ object EmulatorPreferences {
      */
     fun setLastRomHash(context: Context, hash: String) {
         getPrefs(context).edit().putString(KEY_LAST_ROM_HASH, hash).apply()
+    }
+
+    fun getCalculatorScale(context: Context): Float {
+        val value = getPrefs(context).getFloat(KEY_CALCULATOR_SCALE, 1f)
+        return if (value > 0) value else 1f
+    }
+
+    fun setCalculatorScale(context: Context, scale: Float) {
+        getPrefs(context).edit().putFloat(KEY_CALCULATOR_SCALE, scale).apply()
+    }
+
+    fun getCalculatorYOffset(context: Context): Float {
+        return getPrefs(context).getFloat(KEY_CALCULATOR_Y_OFFSET, 0f)
+    }
+
+    fun setCalculatorYOffset(context: Context, offset: Float) {
+        getPrefs(context).edit().putFloat(KEY_CALCULATOR_Y_OFFSET, offset).apply()
     }
 
     /**
