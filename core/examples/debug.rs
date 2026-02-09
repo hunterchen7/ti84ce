@@ -67,6 +67,13 @@ fn main() {
             }
             cmd_fullcompare(&args[2], &args[3]);
         }
+        "sendfile" => {
+            if args.len() < 3 {
+                eprintln!("Usage: debug sendfile <file.8xp> [file2.8xv ...]");
+                return;
+            }
+            cmd_sendfile(&args[2..]);
+        }
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -121,6 +128,11 @@ Commands:
                     Compare two JSON trace files and report divergence
                     Reports first difference in PC, registers, or I/O ops
 
+  sendfile <file.8xp> [file2.8xv ...]
+                    Load ROM, inject .8xp/.8xv files into flash, boot, and
+                    render a screenshot. For games using graphx, include the
+                    CE C library .8xv files (graphx, keypadc, libload, etc.)
+
   help              Show this help message
 
 Environment Variables:
@@ -133,6 +145,7 @@ Examples:
   cargo run --release --example debug -- trace 1000000
   cargo run --release --example debug -- screen output.png
   cargo run --release --example debug -- compare traces/cemu.log
+  cargo run --release --example debug -- sendfile DOOM.8xp clibs/*.8xv
 "#
     );
 }
@@ -1641,6 +1654,188 @@ fn cmd_ports() {
     emu.render_frame();
     save_framebuffer_ppm(&emu, "ports_classic.ppm");
     println!("Compare the two screenshots to see if status bar changes");
+}
+
+// === Send File Command ===
+
+/// Load ROM, inject .8xp/.8xv files into flash archive, boot, and render screenshot
+fn cmd_sendfile(files: &[String]) {
+    // Load ROM
+    let rom_data = match load_rom() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+
+    println!("\n=== Send File Test ===\n");
+
+    // Inject each file
+    let mut total_entries = 0;
+    for file_path in files {
+        let file_data = match fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", file_path, e);
+                continue;
+            }
+        };
+
+        println!("Sending: {} ({} bytes)", file_path, file_data.len());
+
+        match emu.send_file(&file_data) {
+            Ok(count) => {
+                println!("  Injected {} entries", count);
+                total_entries += count;
+            }
+            Err(code) => {
+                eprintln!("  ERROR: send_file returned {}", code);
+            }
+        }
+    }
+
+    if total_entries == 0 {
+        eprintln!("\nNo files were injected. Aborting.");
+        return;
+    }
+
+    println!("\nTotal entries injected: {}", total_entries);
+
+    // Power on and boot
+    println!("\nBooting with injected files...");
+    emu.press_on_key();
+
+    let chunk_size = 1_000_000;
+    let max_cycles = 300_000_000u64;
+    let mut total_executed = 0u64;
+    let mut idle_loop_count = 0;
+    const IDLE_LOOP_THRESHOLD: u32 = 3;
+
+    while total_executed < max_cycles {
+        let executed = emu.run_cycles(chunk_size);
+        total_executed += executed as u64;
+
+        let pc = emu.pc();
+
+        // Progress every 10M cycles
+        if total_executed % 10_000_000 < chunk_size as u64 {
+            println!(
+                "[{:.1}M cycles] PC={:06X} halted={}",
+                total_executed as f64 / 1_000_000.0,
+                pc,
+                emu.is_halted()
+            );
+        }
+
+        // Check for idle loop
+        if (0x085B7D..=0x085B80).contains(&pc) {
+            idle_loop_count += 1;
+            let lcd = emu.lcd_snapshot();
+            if idle_loop_count >= IDLE_LOOP_THRESHOLD && lcd.control & 1 != 0 {
+                println!(
+                    "\nBoot complete at PC={:06X} after {:.2}M cycles",
+                    pc,
+                    total_executed as f64 / 1_000_000.0
+                );
+                break;
+            }
+        }
+
+        if emu.is_halted() {
+            let lcd = emu.lcd_snapshot();
+            if (0x085B7D..=0x085B80).contains(&pc) && lcd.control & 1 != 0 {
+                println!(
+                    "\nBoot complete (halted) at PC={:06X} after {:.2}M cycles",
+                    pc,
+                    total_executed as f64 / 1_000_000.0
+                );
+                break;
+            }
+            println!(
+                "\nHALT at PC={:06X} after {:.2}M cycles",
+                pc,
+                total_executed as f64 / 1_000_000.0
+            );
+            break;
+        }
+    }
+
+    // Render frame and save screenshot
+    emu.render_frame();
+
+    let lcd = emu.lcd_snapshot();
+    let bpp_mode = emu.lcd_snapshot().control >> 1 & 0x7;
+    println!("\n=== LCD State ===");
+    println!("Control: 0x{:08X} (enabled={}, bpp_mode={})", lcd.control, (lcd.control & 1) != 0, bpp_mode);
+    println!("VRAM base: 0x{:06X}", lcd.upbase);
+
+    // Save as PPM
+    let output = "sendfile_result.ppm";
+    save_framebuffer_ppm(&emu, output);
+    println!("\nScreenshot saved to: {}", output);
+
+    // Try to convert to PNG
+    let png_output = "sendfile_result.png";
+    let result = Command::new("sips")
+        .args(["-s", "format", "png", output, "--out", png_output])
+        .output();
+
+    if result.is_ok() {
+        fs::remove_file(output).ok();
+        println!("Converted to: {}", png_output);
+    }
+
+    // Analyze framebuffer
+    println!("\n=== Framebuffer Analysis ===");
+    analyze_framebuffer(&emu);
+
+    // Check if programs are visible in VAT
+    println!("\n=== Flash Archive Check ===");
+    let archive_start = 0x0C0000u32;
+    let mut offset = 0u32;
+    let mut found = 0;
+    while offset < 0x300000 {
+        let addr = archive_start + offset;
+        let byte = emu.peek_byte(addr);
+        if byte == 0xFF {
+            break; // End of archive entries
+        }
+        // Read entry: type1, type2, version, addr(3), namelen, name...
+        let var_type = byte;
+        let _type2 = emu.peek_byte(addr + 1);
+        let _version = emu.peek_byte(addr + 2);
+        let name_len = emu.peek_byte(addr + 6) as u32;
+        let mut name = String::new();
+        for i in 0..name_len.min(8) {
+            let ch = emu.peek_byte(addr + 7 + i);
+            if ch >= 0x20 && ch < 0x7F {
+                name.push(ch as char);
+            }
+        }
+        let type_name = match var_type {
+            0x05 => "Program",
+            0x06 => "ProtProg",
+            0x15 => "AppVar",
+            _ => "Unknown",
+        };
+        println!("  0x{:06X}: {} \"{}\" (type=0x{:02X})", addr, type_name, name, var_type);
+        found += 1;
+
+        // Skip to next entry (rough: skip past name + data)
+        // Read data size from the file entry
+        let data_size_lo = emu.peek_byte(addr + 7 + name_len) as u32;
+        let data_size_hi = emu.peek_byte(addr + 7 + name_len + 1) as u32;
+        let data_size = data_size_lo | (data_size_hi << 8);
+        let entry_size = 7 + name_len + 2 + data_size;
+        offset += entry_size;
+
+        if found > 20 {
+            println!("  ... (truncated)");
+            break;
+        }
+    }
+    println!("Total archive entries found: {}", found);
 }
 
 // === Watchpoint for MathPrint Investigation ===
