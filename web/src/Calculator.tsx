@@ -759,6 +759,26 @@ export function Calculator({
               style={{ marginTop: "0.5rem" }}
             />
           </label>
+          {romLoaded && (
+            <div style={{ marginTop: "1rem" }}>
+              <label htmlFor="program-input" style={{ cursor: "pointer" }}>
+                <p>Load .8xp/.8xv programs (optional)</p>
+                <input
+                  id="program-input"
+                  type="file"
+                  accept=".8xp,.8xv"
+                  multiple
+                  onChange={handleProgramFiles}
+                  style={{ marginTop: "0.5rem" }}
+                />
+              </label>
+              {programFiles.length > 0 && (
+                <p style={{ fontSize: "0.85rem", color: "#888" }}>
+                  Loaded: {programFiles.join(", ")}
+                </p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
