@@ -47,7 +47,7 @@ use std::ptr;
 use std::slice;
 use std::sync::Mutex;
 
-pub use emu::{Emu, LcdSnapshot, TimerSnapshot, StepInfo, log_event};
+pub use emu::{Emu, LcdSnapshot, TimerSnapshot, StepInfo, log_event, enable_inst_trace, disable_inst_trace, arm_inst_trace_on_wake};
 pub use bus::{IoTarget, IoOpType, IoRecord};
 pub use disasm::{disassemble, DisasmResult};
 

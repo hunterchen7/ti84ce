@@ -74,6 +74,17 @@ fn main() {
             }
             cmd_sendfile(&args[2..]);
         }
+        "bakerom" => {
+            if args.len() < 3 {
+                eprintln!("Usage: debug bakerom <output.rom> [file.8xp file2.8xv ...]");
+                return;
+            }
+            cmd_bakerom(&args[2], &args[3..]);
+        }
+        "rundoom" => {
+            // Load baked ROM, boot, simulate pressing prgm → down → enter → enter
+            cmd_rundoom();
+        }
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -132,6 +143,11 @@ Commands:
                     Load ROM, inject .8xp/.8xv files into flash, boot, and
                     render a screenshot. For games using graphx, include the
                     CE C library .8xv files (graphx, keypadc, libload, etc.)
+
+  bakerom <output.rom> [file.8xp file2.8xv ...]
+                    Create a new ROM with .8xp/.8xv files pre-installed in
+                    the flash archive. The output ROM can be loaded directly
+                    and programs will appear in TI-OS without needing sendfile.
 
   help              Show this help message
 
@@ -1793,22 +1809,64 @@ fn cmd_sendfile(files: &[String]) {
     // Check if programs are visible in VAT
     println!("\n=== Flash Archive Check ===");
     let archive_start = 0x0C0000u32;
-    let mut offset = 0u32;
+    let archive_end = 0x3B0000u32;
+    let sector_size = 0x10000u32;
+    let mut addr = archive_start;
     let mut found = 0;
-    while offset < 0x300000 {
-        let addr = archive_start + offset;
-        let byte = emu.peek_byte(addr);
-        if byte == 0xFF {
-            break; // End of archive entries
+    let mut deleted = 0;
+    // Scan sector by sector
+    while addr < archive_end {
+        let sector_base = addr & !(sector_size - 1);
+        // If at sector boundary, byte 0 is sector status — skip to byte 1
+        if addr == sector_base {
+            let status = emu.peek_byte(addr);
+            if status == 0xFF {
+                break; // Empty sector = end of archive
+            }
+            println!("  Sector 0x{:06X}: status=0x{:02X}", sector_base, status);
+            addr += 1; // Skip sector status byte, entries start at byte 1
+            continue;
         }
-        // Read entry: type1, type2, version, addr(3), namelen, name...
-        let var_type = byte;
-        let _type2 = emu.peek_byte(addr + 1);
-        let _version = emu.peek_byte(addr + 2);
-        let name_len = emu.peek_byte(addr + 6) as u32;
+        let flag = emu.peek_byte(addr);
+        if flag == 0xFF {
+            // End of entries in this sector — move to next sector
+            addr = sector_base + sector_size;
+            continue;
+        }
+        if flag == 0xF0 {
+            // Deleted entry — skip using size field
+            let size = u16::from_le_bytes([
+                emu.peek_byte(addr + 1),
+                emu.peek_byte(addr + 2),
+            ]) as u32;
+            if size > 0 && size < sector_size {
+                deleted += 1;
+                addr += 3 + size;
+                continue;
+            } else {
+                addr = sector_base + sector_size;
+                continue;
+            }
+        }
+        if flag != 0xFC && flag != 0xFE {
+            // Unknown flag — skip to next sector
+            addr = sector_base + sector_size;
+            continue;
+        }
+
+        // Valid entry (0xFC) or in-progress (0xFE)
+        let size = u16::from_le_bytes([
+            emu.peek_byte(addr + 1),
+            emu.peek_byte(addr + 2),
+        ]) as u32;
+        // Read: type1, type2, version, self-addr(3), namelen, name
+        let var_type = emu.peek_byte(addr + 3);
+        let _type2 = emu.peek_byte(addr + 4);
+        let _version = emu.peek_byte(addr + 5);
+        let name_len = emu.peek_byte(addr + 9) as u32;
         let mut name = String::new();
         for i in 0..name_len.min(8) {
-            let ch = emu.peek_byte(addr + 7 + i);
+            let ch = emu.peek_byte(addr + 10 + i);
             if ch >= 0x20 && ch < 0x7F {
                 name.push(ch as char);
             }
@@ -1819,23 +1877,82 @@ fn cmd_sendfile(files: &[String]) {
             0x15 => "AppVar",
             _ => "Unknown",
         };
-        println!("  0x{:06X}: {} \"{}\" (type=0x{:02X})", addr, type_name, name, var_type);
+        println!(
+            "  0x{:06X}: {} \"{}\" (type=0x{:02X}, payload={})",
+            addr, type_name, name, var_type, size
+        );
         found += 1;
 
-        // Skip to next entry (rough: skip past name + data)
-        // Read data size from the file entry
-        let data_size_lo = emu.peek_byte(addr + 7 + name_len) as u32;
-        let data_size_hi = emu.peek_byte(addr + 7 + name_len + 1) as u32;
-        let data_size = data_size_lo | (data_size_hi << 8);
-        let entry_size = 7 + name_len + 2 + data_size;
-        offset += entry_size;
+        // Advance past entry using size field
+        if size > 0 && size < 0x10000 {
+            addr += 3 + size;
+        } else {
+            addr += 1;
+        }
 
         if found > 20 {
             println!("  ... (truncated)");
             break;
         }
     }
-    println!("Total archive entries found: {}", found);
+    println!("Archive: {} valid, {} deleted, free at 0x{:06X}", found, deleted, addr);
+}
+
+// === Bake ROM Command ===
+
+/// Load ROM, inject .8xp/.8xv files into flash archive, and save modified ROM
+fn cmd_bakerom(output_path: &str, files: &[String]) {
+    // Load ROM
+    let rom_data = match load_rom() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+
+    println!("\n=== Bake ROM ===\n");
+    println!("Original ROM: {} bytes", rom_data.len());
+
+    // Inject each file
+    let mut total_entries = 0;
+    for file_path in files {
+        let file_data = match fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", file_path, e);
+                continue;
+            }
+        };
+
+        println!("Injecting: {} ({} bytes)", file_path, file_data.len());
+
+        match emu.send_file(&file_data) {
+            Ok(count) => {
+                println!("  {} entries", count);
+                total_entries += count;
+            }
+            Err(code) => {
+                eprintln!("  ERROR: send_file returned {}", code);
+            }
+        }
+    }
+
+    if total_entries == 0 && !files.is_empty() {
+        eprintln!("\nNo files were injected. Aborting.");
+        return;
+    }
+
+    println!("\nTotal entries injected: {}", total_entries);
+
+    // Write modified flash to output file
+    let flash = emu.flash_data();
+    fs::write(output_path, flash).expect("Failed to write output ROM");
+
+    println!("Wrote {} to: {} ({} bytes)",
+        if total_entries > 0 { "baked ROM" } else { "ROM copy" },
+        output_path, flash.len());
+    println!("\nThis ROM can be loaded directly — programs will appear in TI-OS.");
 }
 
 // === Watchpoint for MathPrint Investigation ===
@@ -1953,4 +2070,463 @@ fn cmd_watchpoint_mathprint() {
     println!("\nFinal value at 0xD000C4: 0x{:02X} ({})",
         final_value,
         if final_value & 0x20 != 0 { "MathPrint" } else { "Classic" });
+}
+
+// === Run DOOM Test ===
+
+/// Count non-white pixels in VRAM (quick hash for change detection)
+fn vram_pixel_count(emu: &mut Emu) -> (u32, u32) {
+    let upbase = 0xD40000u32;
+    let mut non_white = 0u32;
+    let mut black = 0u32;
+    for i in (0..320*240*2).step_by(2) {
+        let lo = emu.peek_byte(upbase + i as u32);
+        let hi = emu.peek_byte(upbase + i as u32 + 1);
+        let pixel = (lo as u16) | ((hi as u16) << 8);
+        if pixel != 0xFFFF { non_white += 1; }
+        if pixel == 0x0000 { black += 1; }
+    }
+    (non_white, black)
+}
+
+/// Dump key TI-OS variables for debugging text rendering
+fn dump_os_state(emu: &mut Emu, label: &str) {
+    let cur_row = emu.peek_byte(0xD00595);
+    let cur_col = emu.peek_byte(0xD00596);
+    let pen_col = emu.peek_byte(0xD008D2) as u16 | ((emu.peek_byte(0xD008D3) as u16) << 8);
+    let pen_row = emu.peek_byte(0xD008D5);
+    let fg_lo = emu.peek_byte(0xD02688);
+    let fg_hi = emu.peek_byte(0xD02689);
+    let bg_lo = emu.peek_byte(0xD0268A);
+    let bg_hi = emu.peek_byte(0xD0268B);
+    let fg = (fg_lo as u16) | ((fg_hi as u16) << 8);
+    let bg = (bg_lo as u16) | ((bg_hi as u16) << 8);
+    let mathprint = emu.peek_byte(0xD000C4);
+    let lcd_ctrl = emu.peek_byte(0xE30018) as u32
+        | ((emu.peek_byte(0xE30019) as u32) << 8)
+        | ((emu.peek_byte(0xE3001A) as u32) << 16)
+        | ((emu.peek_byte(0xE3001B) as u32) << 24);
+    let bpp = (lcd_ctrl >> 1) & 7;
+    let upbase = emu.peek_byte(0xE30010) as u32
+        | ((emu.peek_byte(0xE30011) as u32) << 8)
+        | ((emu.peek_byte(0xE30012) as u32) << 16)
+        | ((emu.peek_byte(0xE30013) as u32) << 24);
+
+    println!("  OS state [{}]:", label);
+    println!("    curRow={} curCol={} penCol={} penRow={}", cur_row, cur_col, pen_col, pen_row);
+    println!("    drawFGColor={:04X} drawBGColor={:04X} ({})",
+        fg, bg, if fg == bg { "SAME! invisible text" } else { "ok" });
+    println!("    mathprint_flags={:02X} ({}) LCD_CTRL={:08X} BPP={} UPBASE={:06X}",
+        mathprint, if mathprint & 0x20 != 0 { "MathPrint" } else { "Classic" },
+        lcd_ctrl, bpp, upbase);
+
+    // Check plotSScreen for content (0xD52C00, 8400 bytes)
+    let mut plot_nonzero = 0u32;
+    for i in 0..8400u32 {
+        if emu.peek_byte(0xD52C00 + i) != 0 { plot_nonzero += 1; }
+    }
+    println!("    plotSScreen: {} non-zero bytes (of 8400)", plot_nonzero);
+
+    // Check a sample of VRAM at row 40 center (where text might be)
+    let sample_addr = 0xD40000u32 + 40 * 640 + 160 * 2; // row 40, col 160
+    print!("    VRAM@row40,col160: ");
+    for i in 0..8 { print!("{:02X}", emu.peek_byte(sample_addr + i)); }
+    println!();
+
+    // Check userMem region (D1A881) for program code
+    let user_mem = 0xD1A881u32;
+    print!("    userMem@{:06X}: ", user_mem);
+    for i in 0..16 { print!("{:02X} ", emu.peek_byte(user_mem + i)); }
+    println!();
+}
+
+fn cmd_rundoom() {
+    // Load the baked ROM that has DOOM + clibs pre-installed
+    let rom_path = "/tmp/TI84CE-DOOM.rom";
+    let rom_data = match fs::read(rom_path) {
+        Ok(data) => {
+            eprintln!("Loaded baked ROM from: {} ({:.2} MB)", rom_path, data.len() as f64 / 1024.0 / 1024.0);
+            data
+        }
+        Err(_) => {
+            eprintln!("Baked ROM not found at {}. Create it first with:", rom_path);
+            eprintln!("  cargo run --release --example debug -- bakerom /tmp/TI84CE-DOOM.rom ~/Downloads/DOOM.8xp ~/Downloads/*.8xv");
+            return;
+        }
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+    emu.press_on_key();
+
+    println!("\n=== DOOM Launch Test (sendKey approach) ===\n");
+
+    // Phase 1: Boot TI-OS
+    println!("Phase 1: Booting TI-OS...");
+    let mut total = 0u64;
+    while total < 175_000_000 {
+        total += emu.run_cycles(1_000_000) as u64;
+    }
+    println!("Boot complete. PC={:06X}, halted={}", emu.pc(), emu.is_halted());
+
+    emu.release_on_key();
+    emu.run_cycles(2_000_000);
+
+    // Dump VAT to verify DOOM is registered
+    dump_vat(&mut emu);
+
+    // Phase 2: Use CEmu-style sendKey to launch Asm(prgmDOOM)
+    // This bypasses the hardware keypad and writes directly to OS key buffer
+    println!("\nPhase 2: Launching DOOM via sendKey (CEmu-style)...");
+
+    // Step 1: ENTER to dismiss boot screen and init parser
+    println!("  Step 1: ENTER (dismiss boot screen)");
+    send_os_key_wait(&mut emu, 0x05, "ENTER-init");
+
+    // Step 2: CLEAR to go to clean homescreen
+    println!("  Step 2: CLEAR");
+    send_os_key_wait(&mut emu, 0x09, "CLEAR");
+
+    // Step 3: Type Asm( token (0xFC9C = kExtendEcho2 | kAsm)
+    println!("  Step 3: Asm( token");
+    send_os_key_wait(&mut emu, 0xFC9C, "Asm(");
+
+    // Step 4: PRGM token (0xDA) - inserts 'prgm' on homescreen
+    println!("  Step 4: prgm token");
+    send_os_key_wait(&mut emu, 0xDA, "prgm");
+
+    // Step 5: Type DOOM letter by letter
+    println!("  Step 5: Type DOOM");
+    for ch in ['D', 'O', 'O', 'M'] {
+        let key = 0x9A + (ch as u16 - 'A' as u16);
+        send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+    }
+
+    // Take screenshot showing Asm(prgmDOOM on homescreen
+    // Note: CEmu doesn't send close paren - TI-OS handles it implicitly
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "/tmp/doom_before_exec.ppm");
+    convert_ppm_to_png("/tmp/doom_before_exec.ppm", "/tmp/doom_before_exec.png");
+
+    // Dump homescreen state
+    let cursor_row = emu.peek_byte(0xD00595);
+    let cursor_col = emu.peek_byte(0xD00598);
+    println!("\n  Homescreen: curRow={}, curCol={}", cursor_row, cursor_col);
+
+    // Check what's in kbdKey area
+    print!("  kbdKey @D0058C: ");
+    for i in 0..8 { print!("{:02X} ", emu.peek_byte(0xD0058C + i)); }
+    println!();
+
+    // Check userMem before execution
+    print!("  userMem @D1A881 (before): ");
+    for i in 0..16 { print!("{:02X} ", emu.peek_byte(0xD1A881 + i)); }
+    println!();
+
+    // Phase 3: Execute!
+    println!("\nPhase 3: ENTER to execute Asm(prgmDOOM)...");
+    send_os_key_wait(&mut emu, 0x05, "ENTER-exec");
+
+    // Run 50M cycles to get into the DOOM/LibLoad execution
+    println!("  Running 50M cycles to reach LibLoad...");
+    emu.run_cycles(50_000_000);
+    println!("  PC={:06X} halted={}", emu.pc(), emu.is_halted());
+
+    // Now enable instruction tracing to capture the loop
+    println!("  Enabling instruction trace (1000 instructions)...");
+    let _ = fs::remove_file("emu.log"); // clear old log
+    emu_core::enable_inst_trace(1000);
+    emu.run_cycles(5_000_000); // run a bit with tracing
+    emu_core::disable_inst_trace();
+
+    // Read and analyze the trace
+    if let Ok(log_data) = fs::read_to_string("emu.log") {
+        let lines: Vec<&str> = log_data.lines()
+            .filter(|l| l.starts_with("INST["))
+            .collect();
+        println!("  Captured {} traced instructions", lines.len());
+
+        // Show first 20 and last 20
+        println!("\n  === First 20 instructions ===");
+        for line in lines.iter().take(20) {
+            println!("  {}", line);
+        }
+        if lines.len() > 40 {
+            println!("\n  ... ({} instructions omitted) ...", lines.len() - 40);
+            println!("\n  === Last 20 instructions ===");
+            for line in lines.iter().skip(lines.len() - 20) {
+                println!("  {}", line);
+            }
+        }
+
+        // PC histogram
+        let mut pc_hist: HashMap<String, u32> = HashMap::new();
+        for line in &lines {
+            if let Some(pc_start) = line.find("PC=") {
+                let pc_str = &line[pc_start+3..pc_start+9];
+                *pc_hist.entry(pc_str.to_string()).or_insert(0) += 1;
+            }
+        }
+        let mut pc_counts: Vec<_> = pc_hist.iter().collect();
+        pc_counts.sort_by(|a, b| b.1.cmp(a.1));
+        println!("\n  === Top 15 PCs (most visited) ===");
+        for (pc, count) in pc_counts.iter().take(15) {
+            println!("    PC={}: {} times ({:.1}%)", pc, count, **count as f64 / lines.len() as f64 * 100.0);
+        }
+    } else {
+        println!("  WARNING: Could not read emu.log");
+    }
+
+    // Check final state
+    println!("\n=== Final State ===");
+    let bpp = (emu.peek_byte(0xE30018) >> 1) & 0x7;
+    let errno = emu.peek_byte(0xD008DF);
+    println!("PC={:06X} halted={} BPP={} errno=0x{:02X}", emu.pc(), emu.is_halted(), bpp, errno);
+
+    print!("userMem @D1A881: ");
+    for i in 0..32 { print!("{:02X} ", emu.peek_byte(0xD1A881 + i)); }
+    println!();
+
+    // Dump the archive data around the LibLoad library
+    println!("\n  LibLoad archive entry @0C6CBE:");
+    print!("    Header: ");
+    for i in 0..20 { print!("{:02X} ", emu.peek_byte(0x0C6CBE + i)); }
+    println!();
+
+    // Check what's at key flash addresses the CPU is visiting
+    println!("\n  Flash data at key PCs:");
+    for addr in [0x0C6DB0u32, 0x0C6DC0, 0x0C6DCA, 0x0B3B70] {
+        print!("    @{:06X}: ", addr);
+        for i in 0..16 { print!("{:02X} ", emu.peek_byte(addr + i)); }
+        println!();
+    }
+
+    // Take final screenshot
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "/tmp/doom_after_exec.ppm");
+    convert_ppm_to_png("/tmp/doom_after_exec.ppm", "/tmp/doom_after_exec.png");
+
+    println!("\nScreenshots: /tmp/doom_after_exec.png");
+}
+
+/// Send an OS-level key via CEmu's sendKey mechanism and wait for consumption
+fn send_os_key_wait(emu: &mut Emu, key: u16, name: &str) {
+    const CE_GRAPH_FLAGS2: u32 = 0xD0009F;
+    const CE_KEY_READY: u8 = 1 << 5;
+
+    // Wait for OS to consume previous key
+    let mut wait_cycles = 0u64;
+    loop {
+        let flags = emu.peek_byte(CE_GRAPH_FLAGS2);
+        if flags & CE_KEY_READY == 0 { break; }
+        if wait_cycles >= 50_000_000 {
+            println!("    TIMEOUT: OS didn't consume previous key before {} (waited 50M cycles)", name);
+            return;
+        }
+        emu.run_cycles(48_000);
+        wait_cycles += 48_000;
+    }
+
+    // Send the key
+    let ok = emu.send_key(key);
+    if !ok {
+        println!("    FAILED: send_key returned false for {} (0x{:04X})", name, key);
+        return;
+    }
+
+    // Wait for OS to consume this key (run cycles until keyReady clears)
+    let mut consumed_cycles = 0u64;
+    loop {
+        emu.run_cycles(48_000);
+        consumed_cycles += 48_000;
+        let flags = emu.peek_byte(CE_GRAPH_FLAGS2);
+        if flags & CE_KEY_READY == 0 { break; }
+        if consumed_cycles >= 50_000_000 {
+            println!("    WARNING: OS didn't consume {} after 50M cycles, PC={:06X}, halted={}",
+                name, emu.pc(), emu.is_halted());
+            return;
+        }
+    }
+
+    // Extra settle time for the OS to process the key action
+    emu.run_cycles(2_000_000);
+
+    println!("    {} (0x{:04X}): consumed after {}K cycles, PC={:06X}",
+        name, key, consumed_cycles / 1000, emu.pc());
+}
+
+fn press_key(emu: &mut Emu, row: usize, col: usize, hold_cycles: u32, release_cycles: u32) {
+    emu.set_key(row, col, true);
+    emu.run_cycles(hold_cycles);
+    emu.set_key(row, col, false);
+    emu.run_cycles(release_cycles);
+}
+
+fn press_key_verbose(emu: &mut Emu, name: &str, row: usize, col: usize, hold_cycles: u32, release_cycles: u32) {
+    println!("  Pressing {} (row={}, col={})...", name, row, col);
+    emu.set_key(row, col, true);
+    let held = emu.run_cycles(hold_cycles);
+    println!("    Hold: ran {} of {} cycles, PC={:06X}, halted={}, is_off={}",
+        held, hold_cycles, emu.pc(), emu.is_halted(), emu.is_off());
+    emu.set_key(row, col, false);
+    let released = emu.run_cycles(release_cycles);
+    println!("    Release: ran {} of {} cycles, PC={:06X}, halted={}, is_off={}",
+        released, release_cycles, emu.pc(), emu.is_halted(), emu.is_off());
+}
+
+fn convert_ppm_to_png(ppm_path: &str, png_path: &str) {
+    let _ = Command::new("sips")
+        .args(["-s", "format", "png", ppm_path, "--out", png_path])
+        .output();
+    let _ = fs::remove_file(ppm_path);
+}
+
+/// Dump TI-OS Variable Allocation Table to see registered programs
+fn dump_vat(emu: &mut Emu) {
+    // Read key pointers from RAM
+    let prog_ptr = emu.peek_byte(0xD0259D) as u32
+        | (emu.peek_byte(0xD0259E) as u32) << 8
+        | (emu.peek_byte(0xD0259F) as u32) << 16;
+    let p_temp = emu.peek_byte(0xD0259A) as u32
+        | (emu.peek_byte(0xD0259B) as u32) << 8
+        | (emu.peek_byte(0xD0259C) as u32) << 16;
+    let op_base = emu.peek_byte(0xD02590) as u32
+        | (emu.peek_byte(0xD02591) as u32) << 8
+        | (emu.peek_byte(0xD02592) as u32) << 16;
+
+    println!("\n  === VAT State ===");
+    println!("  progPtr = {:06X}", prog_ptr);
+    println!("  pTemp   = {:06X}", p_temp);
+    println!("  OPBase  = {:06X}", op_base);
+    println!("  symTable = D3FFFF");
+
+    // Scan VAT entries backwards from symTable
+    let sym_table = 0xD3FFFFu32;
+    let user_mem = 0xD1A881u32;
+    let mut vat = sym_table;
+    let mut count = 0;
+    let max_entries = 60;
+
+    println!("\n  VAT Entries (scanning from D3FFFF backward):");
+    while vat > user_mem && vat > op_base && vat <= sym_table && count < max_entries {
+        let type1 = emu.peek_byte(vat);
+        vat -= 1;
+        let type2 = emu.peek_byte(vat);
+        vat -= 1;
+        let version = emu.peek_byte(vat);
+        vat -= 1;
+        let addr_lo = emu.peek_byte(vat) as u32;
+        vat -= 1;
+        let addr_mid = emu.peek_byte(vat) as u32;
+        vat -= 1;
+        let addr_hi = emu.peek_byte(vat) as u32;
+        vat -= 1;
+        let address = addr_lo | (addr_mid << 8) | (addr_hi << 16);
+
+        // Check if this is a named entry (between pTemp and progPtr)
+        let named = vat > p_temp && vat <= prog_ptr;
+        // Print when we first enter the named (program) section
+        if named && count > 0 {
+            static mut PRINTED_BOUNDARY: bool = false;
+            unsafe {
+                if !PRINTED_BOUNDARY {
+                    println!("    --- entered named/program section (vat={:06X}) ---", vat);
+                    PRINTED_BOUNDARY = true;
+                }
+            }
+        }
+
+        let (namelen, name) = if named {
+            let nl = emu.peek_byte(vat) as usize;
+            vat -= 1;
+            if nl == 0 || nl > 8 {
+                println!("    #{}: INVALID namelen={}", count, nl);
+                break;
+            }
+            let mut name_bytes = Vec::new();
+            for _ in 0..nl {
+                name_bytes.push(emu.peek_byte(vat));
+                vat -= 1;
+            }
+            let name_str: String = name_bytes.iter()
+                .map(|&b| if b >= 0x20 && b < 0x7F { b as char } else { '.' })
+                .collect();
+            (nl, name_str)
+        } else {
+            // Unnamed entries have 3-byte token names
+            let mut name_bytes = Vec::new();
+            for _ in 0..3 {
+                name_bytes.push(emu.peek_byte(vat));
+                vat -= 1;
+            }
+            let name_str: String = name_bytes.iter()
+                .map(|&b| format!("{:02X}", b))
+                .collect::<Vec<_>>()
+                .join("");
+            (3, name_str)
+        };
+
+        let var_type = type1 & 0x3F;
+        let archived = address > 0xC0000 && address < 0x400000;
+        let type_name = match var_type {
+            0x05 => "Program",
+            0x06 => "ProtProg",
+            0x15 => "AppVar",
+            0x00 => "Real",
+            0x01 => "List",
+            0x04 => "String",
+            _ => "Other",
+        };
+
+        println!("    #{:2}: type={:02X}({:8}) type2={:02X} ver={:02X} addr={:06X} name={:8} arch={} named={}",
+            count, var_type, type_name, type2, version, address, name, archived, named);
+
+        count += 1;
+
+        // Sanity check: if address is 0 or all FF, VAT is probably empty/corrupt
+        if address == 0 || address == 0xFFFFFF {
+            println!("    (stopping: likely end of VAT)");
+            break;
+        }
+    }
+    println!("  Total VAT entries found: {}", count);
+}
+
+/// Comprehensive VRAM dump — counts all non-white pixels (including black text)
+fn dump_vram_full(emu: &mut Emu, label: &str) {
+    let upbase = 0xD40000u32;
+    let mut non_white_count = 0u32;
+    let mut black_count = 0u32;
+    let mut content_rows = Vec::new(); // rows with ANY non-white pixels
+
+    for row in 0..240u32 {
+        let row_base = upbase + row * 640;
+        let mut row_non_white = 0u32;
+        let mut row_black = 0u32;
+        for col in (0..640u32).step_by(2) {
+            let lo = emu.peek_byte(row_base + col);
+            let hi = emu.peek_byte(row_base + col + 1);
+            let pixel = (lo as u16) | ((hi as u16) << 8);
+            if pixel != 0xFFFF {
+                non_white_count += 1;
+                row_non_white += 1;
+                if pixel == 0x0000 {
+                    black_count += 1;
+                    row_black += 1;
+                }
+            }
+        }
+        if row_non_white > 0 && content_rows.len() < 20 {
+            content_rows.push((row, row_non_white, row_black));
+        }
+    }
+
+    println!("  VRAM [{}]: {} non-white px ({} black) across {} rows",
+        label, non_white_count, black_count, content_rows.len());
+    for &(row, nw, bl) in content_rows.iter().take(10) {
+        println!("    row {:3}: {} non-white ({} black)", row, nw, bl);
+    }
+    if content_rows.len() > 10 {
+        println!("    ... and {} more rows", content_rows.len() - 10);
+    }
 }

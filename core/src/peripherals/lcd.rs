@@ -171,6 +171,10 @@ pub struct LcdController {
     pub needs_lcd_event: bool,
     /// Set when LCD is disabled via control write — emu.rs should clear LCD event
     pub needs_lcd_clear: bool,
+
+    /// Cursor image RAM (offsets 0x800-0xBFF, 1024 bytes)
+    /// Used by CE programs (e.g. LibLoad) as scratch storage
+    cursor_image: [u8; 1024],
 }
 
 impl LcdController {
@@ -209,6 +213,7 @@ impl LcdController {
             ppf: 0,
             needs_lcd_event: false,
             needs_lcd_clear: false,
+            cursor_image: [0; 1024],
         }
     }
 
@@ -246,6 +251,7 @@ impl LcdController {
         self.ppf = 0;
         self.needs_lcd_event = false;
         self.needs_lcd_clear = false;
+        self.cursor_image = [0; 1024];
     }
 
     /// Check if LCD is enabled (bit 0)
@@ -615,6 +621,9 @@ impl LcdController {
             // Palette read (0x200-0x3FF)
             let palette_idx = (index - regs::PALETTE_START) as usize;
             self.palette[palette_idx]
+        } else if index >= 0x800 && index < 0xC00 {
+            // Cursor image RAM (0x800-0xBFF)
+            self.cursor_image[(index - 0x800) as usize]
         } else if index >= 0xFE0 {
             // Peripheral ID
             let id_idx = ((index - 0xFE0) >> 2) as usize;
@@ -700,6 +709,9 @@ impl LcdController {
                 let diff = (bgr565 ^ (bgr565 >> 11)) & 0x1F;
                 self.palette_rgb565[entry] = bgr565 ^ diff ^ (diff << 11);
             }
+        } else if index >= 0x800 && index < 0xC00 {
+            // Cursor image RAM (0x800-0xBFF)
+            self.cursor_image[(index - 0x800) as usize] = value;
         }
     }
 

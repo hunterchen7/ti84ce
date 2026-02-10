@@ -234,6 +234,9 @@ fun EmulatorScreen(
     var currentBackend by remember { mutableStateOf(emulator.getCurrentBackend() ?: "") }
     var showBackendDialog by remember { mutableStateOf(false) }
 
+    // Program files state
+    var loadedPrograms by remember { mutableStateOf<List<String>>(emptyList()) }
+
     // Debug info
     var totalCyclesExecuted by remember { mutableLongStateOf(0L) }
     var frameCounter by remember { mutableIntStateOf(0) }
@@ -305,6 +308,81 @@ fun EmulatorScreen(
                 loadError = "Error: ${e.message}"
                 Log.e("EmulatorScreen", "Error loading ROM", e)
             }
+        }
+    }
+
+    // Program file (.8xp/.8xv) picker launcher
+    val programPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+
+        val romBytes = currentRomBytes
+        if (romBytes == null) {
+            loadError = "Load a ROM first before sending program files"
+            return@rememberLauncherForActivityResult
+        }
+
+        try {
+            // Read all selected files
+            val fileEntries = uris.mapNotNull { uri ->
+                val name = uri.lastPathSegment?.substringAfterLast('/') ?: "unknown"
+                val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+                if (bytes != null) {
+                    Log.i("EmulatorScreen", "Read program file: $name (${bytes.size} bytes)")
+                    Pair(name, bytes)
+                } else null
+            }
+
+            if (fileEntries.isEmpty()) {
+                loadError = "Failed to read selected files"
+                return@rememberLauncherForActivityResult
+            }
+
+            // Stop emulation
+            isRunning = false
+
+            // Destroy and recreate emulator
+            emulator.destroy()
+            if (!emulator.create()) {
+                loadError = "Failed to recreate emulator"
+                return@rememberLauncherForActivityResult
+            }
+
+            // Reload ROM
+            val result = emulator.loadRom(romBytes)
+            if (result != 0) {
+                loadError = "Failed to reload ROM: error $result"
+                return@rememberLauncherForActivityResult
+            }
+
+            // Inject each program file
+            var totalInjected = 0
+            for ((name, bytes) in fileEntries) {
+                val count = emulator.sendFile(bytes)
+                if (count >= 0) {
+                    totalInjected += count
+                    Log.i("EmulatorScreen", "Injected $name: $count entries")
+                } else {
+                    Log.e("EmulatorScreen", "Failed to inject $name: error $count")
+                }
+            }
+
+            Log.i("EmulatorScreen", "Total entries injected: $totalInjected")
+
+            // Power on and start
+            emulator.powerOn()
+            loadedPrograms = fileEntries.map { it.first }
+            loadError = null
+            totalCyclesExecuted = 0L
+            frameCounter = 0
+            logLines.clear()
+            romLoaded = true
+            isRunning = true
+
+        } catch (e: Exception) {
+            loadError = "Error sending programs: ${e.message}"
+            Log.e("EmulatorScreen", "Error sending programs", e)
         }
     }
 
@@ -462,6 +540,8 @@ fun EmulatorScreen(
                 logLines.clear()
             },
             onLoadNewRom = { romPicker.launch(arrayOf("*/*")) },
+            onSendPrograms = { programPicker.launch(arrayOf("*/*")) },
+            loadedPrograms = loadedPrograms,
             frameCounter = frameCounter,
             totalCycles = totalCyclesExecuted,
             showDebug = showDebug,
@@ -607,6 +687,8 @@ fun EmulatorView(
     onToggleRunning: () -> Unit,
     onReset: () -> Unit,
     onLoadNewRom: () -> Unit,
+    onSendPrograms: () -> Unit,
+    loadedPrograms: List<String>,
     frameCounter: Int,
     totalCycles: Long,
     showDebug: Boolean,
@@ -657,6 +739,31 @@ fun EmulatorView(
                     onClick = {
                         scope.launch { drawerState.close() }
                         onLoadNewRom()
+                    },
+                    colors = NavigationDrawerItemDefaults.colors(
+                        unselectedContainerColor = Color.Transparent
+                    ),
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
+                // Send programs button
+                NavigationDrawerItem(
+                    label = {
+                        Column {
+                            Text("Send Programs (.8xp)", color = Color(0xFF4A9EFF))
+                            if (loadedPrograms.isNotEmpty()) {
+                                Text(
+                                    "${loadedPrograms.size} files loaded",
+                                    color = Color(0xFF4A9EFF).copy(alpha = 0.7f),
+                                    fontSize = 12.sp
+                                )
+                            }
+                        }
+                    },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onSendPrograms()
                     },
                     colors = NavigationDrawerItemDefaults.colors(
                         unselectedContainerColor = Color.Transparent

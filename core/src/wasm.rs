@@ -60,6 +60,24 @@ impl WasmEmu {
         }
     }
 
+    /// Send a .8xp/.8xv file to be injected into flash archive.
+    /// Must be called after load_rom() and before power_on().
+    /// Returns number of entries injected (>=0), or negative error code.
+    #[wasm_bindgen]
+    pub fn send_file(&mut self, data: &[u8]) -> i32 {
+        log(&format!("[WASM] send_file: {} bytes", data.len()));
+        match self.inner.send_file(data) {
+            Ok(count) => {
+                log(&format!("[WASM] send_file: injected {} entries", count));
+                count as i32
+            }
+            Err(code) => {
+                warn(&format!("[WASM] send_file: error {}", code));
+                code
+            }
+        }
+    }
+
     /// Power on the emulator (simulates ON key press).
     #[wasm_bindgen]
     pub fn power_on(&mut self) {

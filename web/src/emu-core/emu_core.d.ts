@@ -77,6 +77,12 @@ export class WasmEmu {
      */
     save_state_size(): number;
     /**
+     * Send a .8xp/.8xv file to be injected into flash archive.
+     * Must be called after load_rom() and before power_on().
+     * Returns number of entries injected (>=0), or negative error code.
+     */
+    send_file(data: Uint8Array): number;
+    /**
      * Set key state.
      * row: 0-7, col: 0-7
      * down: true for pressed, false for released
@@ -103,6 +109,7 @@ export interface InitOutput {
     readonly emu_run_cycles: (a: number, b: number) => number;
     readonly emu_save_state: (a: number, b: number, c: number) => number;
     readonly emu_save_state_size: (a: number) => number;
+    readonly emu_send_file: (a: number, b: number, c: number) => number;
     readonly emu_set_key: (a: number, b: number, c: number, d: number) => void;
     readonly emu_set_log_callback: (a: number) => void;
     readonly emu_backend_get_current: () => number;
@@ -122,6 +129,7 @@ export interface InitOutput {
     readonly wasmemu_run_cycles: (a: number, b: number) => number;
     readonly wasmemu_save_state: (a: number) => [number, number];
     readonly wasmemu_save_state_size: (a: number) => number;
+    readonly wasmemu_send_file: (a: number, b: number, c: number) => number;
     readonly wasmemu_set_key: (a: number, b: number, c: number, d: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

@@ -416,35 +416,66 @@ impl Emu {
     }
 
     /// Find the first free address in the flash archive region.
-    /// Free space is indicated by 0xFF bytes.
+    ///
+    /// Flash archive layout per sector (64KB):
+    ///   [sector_status_byte] [entry1] [entry2] ... [0xFF = free space]
+    ///
+    /// The sector status byte at offset 0 of each 64KB sector is NOT an entry.
+    /// Entries start at offset 1. Each entry: [flag] [size_lo] [size_hi] [payload...]
+    /// TI-OS stops scanning when it hits 0xFF.
     fn find_archive_free_addr(&self) -> Option<u32> {
-        // Archive region: 0x0C0000 to 0x3AFFFF
         const ARCHIVE_START: u32 = 0x0C0000;
         const ARCHIVE_END: u32 = 0x3B0000;
+        const SECTOR_SIZE: u32 = 0x10000; // 64KB
 
-        let mut addr = ARCHIVE_START;
-        while addr < ARCHIVE_END {
-            let byte = self.bus.flash.peek(addr);
-            if byte == 0xFF {
-                // Found free space — verify a reasonable stretch is free
-                return Some(addr);
+        let mut sector = ARCHIVE_START;
+        while sector < ARCHIVE_END {
+            let status = self.bus.flash.peek(sector);
+            if status == 0xFF {
+                // Empty sector — write sector status byte + entries start at byte 1
+                return Some(sector);
             }
-            // Skip over entries. The format has a 2-byte size after the
-            // type/type2/version/addr header. We use a simpler scan:
-            // just advance byte-by-byte looking for 0xFF region.
-            addr += 1;
+
+            // Sector has data (status 0xFC, 0xF0, etc.) — scan entries from byte 1
+            let mut addr = sector + 1;
+            let sector_end = sector + SECTOR_SIZE;
+            while addr < sector_end {
+                let flag = self.bus.flash.peek(addr);
+                if flag == 0xFF {
+                    // Free space within this sector
+                    return Some(addr);
+                }
+                if flag == 0xFC || flag == 0xF0 || flag == 0xFE {
+                    // Entry: skip using size field
+                    let size = u16::from_le_bytes([
+                        self.bus.flash.peek(addr + 1),
+                        self.bus.flash.peek(addr + 2),
+                    ]) as u32;
+                    if size > 0 && size < SECTOR_SIZE {
+                        addr += 3 + size;
+                    } else {
+                        // Invalid size — sector might be corrupt, skip to next
+                        break;
+                    }
+                } else {
+                    // Unknown byte — skip to next sector
+                    break;
+                }
+            }
+            sector += SECTOR_SIZE;
         }
         None
     }
 
     /// Inject a single variable entry into the flash archive.
     ///
-    /// Archive entry format (in flash):
-    ///   [type1] [type2=0] [version] [addr_lo] [addr_mid] [addr_hi]
-    ///   [namelen] [name bytes...] [data...]
+    /// Archive entry format (in flash, per WikiTI):
+    ///   [flag=0xFC] [size_lo] [size_hi] [type1] [type2=0] [version]
+    ///   [addr_lo] [addr_mid] [addr_hi] [namelen] [name bytes...] [data...]
     ///
-    /// The 3-byte address field is self-referential: it points to byte 0
-    /// of this entry (the type1 byte) in flash.
+    /// The flag byte 0xFC marks a valid entry. The 2-byte size (LE) is the
+    /// byte count of everything after the 3-byte header (flag+size).
+    /// The 3-byte address field is self-referential: it points to the flag byte.
     fn inject_archive_entry(&mut self, entry: &crate::ti_file::TiVarEntry) -> Result<(), i32> {
         const ARCHIVE_END: u32 = 0x3B0000;
         const SECTOR_SIZE: u32 = 0x10000; // 64KB
@@ -452,27 +483,48 @@ impl Emu {
         let free_addr = self.find_archive_free_addr().ok_or(-12)?; // -12 = no space
 
         let name_len = entry.name_len();
-        // Entry layout: type1(1) + type2(1) + version(1) + addr(3) + namelen(1) + name(N) + data
-        let header_len = 6 + 1 + name_len; // 6 for type1/type2/version/addr, 1 for namelen, N for name
-        let total_len = header_len + entry.data.len();
+        // Payload after the 3-byte header (flag+size):
+        //   type1(1) + type2(1) + version(1) + addr(3) + namelen(1) + name(N) + data
+        let payload_len = 6 + 1 + name_len + entry.data.len();
+        // Total entry: 3-byte header + payload
+        let total_len = 3 + payload_len;
 
-        // Check sector boundary: entry must not cross a 64KB boundary
-        let sector_start = free_addr & !(SECTOR_SIZE - 1);
-        let sector_end = sector_start + SECTOR_SIZE;
         let mut write_addr = free_addr;
-        if write_addr + total_len as u32 > sector_end {
-            // Skip to next sector
-            write_addr = sector_end;
-            if write_addr + total_len as u32 > ARCHIVE_END {
-                return Err(-12); // No space
-            }
+
+        // If free_addr is at a sector boundary, byte 0 is the sector status byte.
+        // Write 0xFC (sector with valid data) and start entries at byte 1.
+        let sector_offset = write_addr & (SECTOR_SIZE - 1);
+        if sector_offset == 0 {
+            self.bus.flash.write_direct(write_addr, 0xFC);
+            write_addr += 1;
         }
 
-        // The self-referential address points to the start of this entry
+        // Check sector boundary: entry must not cross a 64KB boundary
+        let sector_start = write_addr & !(SECTOR_SIZE - 1);
+        let sector_end = sector_start + SECTOR_SIZE;
+        if write_addr + total_len as u32 > sector_end {
+            // Skip to next sector — write sector status byte and start at byte 1
+            write_addr = sector_end;
+            if write_addr + 1 + total_len as u32 > ARCHIVE_END {
+                return Err(-12); // No space
+            }
+            self.bus.flash.write_direct(write_addr, 0xFC);
+            write_addr += 1;
+        }
+
+        // The self-referential address points to the flag byte (entry start)
         let self_addr = write_addr;
 
         // Write the entry
         let mut offset = write_addr;
+        // Flag byte: 0xFC = valid entry
+        self.bus.flash.write_direct(offset, 0xFC);
+        offset += 1;
+        // 2-byte size (LE): byte count of everything after the 3-byte header
+        self.bus.flash.write_direct(offset, payload_len as u8);
+        offset += 1;
+        self.bus.flash.write_direct(offset, (payload_len >> 8) as u8);
+        offset += 1;
         // type1
         self.bus.flash.write_direct(offset, entry.var_type.as_u8());
         offset += 1;
@@ -504,11 +556,12 @@ impl Emu {
         }
 
         log_evt!(
-            "ARCHIVE_INJECT name={} type=0x{:02X} addr=0x{:06X} size={}",
+            "ARCHIVE_INJECT name={} type=0x{:02X} addr=0x{:06X} total={} payload={}",
             entry.name_str(),
             entry.var_type.as_u8(),
             self_addr,
             total_len,
+            payload_len,
         );
 
         Ok(())
@@ -851,6 +904,16 @@ impl Emu {
             let cpu_speed = self.bus.ports.control.cpu_speed();
             self.scheduler.set_cpu_speed(cpu_speed);
 
+            // Handle CPU_SIGNAL_ANY_KEY equivalent (same as run_cycles)
+            if self.cpu.any_key_wake {
+                let key_state = self.bus.key_state().clone();
+                let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
+                if should_interrupt {
+                    use crate::peripherals::interrupt::sources;
+                    self.bus.ports.interrupt.raise(sources::KEYPAD);
+                }
+            }
+
             let was_halted = self.cpu.halted;
             let cycles_used = self.cpu.step(&mut self.bus);
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
@@ -890,6 +953,11 @@ impl Emu {
 
             if self.tick_peripherals(cycles_used) {
                 self.cpu.irq_pending = true;
+            }
+
+            // Stop if device went off
+            if self.is_off() {
+                break;
             }
 
             // HALT fast-forward (same batched approach as run_cycles)
@@ -1888,6 +1956,11 @@ impl Emu {
         self.bus.cycles()
     }
 
+    /// Get raw flash data (4MB) — useful for baking programs into a ROM file
+    pub fn flash_data(&self) -> &[u8] {
+        self.bus.flash.data()
+    }
+
     /// Peek at a memory byte without affecting emulation state
     pub fn peek_byte(&mut self, addr: u32) -> u8 {
         self.bus.peek_byte(addr)
@@ -1926,9 +1999,10 @@ impl Emu {
         // If key < 0x100, shift to high byte (CEmu convention)
         let key = if key < 0x100 { key << 8 } else { key };
 
-        self.poke_byte(CE_KBD_KEY, (key >> 8) as u8);
-        self.poke_byte(CE_KEY_EXTEND, (key & 0xFF) as u8);
-        self.poke_byte(CE_GRAPH_FLAGS2, flags | CE_KEY_READY);
+        // Use bus.poke_byte to bypass memory protection and cycle accounting
+        self.bus.poke_byte(CE_KBD_KEY, (key >> 8) as u8);
+        self.bus.poke_byte(CE_KEY_EXTEND, (key & 0xFF) as u8);
+        self.bus.poke_byte(CE_GRAPH_FLAGS2, flags | CE_KEY_READY);
 
         #[cfg(not(target_arch = "wasm32"))]
         {

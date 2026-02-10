@@ -101,6 +101,12 @@ export class CEmuBackend implements EmulatorBackend {
     return result;
   }
 
+  sendFile(_data: Uint8Array): number {
+    // TODO: CEmu backend doesn't support send_file yet
+    console.warn('[CEmu] sendFile not implemented for CEmu backend');
+    return -1;
+  }
+
   powerOn(): void {
     // CEmu handles power on during init/reset
   }

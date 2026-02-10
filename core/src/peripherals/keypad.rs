@@ -434,6 +434,10 @@ impl KeypadController {
     /// addr is offset from controller base (0x00-0x4F)
     /// key_state is the current keyboard matrix state
     pub fn read(&mut self, addr: u32, _key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> u8 {
+        // Beyond implemented registers (0x00-0x47), return 0
+        if addr >= 0x48 {
+            return 0;
+        }
         let index = (addr >> 2) & 0x7F;
         let bit_offset = (addr & 3) * 8;
 

@@ -123,9 +123,11 @@ export function Calculator({
   const [fps, setFps] = useState(0);
   const [backendName, setBackendName] = useState("");
   const [speed, setSpeed] = useState(1); // Speed multiplier (0.25x to 4x)
+  const [programFiles, setProgramFiles] = useState<string[]>([]); // Names of loaded .8xp/.8xv files
   const lastFrameTime = useRef(0);
   const frameCount = useRef(0);
   const romDataRef = useRef<Uint8Array | null>(null);
+  const programDataRef = useRef<{ name: string; data: Uint8Array }[]>([]); // Loaded program file data
   const speedRef = useRef(1); // Ref for use in animation loop
   const storageRef = useRef<StateStorage | null>(null);
   const romHashRef = useRef<string | null>(null);
@@ -432,20 +434,15 @@ export function Calculator({
           // Detect slow frames (>100ms means we're blocking the UI thread)
           if (elapsed > 100) {
             slowFrameCount++;
-            const emu = (backend as any).emu;
-            const status = emu?.debug_status?.() ?? "N/A";
-            console.warn(
-              `[EMU] Slow frame #${slowFrameCount}: ${elapsed.toFixed(0)}ms (frame ${totalFrames}) status: ${status}`,
-            );
-            // If too many consecutive slow frames, something is wrong
-            if (slowFrameCount >= 5) {
-              console.error(
-                `[EMU] ${slowFrameCount} slow frames detected — possible infinite loop. Stopping.`,
+            if (slowFrameCount <= 5 || slowFrameCount % 50 === 0) {
+              console.warn(
+                `[EMU] Slow frame #${slowFrameCount}: ${elapsed.toFixed(0)}ms (frame ${totalFrames})`,
               );
-              // Don't schedule next frame to prevent complete freeze
-              return;
             }
           } else {
+            if (slowFrameCount > 0) {
+              console.log(`[EMU] Recovered after ${slowFrameCount} slow frames`);
+            }
             slowFrameCount = 0; // Reset on good frame
           }
 
@@ -588,6 +585,79 @@ export function Calculator({
       backendRef.current.reset();
     }
   };
+
+  // Handle loading .8xp/.8xv program files
+  const handleProgramFiles = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    const romData = romDataRef.current;
+    if (!romData) {
+      setError("Load a ROM first before sending program files");
+      return;
+    }
+
+    // Read all selected files
+    const fileEntries: { name: string; data: Uint8Array }[] = [];
+    for (const file of Array.from(files)) {
+      const buffer = await file.arrayBuffer();
+      fileEntries.push({ name: file.name, data: new Uint8Array(buffer) });
+    }
+
+    // Store for future resets
+    programDataRef.current = fileEntries;
+    setProgramFiles(fileEntries.map(f => f.name));
+
+    // Stop current emulation and detach keyboard handlers
+    setIsRunning(false);
+    setRomLoaded(false);
+    if (animationRef.current) {
+      cancelAnimationFrame(animationRef.current);
+      animationRef.current = 0;
+    }
+
+    try {
+      // Create fresh backend, load ROM, inject files, then boot
+      const oldBackend = backendRef.current;
+      if (oldBackend) oldBackend.destroy();
+
+      const freshBackend = createBackend(backendTypeRef.current);
+      await freshBackend.init();
+      backendRef.current = freshBackend;
+
+      const result = await freshBackend.loadRom(romData);
+      if (result !== 0) {
+        setError(`Failed to reload ROM: error code ${result}`);
+        return;
+      }
+
+      // Inject each program file
+      let totalInjected = 0;
+      for (const entry of fileEntries) {
+        const count = freshBackend.sendFile(entry.data);
+        if (count >= 0) {
+          totalInjected += count;
+          console.log(`[Program] Injected ${entry.name}: ${count} entries`);
+        } else {
+          console.error(`[Program] Failed to inject ${entry.name}: error ${count}`);
+        }
+      }
+
+      console.log(`[Program] Total entries injected: ${totalInjected}`);
+
+      // Power on and start
+      freshBackend.powerOn();
+      setRomLoaded(true);
+      setIsRunning(true);
+      setError(null);
+    } catch (err) {
+      console.error("[Program] Error:", err);
+      setError(`Failed to load programs: ${err}`);
+    }
+
+    // Reset the file input so the same files can be re-selected
+    e.target.value = "";
+  }, []);
 
   const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newBackend = e.target.value as BackendType;

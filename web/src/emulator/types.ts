@@ -9,6 +9,7 @@ export interface EmulatorBackend {
 
   // ROM loading
   loadRom(data: Uint8Array): Promise<number>;
+  sendFile(data: Uint8Array): number;
   powerOn(): void;
   reset(): void;
 

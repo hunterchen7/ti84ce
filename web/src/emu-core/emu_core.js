@@ -160,6 +160,19 @@ export class WasmEmu {
         return ret >>> 0;
     }
     /**
+     * Send a .8xp/.8xv file to be injected into flash archive.
+     * Must be called after load_rom() and before power_on().
+     * Returns number of entries injected (>=0), or negative error code.
+     * @param {Uint8Array} data
+     * @returns {number}
+     */
+    send_file(data) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmemu_send_file(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
      * Set key state.
      * row: 0-7, col: 0-7
      * down: true for pressed, false for released
