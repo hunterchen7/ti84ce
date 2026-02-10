@@ -350,6 +350,13 @@ int EMU_FUNC(emu_load_rom)(Emu* emu, const uint8_t* data, size_t len) {
     return 0;
 }
 
+int EMU_FUNC(emu_send_file)(Emu* emu, const uint8_t* data, size_t len) {
+    (void)emu; (void)data; (void)len;
+    // TODO: Implement flash archive injection for CEmu backend
+    gui_console_printf("[CEmu] emu_send_file not yet implemented\n");
+    return -1;
+}
+
 void EMU_FUNC(emu_reset)(Emu* emu) {
     if (emu && emu == g_instance && emu->initialized) {
         asic_reset();
