@@ -37,6 +37,7 @@ export const wasmemu_run_cycles: (a: number, b: number) => number;
 export const wasmemu_save_state: (a: number) => [number, number];
 export const wasmemu_save_state_size: (a: number) => number;
 export const wasmemu_send_file: (a: number, b: number, c: number) => number;
+export const wasmemu_send_file_live: (a: number, b: number, c: number) => number;
 export const wasmemu_set_key: (a: number, b: number, c: number, d: number) => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __wbindgen_malloc: (a: number, b: number) => number;

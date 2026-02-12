@@ -567,6 +567,133 @@ impl Emu {
         Ok(())
     }
 
+    /// Find an existing valid archive entry by name and type.
+    ///
+    /// Scans flash archive sectors for a valid entry (flag=0xFC) matching
+    /// the given name, name length, and variable type. Returns the address
+    /// of the flag byte if found.
+    fn find_archive_entry_by_name(
+        &self,
+        name: &[u8; 8],
+        name_len: usize,
+        var_type: u8,
+    ) -> Option<u32> {
+        const ARCHIVE_START: u32 = 0x0C0000;
+        const ARCHIVE_END: u32 = 0x3B0000;
+        const SECTOR_SIZE: u32 = 0x10000; // 64KB
+
+        let mut sector = ARCHIVE_START;
+        while sector < ARCHIVE_END {
+            let status = self.bus.flash.peek(sector);
+            if status == 0xFF {
+                // Empty sector — no more entries
+                return None;
+            }
+
+            // Scan entries from byte 1
+            let mut addr = sector + 1;
+            let sector_end = sector + SECTOR_SIZE;
+            while addr < sector_end {
+                let flag = self.bus.flash.peek(addr);
+                if flag == 0xFF {
+                    break; // Free space — end of entries in this sector
+                }
+                if flag == 0xFC || flag == 0xF0 || flag == 0xFE {
+                    let size = u16::from_le_bytes([
+                        self.bus.flash.peek(addr + 1),
+                        self.bus.flash.peek(addr + 2),
+                    ]) as u32;
+                    if size == 0 || size >= SECTOR_SIZE {
+                        break; // Invalid — skip to next sector
+                    }
+
+                    // Only check valid entries (flag=0xFC)
+                    if flag == 0xFC && size >= 7 {
+                        let entry_type = self.bus.flash.peek(addr + 3);
+                        let entry_namelen = self.bus.flash.peek(addr + 9) as usize;
+                        if entry_type == var_type && entry_namelen == name_len {
+                            let mut matches = true;
+                            for i in 0..name_len {
+                                if self.bus.flash.peek(addr + 10 + i as u32) != name[i] {
+                                    matches = false;
+                                    break;
+                                }
+                            }
+                            if matches {
+                                return Some(addr);
+                            }
+                        }
+                    }
+
+                    addr += 3 + size;
+                } else {
+                    break; // Unknown byte — skip to next sector
+                }
+            }
+            sector += SECTOR_SIZE;
+        }
+        None
+    }
+
+    /// Invalidate a flash archive entry by clearing its flag byte.
+    ///
+    /// Changes the flag byte from 0xFC (valid) to 0xF0 (deleted).
+    /// This is a valid flash bit-clear operation (only clears bits, never sets).
+    /// The OS skips entries with flag 0xF0 during archive scanning.
+    fn invalidate_archive_entry(&mut self, flag_addr: u32) {
+        self.bus.flash.write_direct(flag_addr, 0xF0);
+    }
+
+    /// Send a file to the running emulator (live/hot reload).
+    ///
+    /// Unlike `send_file()` which only works before boot, this method works
+    /// while the emulator is running. It:
+    /// 1. Parses the TI file
+    /// 2. For each entry, invalidates any existing copy in flash archive
+    /// 3. Injects the new entry
+    /// 4. Performs a soft reset (preserves flash) + power on
+    ///
+    /// Returns Ok(count) with entries injected, or an error code.
+    pub fn send_file_live(&mut self, file_data: &[u8]) -> Result<usize, i32> {
+        use crate::ti_file::TiFile;
+
+        if !self.rom_loaded {
+            return Err(-10); // ROM not loaded
+        }
+
+        let ti_file = TiFile::parse(file_data).map_err(|e| {
+            log_evt!("SEND_FILE_LIVE_PARSE_ERROR: {}", e);
+            -11 // Parse error
+        })?;
+
+        let count = ti_file.entries.len();
+        for entry in &ti_file.entries {
+            // Invalidate existing entry with same name/type
+            if let Some(flag_addr) = self.find_archive_entry_by_name(
+                &entry.name,
+                entry.name_len(),
+                entry.var_type.as_u8(),
+            ) {
+                log_evt!(
+                    "ARCHIVE_INVALIDATE name={} addr=0x{:06X}",
+                    entry.name_str(),
+                    flag_addr
+                );
+                self.invalidate_archive_entry(flag_addr);
+            }
+
+            // Inject new entry
+            self.inject_archive_entry(entry)?;
+        }
+
+        // Soft reset (preserves flash) + power on
+        log_evt!("SEND_FILE_LIVE: soft reset after injecting {} entries", count);
+        self.reset();
+        self.power_on();
+
+        Ok(count)
+    }
+
     /// Set serial flash mode
     /// - true: Serial flash (newer TI-84 CE models) - uses cache timing
     /// - false: Parallel flash (older models) - uses constant 10 cycle timing
