@@ -229,7 +229,7 @@ The web app runs entirely in the browser using WebAssembly (~96KB gzipped).
 | Enter              | Enter                              |
 | Backspace / Delete | Del                                |
 | Arrow keys         | Navigation                         |
-| Escape             | Mode                               |
+| Escape             | Clear                              |
 | Shift              | 2nd                                |
 | Alt                | Alpha                              |
 | O                  | ON                                 |
@@ -246,6 +246,7 @@ The web app runs entirely in the browser using WebAssembly (~96KB gzipped).
 | PageDown           | Prgm                               |
 | PageUp             | Vars                               |
 | End                | Stat                               |
+| Ctrl+R / Cmd+R     | Resend last program file            |
 
 ### Development Workflow
 
