@@ -83,6 +83,13 @@ export class WasmEmu {
      */
     send_file(data: Uint8Array): number;
     /**
+     * Send a file to the running emulator (live/hot reload).
+     * Injects into flash archive, invalidating any existing copy,
+     * then performs a soft reset so the OS discovers the new program.
+     * Returns number of entries injected (>=0), or negative error code.
+     */
+    send_file_live(data: Uint8Array): number;
+    /**
      * Set key state.
      * row: 0-7, col: 0-7
      * down: true for pressed, false for released
@@ -130,6 +137,7 @@ export interface InitOutput {
     readonly wasmemu_save_state: (a: number) => [number, number];
     readonly wasmemu_save_state_size: (a: number) => number;
     readonly wasmemu_send_file: (a: number, b: number, c: number) => number;
+    readonly wasmemu_send_file_live: (a: number, b: number, c: number) => number;
     readonly wasmemu_set_key: (a: number, b: number, c: number, d: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;

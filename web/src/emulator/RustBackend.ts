@@ -75,6 +75,11 @@ export class RustBackend implements EmulatorBackend {
     return this.emu.send_file(data);
   }
 
+  sendFileLive(data: Uint8Array): number {
+    if (!this.emu) throw new Error('Backend not initialized');
+    return this.emu.send_file_live(data);
+  }
+
   powerOn(): void {
     if (!this.emu) throw new Error('Backend not initialized');
     this.emu.power_on();
