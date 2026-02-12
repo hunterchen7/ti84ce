@@ -243,6 +243,7 @@ The web app runs entirely in the browser using WebAssembly (~96KB gzipped).
 | Insert             | Sto                                |
 | F1-F5              | Y= / Window / Zoom / Trace / Graph |
 | Home               | Apps                               |
+| P                  | Prgm                               |
 | PageDown           | Prgm                               |
 | PageUp             | Vars                               |
 | End                | Stat                               |

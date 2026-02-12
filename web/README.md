@@ -64,6 +64,7 @@ The output will be in `dist/`.
 | Shift | 2nd |
 | Alt | Alpha |
 | O | ON key |
+| P | Prgm |
 | Ctrl+R / Cmd+R | Resend last program file |
 
 ## Architecture

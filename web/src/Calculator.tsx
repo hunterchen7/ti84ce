@@ -70,6 +70,8 @@ const KEY_MAP: Record<string, [number, number]> = {
   "(": [4, 4],
   c: [4, 5], // Cos
   C: [4, 5], // Cos
+  p: [4, 6], // Prgm
+  P: [4, 6], // Prgm
   PageDown: [4, 6], // Prgm
   End: [4, 7], // Stat
 
@@ -1176,7 +1178,7 @@ export function Calculator({
               Numbers: 0-9 | Arrows: Navigate | Enter: Enter | Backspace: Del
             </p>
             <p>+, -, *, / : Math | ( ) : Parens | ^: Power | V: √</p>
-            <p>Shift: 2nd | Alt: Alpha | Escape: Clear | O: ON | Space: Pause</p>
+            <p>Shift: 2nd | Alt: Alpha | Escape: Clear | O: ON | P: Prgm | Space: Pause</p>
           </div>
         </>
       )}
