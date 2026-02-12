@@ -173,6 +173,20 @@ export class WasmEmu {
         return ret;
     }
     /**
+     * Send a file to the running emulator (live/hot reload).
+     * Injects into flash archive, invalidating any existing copy,
+     * then performs a soft reset so the OS discovers the new program.
+     * Returns number of entries injected (>=0), or negative error code.
+     * @param {Uint8Array} data
+     * @returns {number}
+     */
+    send_file_live(data) {
+        const ptr0 = passArray8ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmemu_send_file_live(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
      * Set key state.
      * row: 0-7, col: 0-7
      * down: true for pressed, false for released
