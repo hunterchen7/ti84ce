@@ -60,11 +60,12 @@ The output will be in `dist/`.
 | Enter | Enter |
 | Backspace | Delete |
 | Arrow keys | Navigation |
-| Escape | Mode |
+| Escape | Clear |
 | Shift | 2nd |
 | Alt | Alpha |
 | O | ON key |
 | P | Prgm |
+| Ctrl+R / Cmd+R | Resend last program file |
 
 ## Architecture
 

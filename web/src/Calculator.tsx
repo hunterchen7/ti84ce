@@ -32,7 +32,7 @@ const KEY_MAP: Record<string, [number, number]> = {
   F4: [1, 1], // Trace
   F5: [1, 0], // Graph
   // Shift (2nd) handled specially - only triggers on release if no other key pressed
-  Escape: [1, 6], // Mode
+  Escape: [6, 6], // Clear
   Backspace: [1, 7], // Del
   Delete: [1, 7], // Del
 
@@ -132,7 +132,9 @@ export function Calculator({
   const frameCount = useRef(0);
   const romDataRef = useRef<Uint8Array | null>(null);
   const programDataRef = useRef<{ name: string; data: Uint8Array }[]>([]); // Loaded program file data
+  const programHandlesRef = useRef<FileSystemFileHandle[]>([]); // File handles for re-reading from disk
   const speedRef = useRef(1); // Ref for use in animation loop
+  const turboUntilRef = useRef(0); // Timestamp: turbo-speed until this time (for fast boot after live send)
   const storageRef = useRef<StateStorage | null>(null);
   const romHashRef = useRef<string | null>(null);
   const backendTypeRef = useRef<BackendType>(defaultBackend);
@@ -430,11 +432,16 @@ export function Calculator({
       // Time-accumulator approach: track how much real time has passed
       // and run exactly that many emulated frames (scaled by speed).
       // This ensures precise 60fps regardless of display refresh rate.
+      // Turbo mode: temporarily boost speed during boot after live file send
+      const turbo = performance.now() < turboUntilRef.current;
+      const effectiveSpeed = turbo ? 20 : speedRef.current;
+      const maxFramesPerTick = turbo ? 30 : 4;
+
       if (lastLoopTime > 0) {
         let delta = timestamp - lastLoopTime;
         // Clamp delta to avoid spiral of death after tab suspension
         if (delta > 200) delta = TARGET_FRAME_MS;
-        timeAccumulator += delta * speedRef.current;
+        timeAccumulator += delta * effectiveSpeed;
       }
       lastLoopTime = timestamp;
 
@@ -464,8 +471,8 @@ export function Calculator({
             slowFrameCount = 0;
           }
 
-          // Safety: don't run more than 4 frames per rAF to avoid blocking UI
-          if (framesThisTick >= 4) {
+          // Safety: cap frames per rAF to avoid blocking UI
+          if (framesThisTick >= maxFramesPerTick) {
             timeAccumulator = 0;
             break;
           }
@@ -542,6 +549,15 @@ export function Calculator({
           setTimeout(() => backend.setKey(2, 4, false), 50); // x² up
         }, 50);
         return;
+      }
+
+      // Ctrl+R / Cmd+R: resend last program files (override browser refresh)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
+        if (programHandlesRef.current.length > 0 || programDataRef.current.length > 0) {
+          e.preventDefault();
+          resendPrograms();
+          return;
+        }
       }
 
       // Don't intercept browser shortcuts (Ctrl/Cmd + key)
@@ -631,7 +647,33 @@ export function Calculator({
     programDataRef.current = fileEntries;
     setProgramFiles(fileEntries.map(f => f.name));
 
-    // Stop current emulation and detach keyboard handlers
+    const backend = backendRef.current;
+
+    // Live path: emulator is already running — inject + soft reboot in-place
+    if (backend?.isRomLoaded) {
+      try {
+        let totalInjected = 0;
+        for (const entry of fileEntries) {
+          const count = backend.sendFileLive(entry.data);
+          if (count >= 0) {
+            totalInjected += count;
+            console.log(`[Program Live] Injected ${entry.name}: ${count} entries`);
+          } else {
+            console.error(`[Program Live] Failed to inject ${entry.name}: error ${count}`);
+          }
+        }
+        console.log(`[Program Live] Total entries injected: ${totalInjected}, soft reboot done`);
+        // Turbo-speed through boot — slightly undershot so user doesn't notice
+        turboUntilRef.current = performance.now() + 300;
+        setError(null);
+      } catch (err) {
+        console.error("[Program Live] Error:", err);
+        setError(`Failed to live-send programs: ${err}`);
+      }
+      return;
+    }
+
+    // Cold boot path: no emulator running — create fresh backend
     setIsRunning(false);
     setRomLoaded(false);
     if (animationRef.current) {
@@ -684,6 +726,61 @@ export function Calculator({
     }
   }, []);
 
+  // Resend last program files — re-reads from disk via FileSystemFileHandle if available
+  const resendPrograms = useCallback(async () => {
+    const backend = backendRef.current;
+    if (!backend?.isRomLoaded) return;
+
+    const handles = programHandlesRef.current;
+    if (handles.length > 0) {
+      // Re-read fresh bytes from disk
+      try {
+        let totalInjected = 0;
+        for (const handle of handles) {
+          const file = await handle.getFile();
+          const data = new Uint8Array(await file.arrayBuffer());
+          const count = backend.sendFileLive(data);
+          if (count >= 0) {
+            totalInjected += count;
+            console.log(`[Resend] Injected ${file.name}: ${count} entries`);
+          } else {
+            console.error(`[Resend] Failed to inject ${file.name}: error ${count}`);
+          }
+        }
+        console.log(`[Resend] Total entries injected: ${totalInjected}, soft reboot done`);
+        turboUntilRef.current = performance.now() + 300;
+        setError(null);
+      } catch (err) {
+        console.error("[Resend] Error:", err);
+        setError(`Failed to resend programs: ${err}`);
+      }
+      return;
+    }
+
+    // Fallback: resend cached data
+    const cached = programDataRef.current;
+    if (cached.length > 0) {
+      try {
+        let totalInjected = 0;
+        for (const entry of cached) {
+          const count = backend.sendFileLive(entry.data);
+          if (count >= 0) {
+            totalInjected += count;
+            console.log(`[Resend] Injected ${entry.name}: ${count} entries (cached)`);
+          } else {
+            console.error(`[Resend] Failed to inject ${entry.name}: error ${count}`);
+          }
+        }
+        console.log(`[Resend] Total entries injected: ${totalInjected}, soft reboot done`);
+        turboUntilRef.current = performance.now() + 300;
+        setError(null);
+      } catch (err) {
+        console.error("[Resend] Error:", err);
+        setError(`Failed to resend programs: ${err}`);
+      }
+    }
+  }, []);
+
   // Handle file input change for .8xp/.8xv programs
   const handleProgramFiles = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -732,13 +829,31 @@ export function Calculator({
     const romFiles: File[] = [];
     const programFilesList: File[] = [];
 
-    for (const file of files) {
+    // Try to capture FileSystemFileHandles for program files (Chromium only)
+    const handles: FileSystemFileHandle[] = [];
+    const items = Array.from(e.dataTransfer.items);
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
       const name = file.name.toLowerCase();
       if (ROM_EXTENSIONS.some(ext => name.endsWith(ext))) {
         romFiles.push(file);
       } else if (PROGRAM_EXTENSIONS.some(ext => name.endsWith(ext))) {
         programFilesList.push(file);
+        // Try to get a persistent handle for re-reading later
+        const item = items[i];
+        if (item && 'getAsFileSystemHandle' in item) {
+          try {
+            const handle = await (item as any).getAsFileSystemHandle();
+            if (handle?.kind === 'file') handles.push(handle);
+          } catch { /* Not supported or permission denied */ }
+        }
       }
+    }
+
+    // Store handles if we got them for all program files
+    if (handles.length === programFilesList.length && handles.length > 0) {
+      programHandlesRef.current = handles;
     }
 
     // Load ROM first if present (only use the first one)
@@ -999,9 +1114,18 @@ export function Calculator({
                   style={{ display: "none" }}
                 />
                 {programFiles.length > 0 && (
-                  <span style={{ fontSize: "0.75rem", color: "#888" }}>
-                    {programFiles.join(", ")}
-                  </span>
+                  <>
+                    <button
+                      onClick={resendPrograms}
+                      style={{ padding: "6px 16px" }}
+                      title="Re-read and resend last program files (Ctrl+R)"
+                    >
+                      Resend
+                    </button>
+                    <span style={{ fontSize: "0.75rem", color: "#888" }}>
+                      {programFiles.join(", ")}
+                    </span>
+                  </>
                 )}
               </>
             )}
