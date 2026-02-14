@@ -2098,6 +2098,38 @@ impl Emu {
         self.bus.write_byte(addr, value);
     }
 
+    // === Debug port API ===
+
+    /// Enable debug port interception (CE toolchain: 0xFB0000=stdout, 0xFC0000=stderr)
+    pub fn enable_debug_ports(&mut self) {
+        self.bus.set_debug_ports(true);
+    }
+
+    /// Disable debug port interception
+    pub fn disable_debug_ports(&mut self) {
+        self.bus.set_debug_ports(false);
+    }
+
+    /// Take all pending stdout debug output lines
+    pub fn take_debug_stdout(&mut self) -> Vec<String> {
+        self.bus.take_debug_stdout()
+    }
+
+    /// Take all pending stderr debug output lines
+    pub fn take_debug_stderr(&mut self) -> Vec<String> {
+        self.bus.take_debug_stderr()
+    }
+
+    /// Check if program signaled termination (null byte on debug stdout port)
+    pub fn debug_terminated(&self) -> bool {
+        self.bus.debug_terminated()
+    }
+
+    /// Reset debug port state
+    pub fn reset_debug_state(&mut self) {
+        self.bus.reset_debug_state();
+    }
+
     /// High-level key injection (like CEmu's sendKey)
     /// This writes directly to TI-OS memory locations, bypassing hardware keypad.
     /// Returns true if key was successfully injected, false if TI-OS wasn't ready.

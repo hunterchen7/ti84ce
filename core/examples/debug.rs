@@ -19,6 +19,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::Path;
 use std::process::Command;
+use std::time::Instant;
 
 use emu_core::{Emu, StepInfo, IoTarget, IoOpType, disassemble};
 
@@ -85,6 +86,55 @@ fn main() {
             // Load baked ROM, boot, simulate pressing prgm → down → enter → enter
             cmd_rundoom();
         }
+        "runprog" => {
+            if args.len() < 3 {
+                eprintln!("Usage: debug runprog <file.8xp> [lib1.8xv lib2.8xv ...] [--run-cycles N]");
+                return;
+            }
+            // Parse --run-cycles if provided, default to 100M
+            let mut run_cycles = 100_000_000u64;
+            let mut file_args: Vec<&str> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "--run-cycles" {
+                    if let Some(val) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                        run_cycles = val;
+                    }
+                    i += 2;
+                } else {
+                    file_args.push(&args[i]);
+                    i += 1;
+                }
+            }
+            cmd_runprog(&file_args, run_cycles);
+        }
+        "run" => {
+            if args.len() < 3 {
+                eprintln!("Usage: debug run <file.8xp> [lib1.8xv ...] [--timeout <secs>] [--speed <multiplier>]");
+                return;
+            }
+            let mut timeout_secs = 30u64;
+            let mut speed: Option<f64> = None;
+            let mut file_args: Vec<&str> = Vec::new();
+            let mut i = 2;
+            while i < args.len() {
+                if args[i] == "--timeout" {
+                    if let Some(val) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                        timeout_secs = val;
+                    }
+                    i += 2;
+                } else if args[i] == "--speed" {
+                    if let Some(val) = args.get(i + 1).and_then(|s| s.parse().ok()) {
+                        speed = Some(val);
+                    }
+                    i += 2;
+                } else {
+                    file_args.push(&args[i]);
+                    i += 1;
+                }
+            }
+            cmd_run(&file_args, timeout_secs, speed);
+        }
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -148,6 +198,14 @@ Commands:
                     Create a new ROM with .8xp/.8xv files pre-installed in
                     the flash archive. The output ROM can be loaded directly
                     and programs will appear in TI-OS without needing sendfile.
+
+  run <file.8xp> [lib.8xv ...]
+                    Run a program headless with debug output capture.
+                    Boots TI-OS, injects files, launches via Asm(prgm<NAME>).
+                    Captures CE toolchain debug output (0xFB0000) to stdout.
+                    Terminates on null sentinel, timeout, or power-off.
+                    Options: --timeout <secs> (default: 30)
+                             --speed <N> (e.g. 1=real-time, default: unthrottled)
 
   help              Show this help message
 
@@ -2138,6 +2196,262 @@ fn dump_os_state(emu: &mut Emu, label: &str) {
     print!("    userMem@{:06X}: ", user_mem);
     for i in 0..16 { print!("{:02X} ", emu.peek_byte(user_mem + i)); }
     println!();
+}
+
+fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
+    if files.is_empty() {
+        eprintln!("No program file specified.");
+        return;
+    }
+
+    let prog_path = files[0];
+    let prog_name = Path::new(prog_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("UNKNOWN")
+        .to_uppercase();
+
+    // Load ROM
+    let rom_data = match load_rom() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+
+    // Inject all files (program + libraries)
+    for file_path in files {
+        let file_data = match fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", file_path, e);
+                continue;
+            }
+        };
+        eprintln!("Injecting: {} ({} bytes)", file_path, file_data.len());
+        match emu.send_file(&file_data) {
+            Ok(count) => eprintln!("  {} entries", count),
+            Err(code) => eprintln!("  ERROR: send_file returned {}", code),
+        }
+    }
+
+    // Enable debug port interception
+    emu.enable_debug_ports();
+
+    // Boot TI-OS
+    eprintln!("Booting TI-OS...");
+    emu.press_on_key();
+    let mut total = 0u64;
+    while total < 175_000_000 {
+        total += emu.run_cycles(1_000_000) as u64;
+    }
+    emu.release_on_key();
+    emu.run_cycles(2_000_000);
+    eprintln!("Boot complete at {:.1}M cycles, PC={:06X}", total as f64 / 1e6, emu.pc());
+
+    // Launch via sendKey: ENTER → CLEAR → Asm( → prgm → <NAME> → ENTER
+    eprintln!("Launching Asm(prgm{})...", prog_name);
+    send_os_key_wait(&mut emu, 0x05, "ENTER-init");
+    send_os_key_wait(&mut emu, 0x09, "CLEAR");
+    send_os_key_wait(&mut emu, 0xFC9C, "Asm(");
+    send_os_key_wait(&mut emu, 0xDA, "prgm");
+    for ch in prog_name.chars() {
+        if ch.is_ascii_uppercase() {
+            let key = 0x9A + (ch as u16 - 'A' as u16);
+            send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+        } else if ch.is_ascii_digit() {
+            let key = 0x80 + (ch as u16 - '0' as u16);
+            send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+        }
+    }
+    send_os_key_wait(&mut emu, 0x05, "ENTER-exec");
+    eprintln!("Program launched.");
+
+    // Run loop with debug output capture
+    let timeout_cycles = timeout_secs * 48_000_000;
+    let mut exec_cycles = 0u64;
+    let wall_start = Instant::now();
+
+    // Speed control: None = unthrottled, Some(N) = N * 800K cycles per 16ms frame
+    let throttled = speed.is_some();
+    let cycles_per_frame = speed.map(|s| (800_000.0 * s) as u32).unwrap_or(1_000_000);
+    let frame_duration = std::time::Duration::from_millis(16);
+
+    if throttled {
+        eprintln!("Running at {:.1}x speed (timeout: {}s)...", speed.unwrap(), timeout_secs);
+    } else {
+        eprintln!("Running unthrottled (timeout: {}s)...", timeout_secs);
+    }
+
+    loop {
+        let frame_start = Instant::now();
+
+        exec_cycles += emu.run_cycles(cycles_per_frame) as u64;
+
+        // Drain and print debug output
+        for line in emu.take_debug_stdout() {
+            print!("{}", line);
+        }
+        for line in emu.take_debug_stderr() {
+            eprint!("{}", line);
+        }
+
+        // Check termination conditions
+        if emu.debug_terminated() {
+            // Flush any remaining buffered output
+            for line in emu.take_debug_stdout() {
+                print!("{}", line);
+            }
+            let wall_elapsed = wall_start.elapsed().as_secs_f64();
+            eprintln!("\n[Terminated via null sentinel after {:.2}M cycles, {:.2}s wall time]",
+                exec_cycles as f64 / 1e6, wall_elapsed);
+            break;
+        }
+        if exec_cycles >= timeout_cycles {
+            let wall_elapsed = wall_start.elapsed().as_secs_f64();
+            eprintln!("\n[Timeout after {}s ({:.2}M cycles, {:.2}s wall time)]",
+                timeout_secs, exec_cycles as f64 / 1e6, wall_elapsed);
+            break;
+        }
+        if emu.is_off() {
+            let wall_elapsed = wall_start.elapsed().as_secs_f64();
+            eprintln!("\n[Calculator powered off after {:.2}M cycles, {:.2}s wall time]",
+                exec_cycles as f64 / 1e6, wall_elapsed);
+            break;
+        }
+
+        // Throttle if speed-limited
+        if throttled {
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_duration {
+                std::thread::sleep(frame_duration - elapsed);
+            }
+        }
+    }
+}
+
+fn cmd_runprog(files: &[&str], post_launch_cycles: u64) {
+    // First file must be the .8xp program
+    let prog_path = files[0];
+    let prog_name = Path::new(prog_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("UNKNOWN")
+        .to_uppercase();
+
+    println!("\n=== Run Program: {} ===\n", prog_name);
+
+    // Load ROM
+    let rom_data = match load_rom() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+
+    // Inject all files (program + libraries)
+    let mut total_entries = 0;
+    for file_path in files {
+        let file_data = match fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", file_path, e);
+                continue;
+            }
+        };
+        println!("Injecting: {} ({} bytes)", file_path, file_data.len());
+        match emu.send_file(&file_data) {
+            Ok(count) => {
+                println!("  {} entries", count);
+                total_entries += count;
+            }
+            Err(code) => {
+                eprintln!("  ERROR: send_file returned {}", code);
+            }
+        }
+    }
+
+    if total_entries == 0 {
+        eprintln!("No files were injected. Aborting.");
+        return;
+    }
+
+    // Phase 1: Boot TI-OS
+    println!("\nPhase 1: Booting TI-OS...");
+    emu.press_on_key();
+    let mut total = 0u64;
+    while total < 175_000_000 {
+        total += emu.run_cycles(1_000_000) as u64;
+    }
+    println!("Boot complete. PC={:06X}, halted={}", emu.pc(), emu.is_halted());
+
+    emu.release_on_key();
+    emu.run_cycles(2_000_000);
+
+    // Dump VAT to verify program is registered
+    dump_vat(&mut emu);
+
+    // Phase 2: Launch via sendKey — type Asm(prgm<NAME>)
+    println!("\nPhase 2: Launching {} via sendKey...", prog_name);
+
+    // ENTER to dismiss boot screen
+    println!("  ENTER (dismiss boot screen)");
+    send_os_key_wait(&mut emu, 0x05, "ENTER-init");
+
+    // CLEAR for clean homescreen
+    println!("  CLEAR");
+    send_os_key_wait(&mut emu, 0x09, "CLEAR");
+
+    // Asm( token
+    println!("  Asm( token");
+    send_os_key_wait(&mut emu, 0xFC9C, "Asm(");
+
+    // prgm token
+    println!("  prgm token");
+    send_os_key_wait(&mut emu, 0xDA, "prgm");
+
+    // Type program name letter by letter
+    println!("  Type {}", prog_name);
+    for ch in prog_name.chars() {
+        if ch.is_ascii_uppercase() {
+            let key = 0x9A + (ch as u16 - 'A' as u16);
+            send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+        } else if ch.is_ascii_digit() {
+            // Digits: 0=0x80, 1=0x81, ... 9=0x89
+            let key = 0x80 + (ch as u16 - '0' as u16);
+            send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+        }
+    }
+
+    // Screenshot before execution
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "/tmp/runprog_before.ppm");
+    convert_ppm_to_png("/tmp/runprog_before.ppm", "/tmp/runprog_before.png");
+    println!("\n  Pre-exec screenshot: /tmp/runprog_before.png");
+
+    // Phase 3: Execute!
+    println!("\nPhase 3: ENTER to execute Asm(prgm{})...", prog_name);
+    send_os_key_wait(&mut emu, 0x05, "ENTER-exec");
+
+    // Run for the requested number of cycles
+    println!("  Running {:.0}M cycles...", post_launch_cycles as f64 / 1_000_000.0);
+    let mut ran = 0u64;
+    while ran < post_launch_cycles {
+        let chunk = std::cmp::min(1_000_000, (post_launch_cycles - ran) as u32);
+        ran += emu.run_cycles(chunk) as u64;
+    }
+    println!("  PC={:06X} halted={}", emu.pc(), emu.is_halted());
+
+    // Final screenshot
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "/tmp/runprog_after.ppm");
+    convert_ppm_to_png("/tmp/runprog_after.ppm", "/tmp/runprog_after.png");
+
+    println!("\nScreenshots:");
+    println!("  Before: /tmp/runprog_before.png");
+    println!("  After:  /tmp/runprog_after.png");
 }
 
 fn cmd_rundoom() {

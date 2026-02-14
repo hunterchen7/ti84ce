@@ -492,6 +492,20 @@ pub struct Bus {
     nmi_requested: bool,
     /// Current CPU PC for unprivileged code checks (set by CPU before each instruction)
     pub cpu_pc: u32,
+
+    // === Debug port interception (CE toolchain: 0xFB0000=stdout, 0xFC0000=stderr, 0xFD0000=control) ===
+    /// Debug port stdout byte buffer (flushed on newline)
+    debug_stdout_buf: Vec<u8>,
+    /// Debug port stderr byte buffer (flushed on newline)
+    debug_stderr_buf: Vec<u8>,
+    /// Flushed stdout lines ready for consumption
+    debug_stdout_lines: Vec<String>,
+    /// Flushed stderr lines ready for consumption
+    debug_stderr_lines: Vec<String>,
+    /// Whether debug port interception is enabled
+    debug_ports_enabled: bool,
+    /// Termination sentinel received (null byte written to 0xFB0000)
+    debug_terminated: bool,
 }
 
 impl Bus {
@@ -553,6 +567,13 @@ impl Bus {
             spi_needs_schedule: false,
             nmi_requested: false,
             cpu_pc: 0,
+            // Debug port fields
+            debug_stdout_buf: Vec::new(),
+            debug_stderr_buf: Vec::new(),
+            debug_stdout_lines: Vec::new(),
+            debug_stderr_lines: Vec::new(),
+            debug_ports_enabled: false,
+            debug_terminated: false,
         }
     }
 
@@ -593,6 +614,37 @@ impl Bus {
     /// Get the SPI controller for scheduler operations
     pub fn spi(&mut self) -> &mut SpiController {
         &mut self.spi
+    }
+
+    // === Debug port accessors ===
+
+    /// Enable or disable debug port interception
+    pub fn set_debug_ports(&mut self, enabled: bool) {
+        self.debug_ports_enabled = enabled;
+    }
+
+    /// Take all pending stdout lines (drains the buffer)
+    pub fn take_debug_stdout(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.debug_stdout_lines)
+    }
+
+    /// Take all pending stderr lines (drains the buffer)
+    pub fn take_debug_stderr(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.debug_stderr_lines)
+    }
+
+    /// Check if program signaled termination via null byte on stdout
+    pub fn debug_terminated(&self) -> bool {
+        self.debug_terminated
+    }
+
+    /// Reset debug state (clear buffers, terminated flag)
+    pub fn reset_debug_state(&mut self) {
+        self.debug_stdout_buf.clear();
+        self.debug_stderr_buf.clear();
+        self.debug_stdout_lines.clear();
+        self.debug_stderr_lines.clear();
+        self.debug_terminated = false;
     }
 
     /// Determine which memory region an address maps to
@@ -874,6 +926,61 @@ impl Bus {
                 };
 
                 if !is_mapped {
+                    // Debug port interception (CE toolchain conventions)
+                    // dbg_printf uses sprintf(dbgout, ...) which writes to sequential
+                    // addresses starting at 0xFB0000. Each byte write in the range is
+                    // one output character. Null at 0xFB0000 exactly = termination sentinel.
+                    if self.debug_ports_enabled {
+                        if addr >= 0xFB0000 && addr < 0xFC0000 {
+                            // stdout range
+                            if value == 0x00 && addr == 0xFB0000 {
+                                // Null at base address = explicit termination sentinel
+                                if !self.debug_stdout_buf.is_empty() {
+                                    let line = String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
+                                    self.debug_stdout_lines.push(line);
+                                    self.debug_stdout_buf.clear();
+                                }
+                                self.debug_terminated = true;
+                            } else if value == 0x00 {
+                                // Null at other offsets = sprintf string terminator, flush buffer
+                                if !self.debug_stdout_buf.is_empty() {
+                                    let line = String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
+                                    self.debug_stdout_lines.push(line);
+                                    self.debug_stdout_buf.clear();
+                                }
+                            } else if value == b'\n' {
+                                self.debug_stdout_buf.push(value);
+                                let line = String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
+                                self.debug_stdout_lines.push(line);
+                                self.debug_stdout_buf.clear();
+                            } else {
+                                self.debug_stdout_buf.push(value);
+                            }
+                        } else if addr >= 0xFC0000 && addr < 0xFD0000 {
+                            // stderr range
+                            if value == 0x00 {
+                                if !self.debug_stderr_buf.is_empty() {
+                                    let line = String::from_utf8_lossy(&self.debug_stderr_buf).to_string();
+                                    self.debug_stderr_lines.push(line);
+                                    self.debug_stderr_buf.clear();
+                                }
+                            } else if value == b'\n' {
+                                self.debug_stderr_buf.push(value);
+                                let line = String::from_utf8_lossy(&self.debug_stderr_buf).to_string();
+                                self.debug_stderr_lines.push(line);
+                                self.debug_stderr_buf.clear();
+                            } else {
+                                self.debug_stderr_buf.push(value);
+                            }
+                        } else if addr == 0xFD0000 {
+                            // Console control: clear buffers
+                            self.debug_stdout_buf.clear();
+                            self.debug_stderr_buf.clear();
+                            self.debug_stdout_lines.clear();
+                            self.debug_stderr_lines.clear();
+                        }
+                    }
+
                     // Unmapped MMIO: writes ignored, only cycle penalty
                     if addr >= 0xFB0000 && addr < 0xFF0000 {
                         self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES; // 3
