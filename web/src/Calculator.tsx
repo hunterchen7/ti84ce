@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import {
   createBackend,
   type EmulatorBackend,
@@ -124,7 +124,16 @@ export function Calculator({
   const [initialized, setInitialized] = useState(false);
   const [fps, setFps] = useState(0);
   const [backendName, setBackendName] = useState("");
-  const [speed, setSpeed] = useState(1); // Speed multiplier (0.25x to 4x)
+  // Non-linear speed steps: 0.25-2.5 by 0.25, 3-10 by 0.5, 11-20 by 1
+  const speedSteps = useMemo(() => {
+    const steps: number[] = [];
+    for (let s = 0.25; s <= 2.5; s += 0.25) steps.push(s);
+    for (let s = 3; s <= 10; s += 0.5) steps.push(s);
+    for (let s = 11; s <= 20; s += 1) steps.push(s);
+    return steps;
+  }, []);
+  const [speedIndex, setSpeedIndex] = useState(3); // index 3 = 1x
+  const speed = speedSteps[speedIndex];
   const [programFiles, setProgramFiles] = useState<string[]>([]); // Names of loaded .8xp/.8xv files
   const [isDragging, setIsDragging] = useState(false);
   const dragCounterRef = useRef(0);
@@ -1134,11 +1143,11 @@ export function Calculator({
             >
               <input
                 type="range"
-                min="0.25"
-                max="4"
-                step="0.25"
-                value={speed}
-                onChange={(e) => setSpeed(parseFloat(e.target.value))}
+                min="0"
+                max={speedSteps.length - 1}
+                step="1"
+                value={speedIndex}
+                onChange={(e) => setSpeedIndex(parseInt(e.target.value))}
                 style={{ width: "80px" }}
                 title="CPU Speed"
               />

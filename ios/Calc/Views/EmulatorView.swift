@@ -18,6 +18,18 @@ struct EmulatorView: View {
     @State private var calculatorScale: CGFloat = CGFloat(EmulatorPreferences.calculatorScale)
     @State private var calculatorYOffset: CGFloat = CGFloat(EmulatorPreferences.calculatorYOffset)
 
+    // Non-linear speed steps: 0.25-2.5 by 0.25, 3-10 by 0.5, 11-20 by 1
+    private static let speedSteps: [Float] = {
+        var steps: [Float] = []
+        var s: Float = 0.25
+        while s <= 2.5 { steps.append(s); s += 0.25 }
+        s = 3
+        while s <= 10 { steps.append(s); s += 0.5 }
+        s = 11
+        while s <= 20 { steps.append(s); s += 1 }
+        return steps
+    }()
+
     private let sidebarWidth: CGFloat = 170
     private let edgeSwipeWidth: CGFloat = 30
 
@@ -221,15 +233,26 @@ struct EmulatorView: View {
 
                 // Speed control
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Speed: \(String(format: state.speedMultiplier >= 1 ? "%.0fx" : "%.2fx", state.speedMultiplier))")
+                    Text("Speed: \(String(format: state.speedMultiplier.truncatingRemainder(dividingBy: 1) == 0 ? "%.0fx" : "%gx", state.speedMultiplier))")
                         .font(.system(size: 14))
                         .foregroundColor(.white)
                         .padding(.horizontal, 16)
 
                     Slider(
-                        value: $state.speedMultiplier,
-                        in: 0.25...5,
-                        step: 0.25
+                        value: Binding<Float>(
+                            get: {
+                                let steps = EmulatorView.speedSteps
+                                let idx = steps.enumerated().min(by: { abs($0.element - state.speedMultiplier) < abs($1.element - state.speedMultiplier) })?.offset ?? 3
+                                return Float(idx)
+                            },
+                            set: { newIdx in
+                                let steps = EmulatorView.speedSteps
+                                let i = max(0, min(Int(newIdx.rounded()), steps.count - 1))
+                                state.speedMultiplier = steps[i]
+                            }
+                        ),
+                        in: 0...Float(Self.speedSteps.count - 1),
+                        step: 1
                     )
                     .tint(Color(red: 0.298, green: 0.686, blue: 0.314))
                     .padding(.horizontal, 16)

@@ -835,23 +835,36 @@ fun EmulatorView(
 
                 // Speed control
                 Text(
-                    text = "Speed: ${if (speedMultiplier >= 1f) "${speedMultiplier.toInt()}x" else String.format("%.2fx", speedMultiplier)}",
+                    text = "Speed: ${if (speedMultiplier % 1f == 0f) "${speedMultiplier.toInt()}x" else "${speedMultiplier}x"}",
                     color = Color.White,
                     fontSize = 14.sp,
                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
                 )
-                Slider(
-                    value = speedMultiplier,
-                    onValueChange = { onSpeedChange(it) },
-                    valueRange = 0.25f..5f,
-                    steps = 18,  // (5 - 0.25) / 0.25 - 1 = 18 steps for 0.25 increments
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                    colors = SliderDefaults.colors(
-                        thumbColor = Color(0xFF4CAF50),
-                        activeTrackColor = Color(0xFF4CAF50),
-                        inactiveTrackColor = Color(0xFF333344)
+                run {
+                    // Non-linear speed steps: 0.25-2.5 by 0.25, 3-10 by 0.5, 11-20 by 1
+                    val speedSteps = remember {
+                        buildList {
+                            var s = 0.25f; while (s <= 2.5f) { add(s); s += 0.25f }
+                            s = 3f; while (s <= 10f) { add(s); s += 0.5f }
+                            s = 11f; while (s <= 20f) { add(s); s += 1f }
+                        }
+                    }
+                    val currentIndex = remember(speedMultiplier) {
+                        speedSteps.indices.minByOrNull { kotlin.math.abs(speedSteps[it] - speedMultiplier) } ?: 3
+                    }
+                    Slider(
+                        value = currentIndex.toFloat(),
+                        onValueChange = { idx -> onSpeedChange(speedSteps[idx.toInt().coerceIn(0, speedSteps.size - 1)]) },
+                        valueRange = 0f..(speedSteps.size - 1).toFloat(),
+                        steps = speedSteps.size - 2,
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                        colors = SliderDefaults.colors(
+                            thumbColor = Color(0xFF4CAF50),
+                            activeTrackColor = Color(0xFF4CAF50),
+                            inactiveTrackColor = Color(0xFF333344)
+                        )
                     )
-                )
+                }
 
                 Divider(
                     modifier = Modifier.padding(vertical = 8.dp),
