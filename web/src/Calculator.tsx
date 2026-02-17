@@ -163,14 +163,15 @@ export function Calculator({
     if (!backend || !storage || !romHash || !romLoaded) return;
 
     try {
+      const t0 = performance.now();
       const stateData = backend.saveState();
+      const t1 = performance.now();
       if (stateData) {
         await storage.saveState(romHash, stateData, backendTypeRef.current);
+        const t2 = performance.now();
         console.log(
-          "[State] Saved state for ROM:",
-          romHash,
-          "backend:",
-          backendTypeRef.current,
+          `[State] snapshot: ${(t1 - t0).toFixed(1)}ms (${(stateData.length / 1024 / 1024).toFixed(1)}MB), ` +
+          `IndexedDB write: ${(t2 - t1).toFixed(1)}ms, total: ${(t2 - t0).toFixed(1)}ms`
         );
       }
     } catch (err) {
@@ -193,6 +194,8 @@ export function Calculator({
       oldBackend.destroy();
     }
     backendRef.current = null;
+
+    console.log("[Init] useEffect fired, oldBackend:", !!oldBackend);
 
     const initBackend = async () => {
       setInitialized(false);
@@ -231,15 +234,14 @@ export function Calculator({
           if (cancelled) return;
 
           if (result === 0) {
+            let stateRestored = false;
             try {
               const savedState = await storage.loadState(romHash, backendType);
+              console.log("[State] savedState:", savedState ? `${savedState.length} bytes` : "none");
               if (savedState && currentBackend.loadState(savedState)) {
-                console.log(
-                  "[State] Restored state for ROM:",
-                  romHash,
-                  "backend:",
-                  backendType,
-                );
+                stateRestored = true;
+                console.log("[State] restored, lcdOn:", currentBackend.isLcdOn(),
+                  "dump:", (currentBackend as any).dumpState?.());
               }
             } catch (e) {
               console.warn(
@@ -271,6 +273,14 @@ export function Calculator({
             if (!cancelled) {
               setRomLoaded(true);
               setIsRunning(true);
+              // Auto power-on: press ON if fresh boot OR if state was restored but device is sleeping
+              const needsPowerOn = !stateRestored
+                ? !currentBackend.isLcdOn()  // Fresh boot: LCD not on yet
+                : currentBackend.isDeviceOff();  // State restored but device was sleeping
+              if (needsPowerOn) {
+                currentBackend.setKey(2, 0, true);
+                setTimeout(() => currentBackend.setKey(2, 0, false), 300);
+              }
             }
           } else {
             if (!cancelled) {
@@ -314,6 +324,16 @@ export function Calculator({
     };
   }, [backendType, useBundledRom]);
 
+  // Debounced save — triggers 500ms after the last keypress
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const debouncedSave = useCallback(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveState();
+      saveTimerRef.current = null;
+    }, 500);
+  }, [saveState]);
+
   // Auto-save on visibility change and page unload
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -326,12 +346,16 @@ export function Calculator({
       saveState();
     };
 
+    const autoSaveInterval = setInterval(() => saveState(), 10_000);
+
     document.addEventListener("visibilitychange", handleVisibilityChange);
     window.addEventListener("beforeunload", handleBeforeUnload);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      clearInterval(autoSaveInterval);
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [saveState]);
 
@@ -597,6 +621,7 @@ export function Calculator({
       if (mapping) {
         e.preventDefault();
         backend.setKey(mapping[0], mapping[1], false);
+        debouncedSave();
       }
     };
 
@@ -607,7 +632,7 @@ export function Calculator({
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [romLoaded, backendType]);
+  }, [romLoaded, backendType, debouncedSave]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -895,8 +920,9 @@ export function Calculator({
   const handleKeypadUp = useCallback((row: number, col: number) => {
     if (backendRef.current) {
       backendRef.current.setKey(row, col, false);
+      debouncedSave();
     }
-  }, []);
+  }, [debouncedSave]);
 
   // Calculate container width based on fullscreen mode
   const containerWidth = fullscreen

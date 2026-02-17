@@ -7,16 +7,23 @@ import init, { WasmEmu } from '../emu-core/emu_core';
 // double-mount) don't race and corrupt the shared WASM module state.
 // On failure, reset so the next attempt retries the WASM load.
 let wasmInitPromise: Promise<void> | null = null;
+let wasmMemory: WebAssembly.Memory | null = null;
 
 function initWasm(): Promise<void> {
   if (!wasmInitPromise) {
-    wasmInitPromise = init().then(() => {}).catch((err) => {
+    wasmInitPromise = init().then((output) => {
+      wasmMemory = output.memory;
+    }).catch((err) => {
       wasmInitPromise = null;
       throw err;
     });
   }
   return wasmInitPromise!;
 }
+
+// WASM memory snapshot format
+const SNAPSHOT_MAGIC = 0x574D3031; // "WM01"
+const SNAPSHOT_HEADER_SIZE = 12;   // magic(4) + ptr(4) + memsize(4)
 
 export class RustBackend implements EmulatorBackend {
   readonly name = 'Rust (Custom)';
@@ -125,19 +132,65 @@ export class RustBackend implements EmulatorBackend {
     return this.emu.is_lcd_on();
   }
 
+  isDeviceOff(): boolean {
+    if (!this.emu) return false;
+    return this.emu.is_device_off();
+  }
+
   saveState(): Uint8Array | null {
-    if (!this.emu || !this._isRomLoaded) return null;
-    const data = this.emu.save_state();
-    return data.length > 0 ? data : null;
+    if (!this.emu || !this._isRomLoaded || !wasmMemory) return null;
+
+    try {
+      const memBuffer = wasmMemory.buffer;
+      const memSize = memBuffer.byteLength;
+      const wbgPtr = (this.emu as any).__wbg_ptr as number;
+
+      const snapshot = new Uint8Array(SNAPSHOT_HEADER_SIZE + memSize);
+      const view = new DataView(snapshot.buffer);
+      view.setUint32(0, SNAPSHOT_MAGIC, false);  // big-endian for readability
+      view.setUint32(4, wbgPtr, true);           // little-endian
+      view.setUint32(8, memSize, true);           // little-endian
+      snapshot.set(new Uint8Array(memBuffer), SNAPSHOT_HEADER_SIZE);
+
+      return snapshot;
+    } catch (e) {
+      console.error('[RustBackend] saveState failed:', e);
+      return null;
+    }
   }
 
   loadState(data: Uint8Array): boolean {
-    if (!this.emu) return false;
-    const result = this.emu.load_state(data);
-    if (result === 0) {
+    if (!this.emu || !wasmMemory) return false;
+
+    try {
+      if (data.length < SNAPSHOT_HEADER_SIZE) return false;
+
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      if (view.getUint32(0, false) !== SNAPSHOT_MAGIC) return false;
+
+      const savedPtr = view.getUint32(4, true);
+      const savedMemSize = view.getUint32(8, true);
+      if (data.length !== SNAPSHOT_HEADER_SIZE + savedMemSize) return false;
+
+      // Grow memory if snapshot is larger
+      const currentSize = wasmMemory.buffer.byteLength;
+      if (savedMemSize > currentSize) {
+        const pagesToGrow = Math.ceil((savedMemSize - currentSize) / 65536);
+        wasmMemory.grow(pagesToGrow);
+      }
+
+      // Restore WASM memory (fresh view needed after potential grow)
+      new Uint8Array(wasmMemory.buffer).set(
+        data.subarray(SNAPSHOT_HEADER_SIZE), 0
+      );
+
+      // Restore struct pointer
+      (this.emu as any).__wbg_ptr = savedPtr;
       this._isRomLoaded = true;
       return true;
+    } catch (e) {
+      console.error('[RustBackend] loadState failed:', e);
+      return false;
     }
-    return false;
   }
 }
