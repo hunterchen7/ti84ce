@@ -33,6 +33,22 @@ export class WasmEmu {
         }
     }
     /**
+     * Dump diagnostic state for debugging.
+     * @returns {string}
+     */
+    dump_state() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmemu_dump_state(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * Get framebuffer height.
      * @returns {number}
      */
@@ -222,10 +238,6 @@ function __wbg_get_imports() {
         },
         __wbg_new_8a6f238a6ece86ea: function() {
             const ret = new Error();
-            return ret;
-        },
-        __wbg_now_2f3496ca767ee9ef: function() {
-            const ret = performance.now();
             return ret;
         },
         __wbg_stack_0ed75d68575b0f3c: function(arg0, arg1) {

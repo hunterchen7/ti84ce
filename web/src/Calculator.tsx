@@ -273,11 +273,8 @@ export function Calculator({
             if (!cancelled) {
               setRomLoaded(true);
               setIsRunning(true);
-              // Auto power-on: press ON if fresh boot OR if state was restored but device is sleeping
-              const needsPowerOn = !stateRestored
-                ? !currentBackend.isLcdOn()  // Fresh boot: LCD not on yet
-                : currentBackend.isDeviceOff();  // State restored but device was sleeping
-              if (needsPowerOn) {
+              // Auto power-on only on fresh boot (no saved state)
+              if (!stateRestored && !currentBackend.isLcdOn()) {
                 currentBackend.setKey(2, 0, true);
                 setTimeout(() => currentBackend.setKey(2, 0, false), 300);
               }
