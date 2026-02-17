@@ -179,6 +179,7 @@ export class CEmuBackend implements EmulatorBackend {
     return true;
   }
 
+
   saveState(): Uint8Array | null {
     if (!this.module || !this._isRomLoaded) return null;
 

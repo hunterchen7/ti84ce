@@ -132,10 +132,6 @@ export class RustBackend implements EmulatorBackend {
     return this.emu.is_lcd_on();
   }
 
-  isDeviceOff(): boolean {
-    if (!this.emu) return false;
-    return this.emu.is_device_off();
-  }
 
   saveState(): Uint8Array | null {
     if (!this.emu || !this._isRomLoaded || !wasmMemory) return null;
