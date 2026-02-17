@@ -135,6 +135,21 @@ fn main() {
             }
             cmd_run(&file_args, timeout_secs, speed);
         }
+        "diagchk" => {
+            if args.len() < 3 {
+                eprintln!("Usage: debug diagchk <file.8xp> [lib1.8xv ...]");
+                return;
+            }
+            let file_refs: Vec<&str> = args[2..].iter().map(|s| s.as_str()).collect();
+            cmd_diagchk(&file_refs);
+        }
+        "disasm" => {
+            let addr = args.get(2)
+                .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+                .unwrap_or(0x2050C);
+            let count = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(40usize);
+            cmd_disasm(addr, count);
+        }
         "help" | "--help" | "-h" => print_help(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -1864,6 +1879,9 @@ fn cmd_sendfile(files: &[String]) {
     println!("\n=== Framebuffer Analysis ===");
     analyze_framebuffer(&emu);
 
+    // Dump VAT to see what TI-OS registered
+    dump_vat(&mut emu);
+
     // Check if programs are visible in VAT
     println!("\n=== Flash Archive Check ===");
     let archive_start = 0x0C0000u32;
@@ -2719,7 +2737,7 @@ fn dump_vat(emu: &mut Emu) {
     let user_mem = 0xD1A881u32;
     let mut vat = sym_table;
     let mut count = 0;
-    let max_entries = 60;
+    let max_entries = 100;
 
     println!("\n  VAT Entries (scanning from D3FFFF backward):");
     while vat > user_mem && vat > op_base && vat <= sym_table && count < max_entries {
@@ -2792,8 +2810,20 @@ fn dump_vat(emu: &mut Emu) {
             _ => "Other",
         };
 
-        println!("    #{:2}: type={:02X}({:8}) type2={:02X} ver={:02X} addr={:06X} name={:8} arch={} named={}",
-            count, var_type, type_name, type2, version, address, name, archived, named);
+        println!("    #{:2}: type1_raw={:02X} type={:02X}({:8}) type2={:02X} ver={:02X} addr={:06X} name={:8} arch={} named={}",
+            count, type1, var_type, type_name, type2, version, address, name, archived, named);
+
+        // For archived AppVars, verify flash data is readable
+        if archived && var_type == 0x15 {
+            let flag_byte = emu.peek_byte(address);
+            let data_namelen = emu.peek_byte(address + 9) as u32;
+            let data_start = address + 10 + data_namelen;
+            let first_data = [emu.peek_byte(data_start), emu.peek_byte(data_start + 1),
+                              emu.peek_byte(data_start + 2), emu.peek_byte(data_start + 3)];
+            println!("           flash@{:06X}: flag={:02X} namelen={} data@{:06X}=[{:02X} {:02X} {:02X} {:02X}]",
+                address, flag_byte, data_namelen, data_start,
+                first_data[0], first_data[1], first_data[2], first_data[3]);
+        }
 
         count += 1;
 
@@ -2843,4 +2873,331 @@ fn dump_vram_full(emu: &mut Emu, label: &str) {
     if content_rows.len() > 10 {
         println!("    ... and {} more rows", content_rows.len() - 10);
     }
+}
+
+/// Disassemble ROM code at a given address
+fn cmd_disasm(addr: u32, count: usize) {
+    let rom_data = match load_rom() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+
+    println!("Disassembly at 0x{:06X} ({} instructions):", addr, count);
+    println!("{:-<60}", "");
+
+    let mut pc = addr;
+    for _ in 0..count {
+        // Read up to 6 bytes (max eZ80 instruction length)
+        let mut bytes = [0u8; 6];
+        for i in 0..6 {
+            bytes[i] = emu.peek_byte(pc + i as u32);
+        }
+        let result = disassemble(&bytes, true); // ADL mode
+        let hex: String = bytes[..result.length].iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+        println!("  {:06X}: {:<18} {}", pc, hex, result.mnemonic);
+        pc += result.length as u32;
+    }
+}
+
+/// Diagnostic: watch _ChkFindSym calls to debug ti_Open failure
+fn cmd_diagchk(files: &[&str]) {
+    if files.is_empty() {
+        eprintln!("No program file specified.");
+        return;
+    }
+
+    let prog_path = files[0];
+    let prog_name = std::path::Path::new(prog_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("UNKNOWN")
+        .to_uppercase();
+
+    let rom_data = match load_rom() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let mut emu = Emu::new();
+    emu.load_rom(&rom_data).expect("Failed to load ROM");
+
+    // Inject all files
+    for file_path in files {
+        let file_data = match std::fs::read(file_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!("Failed to read {}: {}", file_path, e);
+                continue;
+            }
+        };
+        eprintln!("Injecting: {} ({} bytes)", file_path, file_data.len());
+        match emu.send_file(&file_data) {
+            Ok(count) => eprintln!("  {} entries", count),
+            Err(code) => eprintln!("  ERROR: send_file returned {}", code),
+        }
+    }
+
+    emu.enable_debug_ports();
+
+    // Boot TI-OS
+    eprintln!("Booting TI-OS...");
+    emu.press_on_key();
+    let mut total = 0u64;
+    while total < 175_000_000 {
+        total += emu.run_cycles(1_000_000) as u64;
+    }
+    emu.release_on_key();
+    emu.run_cycles(2_000_000);
+    eprintln!("Boot complete at {:.1}M cycles, PC={:06X}", total as f64 / 1e6, emu.pc());
+
+    // Before launch, dump OP1 and VAT state
+    println!("\n=== Pre-launch state ===");
+    print!("OP1 (D005F8..D00601): ");
+    for i in 0..10 {
+        print!("{:02X} ", emu.peek_byte(0xD005F8 + i));
+    }
+    println!();
+
+    // Dump progPtr and pTemp
+    let prog_ptr = emu.peek_byte(0xD0259D) as u32
+        | (emu.peek_byte(0xD0259E) as u32) << 8
+        | (emu.peek_byte(0xD0259F) as u32) << 16;
+    let p_temp = emu.peek_byte(0xD0259A) as u32
+        | (emu.peek_byte(0xD0259B) as u32) << 8
+        | (emu.peek_byte(0xD0259C) as u32) << 16;
+    println!("progPtr = {:06X}, pTemp = {:06X}", prog_ptr, p_temp);
+
+    // Launch via sendKey
+    eprintln!("\nLaunching Asm(prgm{})...", prog_name);
+    send_os_key_wait(&mut emu, 0x05, "ENTER-init");
+    send_os_key_wait(&mut emu, 0x09, "CLEAR");
+    send_os_key_wait(&mut emu, 0xFC9C, "Asm(");
+    send_os_key_wait(&mut emu, 0xDA, "prgm");
+    for ch in prog_name.chars() {
+        if ch.is_ascii_uppercase() {
+            let key = 0x9A + (ch as u16 - 'A' as u16);
+            send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+        } else if ch.is_ascii_digit() {
+            let key = 0x80 + (ch as u16 - '0' as u16);
+            send_os_key_wait(&mut emu, key, &format!("'{}'", ch));
+        }
+    }
+    send_os_key_wait(&mut emu, 0x05, "ENTER-exec");
+    eprintln!("Program launched. Now watching for _ChkFindSym calls...\n");
+
+    // Set breakpoint at _ChkFindSym (0x02050C)
+    const CHK_FIND_SYM: u32 = 0x02050C;
+    // Also watch os_ChkFindSym wrapper (0x021FB8)
+    const OS_CHK_FIND_SYM: u32 = 0x021FB8;
+
+    let mut hit_count = 0;
+    let max_hits = 30;
+    let max_cycles = 800_000_000u64; // 800M cycles max
+    let mut exec_cycles = 0u64;
+    let mut enter_sent = false; // Track if we've sent keypad ENTER for menu
+
+    // First, try watching for _ChkFindSym at 0x02050C
+    emu.set_breakpoint(CHK_FIND_SYM);
+
+    loop {
+        emu.run_cycles(1_000_000);
+        exec_cycles += 1_000_000;
+
+        // After 200M cycles, send keypad ENTER to trigger menu action
+        // (chess programs need user input to start a game, which triggers book_init)
+        if !enter_sent && exec_cycles >= 200_000_000 {
+            eprintln!("[{:.0}M] Sending keypad ENTER to trigger menu action...", exec_cycles as f64 / 1e6);
+            emu.set_key(6, 0, true);  // Enter key down
+            emu.run_cycles(500_000);
+            exec_cycles += 500_000;
+            emu.set_key(6, 0, false); // Enter key up
+            emu.run_cycles(500_000);
+            exec_cycles += 500_000;
+            enter_sent = true;
+            eprintln!("[{:.0}M] ENTER sent, continuing to watch for _ChkFindSym...", exec_cycles as f64 / 1e6);
+        }
+
+        // Drain debug output
+        for line in emu.take_debug_stdout() {
+            print!("[stdout] {}", line);
+        }
+        for line in emu.take_debug_stderr() {
+            eprint!("[stderr] {}", line);
+        }
+
+        if emu.breakpoint_was_hit() {
+            hit_count += 1;
+            let pc = emu.pc();
+            let flags = emu.f();
+            let carry = flags & 0x01;
+
+            // Dump OP1 (10 bytes at 0xD005F8)
+            print!("  HIT #{}: PC={:06X} OP1=[", hit_count, pc);
+            let mut op1 = [0u8; 10];
+            for i in 0..10 {
+                op1[i] = emu.peek_byte(0xD005F8 + i as u32);
+                print!("{:02X}", op1[i]);
+                if i < 9 { print!(" "); }
+            }
+            print!("]");
+
+            // Decode OP1: type + name
+            let var_type = op1[0];
+            let name_end = op1[1..9].iter().position(|&b| b == 0).unwrap_or(8);
+            let name = std::str::from_utf8(&op1[1..1+name_end]).unwrap_or("???");
+            println!(" type=0x{:02X} name=\"{}\"", var_type, name);
+
+            // Dump current register state
+            println!("         F={:02X}(C={}) A={:02X} DE={:06X} HL={:06X}",
+                flags, carry, emu.a(), emu.de(), emu.hl());
+
+            // Now single-step through _ChkFindSym to see what it does
+            println!("         Tracing _ChkFindSym execution:");
+            let mut trace_steps = 0;
+            let mut last_z = false;
+            let mut call_depth = 0i32; // Track call/ret depth to know when _ChkFindSym returns
+            let max_trace = 2000; // trace up to 2000 instructions
+            loop {
+                let info = match emu.step() {
+                    Some(info) => info,
+                    None => break,
+                };
+                trace_steps += 1;
+
+                let new_pc = emu.pc();
+                let new_flags = emu.f();
+                let new_carry = new_flags & 0x01;
+                let new_z = (new_flags & 0x40) != 0;
+
+                // Disassemble the opcode for the mnemonic
+                let opcode_str = {
+                    let result = disassemble(&info.opcode[..info.opcode_len.min(4)], true);
+                    result.mnemonic
+                };
+
+                // Track call depth
+                if opcode_str.contains("CALL") && info.pc != new_pc
+                    && !(opcode_str.contains("CALL ") && info.pc + info.opcode_len as u32 == new_pc) {
+                    call_depth += 1;
+                }
+                let is_ret = opcode_str.starts_with("RET")
+                    && !opcode_str.contains("RETI")
+                    && !opcode_str.contains("RETN");
+                // A RET that actually executes: PC changes to a different address
+                let ret_executed = is_ret && info.pc + info.opcode_len as u32 != new_pc;
+                if ret_executed {
+                    call_depth -= 1;
+                }
+
+                // Log interesting instructions
+                let is_interesting = opcode_str.contains("CP")
+                    || is_ret
+                    || opcode_str.contains("JP")
+                    || opcode_str.contains("JR")
+                    || opcode_str.contains("CALL")
+                    || opcode_str.starts_with("LD A,")
+                    || new_z != last_z;
+
+                if is_interesting || trace_steps <= 30 || trace_steps % 100 == 0 {
+                    println!("         [{:4}] {:06X}: {:<24} F={:02X}(C={} Z={}) A={:02X} HL={:06X} depth={}",
+                        trace_steps, info.pc, opcode_str,
+                        new_flags, new_carry, if new_z { 1 } else { 0 },
+                        emu.a(), emu.hl(), call_depth);
+                }
+
+                last_z = new_z;
+
+                // When _ChkFindSym returns (depth goes negative), continue tracing ti_Open
+                if call_depth < 0 {
+                    println!("         [_ChkFindSym returned after {} steps] F={:02X}(C={} Z={}) DE={:06X} HL={:06X} -> {}",
+                        trace_steps, new_flags, new_carry, if new_z { 1 } else { 0 },
+                        emu.de(), emu.hl(),
+                        if new_carry != 0 { "NOT FOUND (CF=1)" } else { "FOUND (CF=0)" });
+                    // Continue tracing ti_Open after _ChkFindSym returns
+                    println!("         --- Continuing trace of caller (ti_Open) ---");
+                    let caller_depth = call_depth; // should be -1
+                    let post_steps = 500;
+                    for _ in 0..post_steps {
+                        let info2 = match emu.step() {
+                            Some(info) => info,
+                            None => break,
+                        };
+                        trace_steps += 1;
+                        let new_pc2 = emu.pc();
+                        let new_flags2 = emu.f();
+                        let new_carry2 = new_flags2 & 0x01;
+                        let new_z2 = (new_flags2 & 0x40) != 0;
+                        let opcode_str2 = {
+                            let result = disassemble(&info2.opcode[..info2.opcode_len.min(4)], true);
+                            result.mnemonic
+                        };
+                        // Track call depth relative to caller
+                        if opcode_str2.contains("CALL") && info2.pc != new_pc2
+                            && !(opcode_str2.contains("CALL ") && info2.pc + info2.opcode_len as u32 == new_pc2) {
+                            call_depth += 1;
+                        }
+                        let is_ret2 = opcode_str2.starts_with("RET")
+                            && !opcode_str2.contains("RETI")
+                            && !opcode_str2.contains("RETN");
+                        let ret_exec2 = is_ret2 && info2.pc + info2.opcode_len as u32 != new_pc2;
+                        if ret_exec2 {
+                            call_depth -= 1;
+                        }
+                        // Log most instructions in post-trace
+                        let is_interesting2 = opcode_str2.contains("CP")
+                            || is_ret2 || opcode_str2.contains("JP") || opcode_str2.contains("JR")
+                            || opcode_str2.contains("CALL") || opcode_str2.starts_with("LD A,")
+                            || opcode_str2.contains("OR") || opcode_str2.starts_with("LD (")
+                            || opcode_str2.starts_with("LD HL") || opcode_str2.starts_with("LD DE")
+                            || opcode_str2.starts_with("LD BC") || opcode_str2.starts_with("PUSH")
+                            || opcode_str2.starts_with("POP") || opcode_str2.starts_with("AND")
+                            || opcode_str2.starts_with("XOR") || opcode_str2.starts_with("INC")
+                            || opcode_str2.starts_with("DEC") || new_z2 != last_z;
+                        if is_interesting2 || trace_steps <= 30 {
+                            println!("         [{:4}] {:06X}: {:<24} F={:02X}(C={} Z={}) A={:02X} HL={:06X} DE={:06X} depth={}",
+                                trace_steps, info2.pc, opcode_str2,
+                                new_flags2, new_carry2, if new_z2 { 1 } else { 0 },
+                                emu.a(), emu.hl(), emu.de(), call_depth);
+                        }
+                        last_z = new_z2;
+                        // Stop when we return from ti_Open (depth < caller_depth)
+                        if call_depth < caller_depth {
+                            println!("         [ti_Open returned] A={:02X} HL={:06X} depth={}",
+                                emu.a(), emu.hl(), call_depth);
+                            break;
+                        }
+                    }
+                    break;
+                }
+                if trace_steps >= max_trace {
+                    println!("         [max trace steps reached at depth={}]", call_depth);
+                    break;
+                }
+            }
+            println!();
+
+            if hit_count >= max_hits {
+                println!("Reached {} hits, stopping.", max_hits);
+                break;
+            }
+
+            // Reset breakpoint for next hit
+            emu.set_breakpoint(CHK_FIND_SYM);
+        }
+
+        if exec_cycles >= max_cycles {
+            println!("\nReached {:.0}M cycles without {} more hits.", max_cycles as f64 / 1e6, max_hits - hit_count);
+            break;
+        }
+
+        if emu.is_off() {
+            println!("\nCalculator powered off.");
+            break;
+        }
+    }
+
+    println!("\n=== Summary: {} _ChkFindSym hits in {:.1}M cycles ===", hit_count, exec_cycles as f64 / 1e6);
 }

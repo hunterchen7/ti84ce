@@ -175,6 +175,27 @@ pub struct LcdController {
     /// Cursor image RAM (offsets 0x800-0xBFF, 1024 bytes)
     /// Used by CE programs (e.g. LibLoad) as scratch storage
     cursor_image: [u8; 1024],
+
+    // === Cursor registers (0xC00-0xC2C) ===
+    // These registers control the hardware cursor, but CE programs
+    // (notably fileioc) repurpose them as scratch storage.
+
+    /// Cursor control (0xC00, bit 0 = enable)
+    crsr_control: u8,
+    /// Cursor image index (0xC00, bits 5:4)
+    crsr_image: u8,
+    /// Cursor config (0xC04, bits 1:0)
+    crsr_config: u8,
+    /// Cursor palette 0 (0xC08-0xC0B, 24-bit RGB)
+    crsr_palette0: u32,
+    /// Cursor palette 1 (0xC0C-0xC0F, 24-bit RGB)
+    /// fileioc stores `resize_amount` here
+    crsr_palette1: u32,
+    /// Cursor XY position (0xC10-0xC13, two 12-bit fields)
+    /// fileioc stores `curr_slot` at byte 1 ($E30C11)
+    crsr_xy: u32,
+    /// Cursor clip (0xC14-0xC15, two 6-bit fields)
+    crsr_clip: u32,
 }
 
 impl LcdController {
@@ -214,6 +235,13 @@ impl LcdController {
             needs_lcd_event: false,
             needs_lcd_clear: false,
             cursor_image: [0; 1024],
+            crsr_control: 0,
+            crsr_image: 0,
+            crsr_config: 0,
+            crsr_palette0: 0,
+            crsr_palette1: 0,
+            crsr_xy: 0,
+            crsr_clip: 0,
         }
     }
 
@@ -252,6 +280,13 @@ impl LcdController {
         self.needs_lcd_event = false;
         self.needs_lcd_clear = false;
         self.cursor_image = [0; 1024];
+        self.crsr_control = 0;
+        self.crsr_image = 0;
+        self.crsr_config = 0;
+        self.crsr_palette0 = 0;
+        self.crsr_palette1 = 0;
+        self.crsr_xy = 0;
+        self.crsr_clip = 0;
     }
 
     /// Check if LCD is enabled (bit 0)
@@ -624,6 +659,20 @@ impl LcdController {
         } else if index >= 0x800 && index < 0xC00 {
             // Cursor image RAM (0x800-0xBFF)
             self.cursor_image[(index - 0x800) as usize]
+        } else if index >= 0xC00 && index < 0xE00 {
+            // Cursor registers (matches CEmu lcd_read cursor handling)
+            match index {
+                0xC00 => self.crsr_control | (self.crsr_image << 4),
+                0xC04 => self.crsr_config,
+                0xC08..=0xC0B => ((self.crsr_palette0 >> bit_offset) & 0xFF) as u8,
+                0xC0C..=0xC0F => ((self.crsr_palette1 >> bit_offset) & 0xFF) as u8,
+                0xC10..=0xC13 => ((self.crsr_xy >> bit_offset) & 0xFF) as u8,
+                0xC14..=0xC15 => ((self.crsr_clip >> bit_offset) & 0xFF) as u8,
+                0xC20 => self.imsc & 1,
+                0xC28 => self.ris & 1,
+                0xC2C => self.ris & self.imsc & 1,
+                _ => 0,
+            }
         } else if index >= 0xFE0 {
             // Peripheral ID
             let id_idx = ((index - 0xFE0) >> 2) as usize;
@@ -712,6 +761,43 @@ impl LcdController {
         } else if index >= 0x800 && index < 0xC00 {
             // Cursor image RAM (0x800-0xBFF)
             self.cursor_image[(index - 0x800) as usize] = value;
+        } else if index >= 0xC00 && index < 0xE00 {
+            // Cursor registers (matches CEmu lcd_write cursor handling)
+            // CEmu word-aligns the index for write register matching
+            let crsr_reg = index & 0xFFC;
+            let mask = 0xFF_u32 << bit_offset;
+            let shifted = (value as u32) << bit_offset;
+
+            match crsr_reg {
+                0xC00 if bit_offset == 0 => {
+                    self.crsr_control = value & 1;
+                    self.crsr_image = (value >> 4) & 3;
+                }
+                0xC04 if bit_offset == 0 => {
+                    self.crsr_config = value & 3;
+                }
+                0xC08 if bit_offset < 24 => {
+                    self.crsr_palette0 = (self.crsr_palette0 & !mask) | (shifted & mask);
+                }
+                0xC0C if bit_offset < 24 => {
+                    self.crsr_palette1 = (self.crsr_palette1 & !mask) | (shifted & mask);
+                }
+                0xC10 => {
+                    self.crsr_xy = (self.crsr_xy & !mask) | (shifted & mask);
+                    self.crsr_xy &= 0x0FFF_0FFF;
+                }
+                0xC14 => {
+                    self.crsr_clip = (self.crsr_clip & !mask) | (shifted & mask);
+                    self.crsr_clip &= 0x003F_003F;
+                }
+                0xC20 if bit_offset == 0 => {
+                    self.imsc = (self.imsc & !1) | (value & 1);
+                }
+                0xC24 if bit_offset == 0 => {
+                    self.ris &= !(value & 1);
+                }
+                _ => {}
+            }
         }
     }
 

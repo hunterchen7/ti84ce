@@ -330,6 +330,11 @@ pub struct Emu {
     /// Frame counter for periodic diagnostic logging
     #[cfg(not(target_arch = "wasm32"))]
     frame_count: u32,
+
+    /// Optional breakpoint PC - run_cycles will return early when PC hits this address
+    breakpoint_pc: Option<u32>,
+    /// Whether a breakpoint was hit during the last run_cycles call
+    breakpoint_hit: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +374,8 @@ impl Emu {
             boot_init_done: false,
             #[cfg(not(target_arch = "wasm32"))]
             frame_count: 0,
+            breakpoint_pc: None,
+            breakpoint_hit: false,
         }
     }
 
@@ -499,17 +506,49 @@ impl Emu {
             write_addr += 1;
         }
 
-        // Check sector boundary: entry must not cross a 64KB boundary
-        let sector_start = write_addr & !(SECTOR_SIZE - 1);
-        let sector_end = sector_start + SECTOR_SIZE;
-        if write_addr + total_len as u32 > sector_end {
-            // Skip to next sector — write sector status byte and start at byte 1
-            write_addr = sector_end;
-            if write_addr + 1 + total_len as u32 > ARCHIVE_END {
+        // Check sector boundary: entry must not cross a 64KB boundary.
+        // If it doesn't fit, scan forward to find a sector with enough space.
+        loop {
+            let sector_start = write_addr & !(SECTOR_SIZE - 1);
+            let sector_end = sector_start + SECTOR_SIZE;
+            if write_addr + total_len as u32 <= sector_end {
+                break; // Fits in current sector
+            }
+            // Move to next sector and find free space within it
+            let next_sector = sector_end;
+            if next_sector + 1 + total_len as u32 > ARCHIVE_END {
                 return Err(-12); // No space
             }
-            self.bus.flash.write_direct(write_addr, 0xFC);
-            write_addr += 1;
+            let status = self.bus.flash.peek(next_sector);
+            if status == 0xFF {
+                // Empty sector — write status byte, start at byte 1
+                self.bus.flash.write_direct(next_sector, 0xFC);
+                write_addr = next_sector + 1;
+            } else {
+                // Sector already has data — scan for free space within it
+                let mut addr = next_sector + 1;
+                let end = next_sector + SECTOR_SIZE;
+                while addr < end {
+                    let flag = self.bus.flash.peek(addr);
+                    if flag == 0xFF {
+                        break;
+                    }
+                    if flag == 0xFC || flag == 0xF0 || flag == 0xFE {
+                        let size = u16::from_le_bytes([
+                            self.bus.flash.peek(addr + 1),
+                            self.bus.flash.peek(addr + 2),
+                        ]) as u32;
+                        if size > 0 && size < SECTOR_SIZE {
+                            addr += 3 + size;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                write_addr = addr;
+            }
         }
 
         // The self-referential address points to the flag byte (entry start)
@@ -765,6 +804,15 @@ impl Emu {
             // Sync scheduler with CPU speed setting
             let cpu_speed = self.bus.ports.control.cpu_speed();
             self.scheduler.set_cpu_speed(cpu_speed);
+
+            // Check breakpoint BEFORE executing
+            if let Some(bp) = self.breakpoint_pc {
+                if self.cpu.pc == bp && !self.cpu.halted {
+                    self.breakpoint_hit = true;
+                    self.total_cycles = self.bus.total_cycles();
+                    return (self.total_cycles - start_cycles) as u32;
+                }
+            }
 
             // Record PC and peek at opcode before execution
             let pc = self.cpu.pc;
@@ -1030,6 +1078,15 @@ impl Emu {
         while cycles_remaining > 0 {
             let cpu_speed = self.bus.ports.control.cpu_speed();
             self.scheduler.set_cpu_speed(cpu_speed);
+
+            // Check breakpoint BEFORE executing
+            if let Some(bp) = self.breakpoint_pc {
+                if self.cpu.pc == bp && !self.cpu.halted {
+                    self.breakpoint_hit = true;
+                    self.total_cycles = self.bus.total_cycles();
+                    return (self.total_cycles - start_cycles) as u32;
+                }
+            }
 
             // Handle CPU_SIGNAL_ANY_KEY equivalent (same as run_cycles)
             if self.cpu.any_key_wake {
@@ -2096,6 +2153,25 @@ impl Emu {
     /// Poke a memory byte (for debugging/testing)
     pub fn poke_byte(&mut self, addr: u32, value: u8) {
         self.bus.write_byte(addr, value);
+    }
+
+    // === Breakpoint API ===
+
+    /// Set a PC breakpoint. run_cycles will return early when PC hits this address.
+    pub fn set_breakpoint(&mut self, addr: u32) {
+        self.breakpoint_pc = Some(addr);
+        self.breakpoint_hit = false;
+    }
+
+    /// Clear the PC breakpoint.
+    pub fn clear_breakpoint(&mut self) {
+        self.breakpoint_pc = None;
+        self.breakpoint_hit = false;
+    }
+
+    /// Check if a breakpoint was hit during the last run_cycles call.
+    pub fn breakpoint_was_hit(&self) -> bool {
+        self.breakpoint_hit
     }
 
     // === Debug port API ===
