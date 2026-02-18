@@ -490,6 +490,10 @@ pub struct Bus {
     spi_needs_schedule: bool,
     /// NMI requested by memory protection violation
     nmi_requested: bool,
+    /// Address that triggered the last NMI (for debugging)
+    nmi_violation_addr: u32,
+    /// PC that triggered the last NMI (raw_pc used in check)
+    nmi_violation_pc: u32,
     /// Current CPU PC for unprivileged code checks (set by CPU before each instruction)
     pub cpu_pc: u32,
 
@@ -566,6 +570,8 @@ impl Bus {
             instruction_io_ops: Vec::new(),
             spi_needs_schedule: false,
             nmi_requested: false,
+            nmi_violation_addr: 0,
+            nmi_violation_pc: 0,
             cpu_pc: 0,
             // Debug port fields
             debug_stdout_buf: Vec::new(),
@@ -610,6 +616,12 @@ impl Bus {
         self.nmi_requested = false;
         flag
     }
+
+    /// Get the address that triggered the last NMI
+    pub fn nmi_violation_addr(&self) -> u32 { self.nmi_violation_addr }
+
+    /// Get the PC that triggered the last NMI
+    pub fn nmi_violation_pc(&self) -> u32 { self.nmi_violation_pc }
 
     /// Get the SPI controller for scheduler operations
     pub fn spi(&mut self) -> &mut SpiController {
@@ -878,6 +890,8 @@ impl Bus {
         if addr >= protected_start && addr <= protected_end && unprivileged {
             self.ports.control.set_protected_violation();
             self.nmi_requested = true;
+            self.nmi_violation_addr = addr;
+            self.nmi_violation_pc = raw_pc;
             return; // Block the write
         }
 
@@ -1017,17 +1031,10 @@ impl Bus {
                     // Record for comprehensive I/O tracing
                     self.record_io_op(IoOpType::Write, IoTarget::MmioPort, addr, old_value, value);
 
-                    // CEmu: sched_set_clock() converts cycles when CPU speed changes
-                    let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
-                    if speed_written && new_rate != old_rate {
-                        let total = self.cycles + self.mem_cycles;
-                        let converted = total * new_rate as u64 / old_rate as u64;
-                        self.cycles = converted;
-                        self.mem_cycles = 0;
-                        let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
-                        let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
-                        self.cycles = self.cycles.saturating_sub(rewind);
-                    } else {
+                    // Speed conversion is now handled by run_cycles() after cpu.step()
+                    // to prevent mid-instruction bus.cycles rescaling that breaks cycle_delta.
+                    // Just do normal port write rewind here.
+                    {
                         let port_write_cycles = Self::PORT_WRITE_CYCLES[port_range as usize];
                         let rewind = PORT_WRITE_DELAY.saturating_sub(port_write_cycles);
                         self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
@@ -1303,23 +1310,15 @@ impl Bus {
         // Get old value for tracing (read before write)
         let old_value = self.port_read_for_trace(port);
 
-        // Track whether cycle conversion happened (for proper rewind handling)
-        let mut cycles_converted = false;
+        // Speed conversion is now handled by run_cycles() after cpu.step()
 
         match range {
             0x0 => {
                 // Control ports - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
                 self.ports.control.write(offset, value);
-                // CEmu: sched_set_clock() converts cycles when CPU speed changes
-                let (speed_written, new_rate, old_rate) = self.ports.control.cpu_speed_changed();
-                if speed_written && new_rate != old_rate {
-                    let total = self.cycles + self.mem_cycles;
-                    let converted = total * new_rate as u64 / old_rate as u64;
-                    self.cycles = converted;
-                    self.mem_cycles = 0;
-                    cycles_converted = true;
-                }
+                // Speed conversion is now handled by run_cycles() after cpu.step()
+                // to prevent mid-instruction bus.cycles rescaling that breaks cycle_delta.
             }
             0x1 => {
                 // Flash controller - mask with 0xFF
@@ -1416,17 +1415,9 @@ impl Bus {
             _ => {}
         }
         // CEmu: sched_rewind_cpu(PORT_WRITE_DELAY - port_write_cycles[port_loc])
-        // After the write (and any cycle conversion), rewind the excess cycles.
-        // If cycles were converted, mem_cycles is 0 and we need to subtract from cycles.
-        // If no conversion, we subtract from mem_cycles as normal.
+        // Rewind excess port write delay cycles
         let rewind = Self::PORT_WRITE_DELAY.saturating_sub(Self::PORT_WRITE_CYCLES[range as usize]);
-        if cycles_converted {
-            // Conversion folded everything into cycles, rewind from there
-            self.cycles = self.cycles.saturating_sub(rewind);
-        } else {
-            // Normal case: PORT_WRITE_DELAY is in mem_cycles, rewind from there
-            self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
-        }
+        self.mem_cycles = self.mem_cycles.saturating_sub(rewind);
 
         // Record for comprehensive I/O tracing (CPU port write)
         let addr = 0xFF0000 | (port as u32);

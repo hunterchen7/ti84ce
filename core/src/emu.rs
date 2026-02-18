@@ -335,6 +335,11 @@ pub struct Emu {
     breakpoint_pc: Option<u32>,
     /// Whether a breakpoint was hit during the last run_cycles call
     breakpoint_hit: bool,
+
+    /// NMI debug logging (for WASM where log_evt is no-op)
+    nmi_log_count: u32,
+    nmi_log_pc: u32,
+    nmi_log_sp: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -376,6 +381,9 @@ impl Emu {
             frame_count: 0,
             breakpoint_pc: None,
             breakpoint_hit: false,
+            nmi_log_count: 0,
+            nmi_log_pc: 0,
+            nmi_log_sp: 0,
         }
     }
 
@@ -794,11 +802,17 @@ impl Emu {
         }
 
         // Sync check: bus.cycles should match total_cycles
-        debug_assert_eq!(self.total_cycles, self.bus.total_cycles(),
-            "total_cycles desync: emu={} bus={}", self.total_cycles, self.bus.total_cycles());
+        if self.total_cycles != self.bus.total_cycles() {
+            log_evt!(
+                "DESYNC at run_cycles entry: emu_total={} bus_total={} bus_mem={}",
+                self.total_cycles, self.bus.total_cycles(), self.bus.mem_cycles()
+            );
+            // Force resync to prevent runaway execution
+            self.total_cycles = self.bus.total_cycles();
+        }
 
         let mut cycles_remaining = cycles as i32;
-        let start_cycles = self.total_cycles;
+        let mut start_cycles = self.total_cycles;
 
         while cycles_remaining > 0 {
             // Sync scheduler with CPU speed setting
@@ -869,6 +883,10 @@ impl Emu {
             cycles_remaining -= cycles_used as i32;
             self.scheduler.advance(cycles_used as u64);
 
+            // Sync total_cycles with bus BEFORE any speed conversion
+            // (cpu.step() no longer rescales bus.cycles, so delta is always clean)
+            self.total_cycles = self.bus.total_cycles();
+
             // Check for CPU speed change AFTER advancing scheduler
             let new_cpu_speed = self.bus.ports.control.cpu_speed();
             if new_cpu_speed != cpu_speed {
@@ -876,10 +894,16 @@ impl Emu {
                 let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
                 self.scheduler.convert_cpu_events(new_mhz, old_mhz);
                 self.scheduler.set_cpu_speed(new_cpu_speed);
+                // Convert bus.cycles to the new rate (was previously in bus.write_byte,
+                // moved here to prevent mid-instruction rescaling that breaks cycle_delta)
+                let total = self.bus.total_cycles();
+                let converted = total * new_mhz as u64 / old_mhz as u64;
+                self.bus.set_total_cycles(converted);
+                self.total_cycles = converted;
+                // Also rescale start_cycles so the returned delta reflects actual work,
+                // not the speed conversion artifact
+                start_cycles = start_cycles * new_mhz as u64 / old_mhz as u64;
             }
-
-            // Sync total_cycles with bus (handles speed conversion)
-            self.total_cycles = self.bus.total_cycles();
 
             // Process pending scheduler events
             self.process_scheduler_events();
@@ -900,6 +924,7 @@ impl Emu {
             // Check for NMI from memory protection violations
             if self.bus.take_nmi_flag() {
                 self.cpu.nmi_pending = true;
+                self.log_nmi();
             }
 
             // Tick peripherals and check for interrupts
@@ -1073,20 +1098,11 @@ impl Emu {
         }
 
         let mut cycles_remaining = cycles as i32;
-        let start_cycles = self.total_cycles;
+        let mut start_cycles = self.total_cycles;
 
         while cycles_remaining > 0 {
             let cpu_speed = self.bus.ports.control.cpu_speed();
             self.scheduler.set_cpu_speed(cpu_speed);
-
-            // Check breakpoint BEFORE executing
-            if let Some(bp) = self.breakpoint_pc {
-                if self.cpu.pc == bp && !self.cpu.halted {
-                    self.breakpoint_hit = true;
-                    self.total_cycles = self.bus.total_cycles();
-                    return (self.total_cycles - start_cycles) as u32;
-                }
-            }
 
             // Handle CPU_SIGNAL_ANY_KEY equivalent (same as run_cycles)
             if self.cpu.any_key_wake {
@@ -1098,6 +1114,15 @@ impl Emu {
                 }
             }
 
+            // Check breakpoint BEFORE executing
+            if let Some(bp) = self.breakpoint_pc {
+                if self.cpu.pc == bp && !self.cpu.halted {
+                    self.breakpoint_hit = true;
+                    self.total_cycles = self.bus.total_cycles();
+                    return (self.total_cycles - start_cycles) as u32;
+                }
+            }
+
             let was_halted = self.cpu.halted;
             let cycles_used = self.cpu.step(&mut self.bus);
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
@@ -1106,15 +1131,20 @@ impl Emu {
             cycles_remaining -= cycles_used as i32;
             self.scheduler.advance(cycles_used as u64);
 
+            self.total_cycles = self.bus.total_cycles();
+
             let new_cpu_speed = self.bus.ports.control.cpu_speed();
             if new_cpu_speed != cpu_speed {
                 let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
                 let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
                 self.scheduler.convert_cpu_events(new_mhz, old_mhz);
                 self.scheduler.set_cpu_speed(new_cpu_speed);
+                let total = self.bus.total_cycles();
+                let converted = total * new_mhz as u64 / old_mhz as u64;
+                self.bus.set_total_cycles(converted);
+                self.total_cycles = converted;
+                start_cycles = start_cycles * new_mhz as u64 / old_mhz as u64;
             }
-
-            self.total_cycles = self.bus.total_cycles();
             self.process_scheduler_events();
 
             // DMA cycle stealing
@@ -1859,8 +1889,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version (v7: DMA scheduling, scheduler grew from 88→96 bytes for DMA state)
-    const STATE_VERSION: u32 = 8;
+    /// State format version (v9: LCD palette + cursor state in peripheral snapshot)
+    const STATE_VERSION: u32 = 10;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20
@@ -1879,6 +1909,34 @@ impl Emu {
             hash = hash.wrapping_mul(0x100000001b3);
         }
         hash
+    }
+
+    /// Log NMI trigger details
+    fn log_nmi(&mut self) {
+        log_evt!(
+            "NMI triggered: pc={:06X} sp={:06X} stack_limit={:06X} prot_start={:06X} prot_end={:06X} privileged={:06X} write_addr={:06X} raw_pc={:06X}",
+            self.cpu.pc, self.cpu.sp(),
+            self.bus.ports.control.stack_limit(),
+            self.bus.ports.control.protected_start(),
+            self.bus.ports.control.protected_end(),
+            self.bus.ports.control.privileged_boundary(),
+            self.bus.nmi_violation_addr(),
+            self.bus.nmi_violation_pc()
+        );
+        self.nmi_log_pc = self.cpu.pc;
+        self.nmi_log_sp = self.cpu.sp();
+        self.nmi_log_count += 1;
+    }
+
+    /// Take NMI log info (returns count, pc, sp, violation addr, raw_pc)
+    pub fn take_nmi_log(&mut self) -> (u32, u32, u32, u32, u32) {
+        let count = self.nmi_log_count;
+        let pc = self.nmi_log_pc;
+        let sp = self.nmi_log_sp;
+        let vaddr = self.bus.nmi_violation_addr();
+        let vpc = self.bus.nmi_violation_pc();
+        self.nmi_log_count = 0;
+        (count, pc, sp, vaddr, vpc)
     }
 
     /// Get size required for save state buffer
@@ -2345,6 +2403,45 @@ impl Emu {
     /// Get NMI pending flag
     pub fn nmi_pending(&self) -> bool {
         self.cpu.nmi_pending
+    }
+
+    /// Get interrupt mode as u8
+    pub fn im(&self) -> u8 {
+        match self.cpu.im {
+            InterruptMode::Mode0 => 0,
+            InterruptMode::Mode1 => 1,
+            InterruptMode::Mode2 => 2,
+        }
+    }
+
+    /// Get stack limit from control ports
+    pub fn stack_limit(&self) -> u32 {
+        self.bus.ports.control.stack_limit()
+    }
+
+    /// Get protected memory start from control ports
+    pub fn protected_start(&self) -> u32 {
+        self.bus.ports.control.protected_start()
+    }
+
+    /// Get protected memory end from control ports
+    pub fn protected_end(&self) -> u32 {
+        self.bus.ports.control.protected_end()
+    }
+
+    /// Get privileged boundary from control ports
+    pub fn privileged_boundary(&self) -> u32 {
+        self.bus.ports.control.privileged_boundary()
+    }
+
+    /// Get CPU speed setting
+    pub fn cpu_speed(&self) -> u8 {
+        self.bus.ports.control.cpu_speed()
+    }
+
+    /// Get scheduler base_ticks
+    pub fn scheduler_base_ticks(&self) -> u64 {
+        self.scheduler.base_ticks
     }
 
     /// Get ON-key wake flag

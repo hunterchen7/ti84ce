@@ -293,17 +293,12 @@ impl Cpu {
         // Use total_cycles() to include both CPU internal cycles and memory timing
         let start_cycles = bus.total_cycles();
 
-        /// Helper to compute cycle delta, handling the case where the cycle counter
-        /// was reset mid-instruction (e.g., when CPU speed changes via port 0x01 write).
-        /// In that case, end_cycles < start_cycles, so we return end_cycles (cycles since reset).
+        /// Helper to compute cycle delta.
+        /// Bus.cycles is now always monotonic within a step (speed conversion
+        /// moved from bus.write_byte to emu.run_cycles), so end >= start always.
         #[inline(always)]
         fn cycle_delta(start: u64, end: u64) -> u32 {
-            if end >= start {
-                (end - start) as u32
-            } else {
-                // Cycle counter was reset - return cycles accumulated since reset
-                end as u32
-            }
+            (end.wrapping_sub(start)) as u32
         }
 
         // Process EI delay - interrupts enable AFTER the instruction following EI

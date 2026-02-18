@@ -392,6 +392,17 @@ impl ControlPorts {
         self.off
     }
 
+    /// Set device off state directly (for state restore).
+    pub fn set_off(&mut self, off: bool) {
+        self.off = off;
+    }
+
+    /// Set protection status directly (for state restore).
+    /// Normal writes to 0x3E clear bits; this sets the raw value.
+    pub fn set_protection_status(&mut self, status: u8) {
+        self.protection_status = status;
+    }
+
     /// Wake device from "off" state.
     /// CEmu: control.off = false; control.readBatteryStatus = ~1;
     /// Clears the off flag and resets battery status FSM.

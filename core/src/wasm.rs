@@ -11,14 +11,6 @@ extern "C" {
     fn warn(s: &str);
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
-    #[wasm_bindgen(js_namespace = performance)]
-    fn now() -> f64;
-}
-
-macro_rules! console_warn {
-    ($($arg:tt)*) => {
-        warn(&format!($($arg)*))
-    };
 }
 
 /// WASM-friendly wrapper around the emulator.
@@ -27,6 +19,10 @@ macro_rules! console_warn {
 #[wasm_bindgen]
 pub struct WasmEmu {
     inner: Emu,
+    /// Counter for debug logging after state restore
+    debug_frames: u32,
+    /// Track last PC to detect resets
+    last_pc: u32,
 }
 
 #[wasm_bindgen]
@@ -39,6 +35,8 @@ impl WasmEmu {
 
         WasmEmu {
             inner: Emu::new(),
+            debug_frames: 0,
+            last_pc: 0,
         }
     }
 
@@ -117,30 +115,52 @@ impl WasmEmu {
         if cycles <= 0 {
             return 0;
         }
-        let t0 = now();
+        let before_pc = self.inner.pc();
+        let before_cycles = self.inner.total_cycles();
         let executed = self.inner.run_cycles(cycles as u32) as i32;
-        let t1 = now();
         self.inner.render_frame();
-        let t2 = now();
 
-        let emu_ms = t1 - t0;
-        let render_ms = t2 - t1;
-
-        // Warn if frame takes too long (>50ms means we're eating into frame budget)
-        if emu_ms > 50.0 || render_ms > 50.0 {
-            console_warn!(
-                "[EMU] Slow: emu={:.1}ms render={:.1}ms req={} exec={} halted={} pc={:06X} cycles={}",
-                emu_ms, render_ms, cycles, executed, self.inner.is_halted(), self.inner.pc(), self.inner.total_cycles()
-            );
+        // Log first 5 frames after state restore, and any anomalies
+        if self.debug_frames > 0 {
+            self.debug_frames -= 1;
+            log(&format!(
+                "[EMU] frame: pc={:06X}->{:06X} cycles={}->{}(+{}) halted={} nmi={} req={}",
+                before_pc, self.inner.pc(),
+                before_cycles, self.inner.total_cycles(), executed,
+                self.inner.is_halted(), self.inner.nmi_pending(), cycles
+            ));
         }
 
-        // Diagnostic: warn if executed cycles diverge wildly from requested
+        // Detect anomalies
         if executed > cycles * 2 || executed < 0 {
-            console_warn!(
-                "[EMU] run_cycles anomaly: requested={} executed={} halted={} pc={:06X} total_cycles={}",
-                cycles, executed, self.inner.is_halted(), self.inner.pc(), self.inner.total_cycles()
-            );
+            warn(&format!(
+                "[EMU] ANOMALY: req={} exec={} pc={:06X} halted={}",
+                cycles, executed, self.inner.pc(), self.inner.is_halted()
+            ));
         }
+
+        // Check if NMI fired during this frame
+        let (nmi_count, nmi_pc, nmi_sp, vaddr, vpc) = self.inner.take_nmi_log();
+        if nmi_count > 0 {
+            warn(&format!(
+                "[EMU] NMI fired {}x! pc={:06X} sp={:06X} write_addr={:06X} raw_pc={:06X} privileged={:06X} prot={:06X}-{:06X} stack_limit={:06X}",
+                nmi_count, nmi_pc, nmi_sp, vaddr, vpc,
+                self.inner.privileged_boundary(),
+                self.inner.protected_start(),
+                self.inner.protected_end(),
+                self.inner.stack_limit(),
+            ));
+        }
+
+        // Detect PC jump to reset vector (CPU was reset)
+        let new_pc = self.inner.pc();
+        if self.last_pc > 0x010000 && new_pc < 0x000100 {
+            warn(&format!(
+                "[EMU] RESET DETECTED: pc {:06X}->{:06X} nmi={} halted={}",
+                self.last_pc, new_pc, self.inner.nmi_pending(), self.inner.is_halted()
+            ));
+        }
+        self.last_pc = new_pc;
 
         executed
     }
@@ -248,10 +268,52 @@ impl WasmEmu {
     /// Returns 0 on success, negative error code on failure.
     #[wasm_bindgen]
     pub fn load_state(&mut self, data: &[u8]) -> i32 {
+        log(&format!("[WASM] load_state: {} bytes", data.len()));
         match self.inner.load_state(data) {
-            Ok(()) => 0,
-            Err(code) => code,
+            Ok(()) => {
+                self.debug_frames = 10; // Log next 10 frames
+                log(&format!(
+                    "[WASM] load_state OK: pc={:06X} halted={} total_cycles={} lcd_on={} off={}",
+                    self.inner.pc(), self.inner.is_halted(), self.inner.total_cycles(),
+                    self.inner.is_lcd_on(), self.inner.is_off()
+                ));
+                log(&format!(
+                    "[WASM] state details: iff1={} im={} sp={:06X} stack_limit={:06X} privileged={:06X} prot={:06X}-{:06X}",
+                    self.inner.iff1(),
+                    self.inner.im(),
+                    self.inner.sp(),
+                    self.inner.stack_limit(),
+                    self.inner.privileged_boundary(),
+                    self.inner.protected_start(),
+                    self.inner.protected_end(),
+                ));
+                log(&format!(
+                    "[WASM] scheduler: cpu_speed={} base_ticks={} bus_cycles={}",
+                    self.inner.cpu_speed(),
+                    self.inner.scheduler_base_ticks(),
+                    self.inner.bus_cycles(),
+                ));
+                0
+            }
+            Err(code) => {
+                warn(&format!("[WASM] load_state FAILED: error {}", code));
+                code
+            }
         }
+    }
+
+    /// Dump diagnostic state for debugging.
+    #[wasm_bindgen]
+    pub fn dump_state(&self) -> String {
+        format!(
+            "pc={:06X} sp={:06X} halted={} iff1={} im={} cycles={} lcd_on={} off={} \
+             stack_limit={:06X} prot_start={:06X} prot_end={:06X} cpu_speed={} nmi={}",
+            self.inner.pc(), self.inner.sp(),
+            self.inner.is_halted(), self.inner.iff1(), self.inner.im(),
+            self.inner.total_cycles(), self.inner.is_lcd_on(), self.inner.is_off(),
+            self.inner.stack_limit(), self.inner.protected_start(), self.inner.protected_end(),
+            self.inner.cpu_speed(), self.inner.nmi_pending(),
+        )
     }
 }
 
