@@ -430,8 +430,8 @@ impl Peripherals {
     // ========== State Persistence ==========
 
     /// Size of peripheral state snapshot in bytes
-    /// Control(32) + Flash(8) + Interrupt(32) + Timers(3×24) + LCD(40) + Keypad(16) + RTC(16) + OS Timer(16) + KeyState(8) + padding = ~256
-    pub const SNAPSHOT_SIZE: usize = 256;
+    /// V8 base(236) + palette_bgr565(512) + palette_rgb565(512) + cursor_image(1024) + crsr_regs(20) = 2304
+    pub const SNAPSHOT_SIZE: usize = 2304;
 
     /// Save peripheral state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -458,7 +458,14 @@ impl Peripherals {
         buf[pos] = self.control.read(0x23); pos += 1;
         buf[pos] = self.control.read(0x24); pos += 1;
         buf[pos] = self.control.read(0x25); pos += 1;
-        pos += 15; // Padding to 32 bytes
+        // Stack limit (3 bytes at 0x3A-0x3C)
+        buf[pos] = self.control.read(0x3A); pos += 1;
+        buf[pos] = self.control.read(0x3B); pos += 1;
+        buf[pos] = self.control.read(0x3C); pos += 1;
+        // Protection status (0x3D) + off flag
+        buf[pos] = self.control.read(0x3D); pos += 1;
+        buf[pos] = if self.control.is_off() { 1 } else { 0 }; pos += 1;
+        pos += 10; // Padding to 32 bytes
 
         // Flash controller (8 bytes)
         buf[pos] = self.flash.read(0x00); pos += 1;  // enabled
@@ -529,8 +536,26 @@ impl Peripherals {
         // Timer control/status/mask words (12 bytes)
         buf[pos..pos+4].copy_from_slice(&self.timers.control_word().to_le_bytes()); pos += 4;
         buf[pos..pos+4].copy_from_slice(&self.timers.status_word().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timers.mask_word().to_le_bytes());
+        buf[pos..pos+4].copy_from_slice(&self.timers.mask_word().to_le_bytes()); pos += 4;
 
+        // LCD palette (1024 bytes: 512 bgr565 + 512 rgb565)
+        for &val in self.lcd.palette_bgr565() {
+            buf[pos..pos+2].copy_from_slice(&val.to_le_bytes()); pos += 2;
+        }
+        for &val in self.lcd.palette_rgb565() {
+            buf[pos..pos+2].copy_from_slice(&val.to_le_bytes()); pos += 2;
+        }
+
+        // Cursor image (1024 bytes)
+        buf[pos..pos+1024].copy_from_slice(self.lcd.cursor_image());
+        pos += 1024;
+
+        // Cursor registers (20 bytes: 5 × u32)
+        for &val in self.lcd.crsr_registers().iter() {
+            buf[pos..pos+4].copy_from_slice(&val.to_le_bytes()); pos += 4;
+        }
+
+        let _ = pos; // suppress unused warning
         buf
     }
 
@@ -551,16 +576,19 @@ impl Peripherals {
         self.control.write(0x0D, buf[pos]); pos += 1;
         self.control.write(0x0F, buf[pos]); pos += 1;
         self.control.write(0x28, buf[pos]); pos += 1;
-        self.control.write(0x1D, buf[pos]); pos += 1;
-        self.control.write(0x1E, buf[pos]); pos += 1;
-        self.control.write(0x1F, buf[pos]); pos += 1;
-        self.control.write(0x20, buf[pos]); pos += 1;
-        self.control.write(0x21, buf[pos]); pos += 1;
-        self.control.write(0x22, buf[pos]); pos += 1;
-        self.control.write(0x23, buf[pos]); pos += 1;
-        self.control.write(0x24, buf[pos]); pos += 1;
-        self.control.write(0x25, buf[pos]); pos += 1;
-        pos += 15;
+        // Skip restoring memory protection registers (privileged boundary,
+        // protected range, stack limit, protection status). Leave them at
+        // defaults: privileged=0 (all code privileged), protected range empty,
+        // stack_limit=0 (disabled). The OS re-establishes these via timer
+        // interrupts. Restoring stale values causes false NMI violations
+        // because the exact cycle-level timing of OS interrupt handlers
+        // relative to user code differs slightly after state restore.
+        pos += 3; // privileged boundary (0x1D-0x1F)
+        pos += 6; // protected range (0x20-0x25)
+        pos += 3; // stack limit (0x3A-0x3C)
+        pos += 1; // protection status (0x3D)
+        self.control.set_off(buf[pos] != 0); pos += 1;
+        pos += 10;
 
         // Flash controller
         self.flash.write(0x00, buf[pos]); pos += 1;
@@ -630,8 +658,41 @@ impl Peripherals {
         // Timer control/status/mask words (12 bytes)
         self.timers.set_control_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
         self.timers.set_status_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timers.set_mask_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()));
+        self.timers.set_mask_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
 
+        // LCD palette (1024 bytes: 512 bgr565 + 512 rgb565)
+        let mut palette_bgr = [0u16; 256];
+        for val in &mut palette_bgr {
+            *val = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos += 2;
+        }
+        self.lcd.set_palette_bgr565(&palette_bgr);
+
+        let mut palette_rgb = [0u16; 256];
+        for val in &mut palette_rgb {
+            *val = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos += 2;
+        }
+        self.lcd.set_palette_rgb565(&palette_rgb);
+
+        // Reconstruct raw 1555 palette bytes from the restored BGR565 arrays.
+        // The state format saves derived lookup tables but not raw bytes.
+        // Without this, any palette byte write after restore corrupts the entry
+        // because the conversion reads the other byte as zero.
+        self.lcd.reconstruct_raw_palette();
+
+        // Cursor image (1024 bytes)
+        let mut cursor_img = [0u8; 1024];
+        cursor_img.copy_from_slice(&buf[pos..pos+1024]);
+        self.lcd.set_cursor_image(&cursor_img);
+        pos += 1024;
+
+        // Cursor registers (20 bytes: 5 × u32)
+        let mut crsr_regs = [0u32; 5];
+        for val in &mut crsr_regs {
+            *val = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos += 4;
+        }
+        self.lcd.set_crsr_registers(&crsr_regs);
+
+        let _ = pos; // suppress unused warning
         Ok(())
     }
 }

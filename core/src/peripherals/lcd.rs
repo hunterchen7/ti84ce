@@ -899,6 +899,71 @@ impl LcdController {
     pub fn recompute_timing(&mut self) {
         self.extract_timing();
     }
+
+    // ========== Snapshot getters/setters for palette + cursor state ==========
+
+    pub fn palette_bgr565(&self) -> &[u16; 256] {
+        &self.palette_bgr565
+    }
+
+    pub fn palette_rgb565(&self) -> &[u16; 256] {
+        &self.palette_rgb565
+    }
+
+    pub fn set_palette_bgr565(&mut self, data: &[u16; 256]) {
+        self.palette_bgr565 = *data;
+    }
+
+    pub fn set_palette_rgb565(&mut self, data: &[u16; 256]) {
+        self.palette_rgb565 = *data;
+    }
+
+    /// Reconstruct raw 1555 palette bytes from the BGR565 lookup table.
+    /// Called after state restore since the state format saves derived arrays
+    /// but not the raw palette bytes. Without this, any palette byte write
+    /// after restore reads the other byte of the entry as zero, corrupting it.
+    /// The green LSB may differ by 1 from the original 1555 value, but the
+    /// forward conversion back to BGR565 produces identical results.
+    pub fn reconstruct_raw_palette(&mut self) {
+        for entry in 0..256 {
+            let bgr565 = self.palette_bgr565[entry];
+            let r = bgr565 & 0x1F;
+            let g6 = (bgr565 >> 5) & 0x3F;
+            let b = (bgr565 >> 11) & 0x1F;
+            // Pack into 1555: alpha=0, B in bits 14:10, G5 in bits 9:5, R in bits 4:0
+            let color = (b << 10) | ((g6 >> 1) << 5) | r;
+            self.palette[entry * 2] = color as u8;
+            self.palette[entry * 2 + 1] = (color >> 8) as u8;
+        }
+    }
+
+    pub fn cursor_image(&self) -> &[u8; 1024] {
+        &self.cursor_image
+    }
+
+    pub fn set_cursor_image(&mut self, data: &[u8; 1024]) {
+        self.cursor_image = *data;
+    }
+
+    pub fn crsr_registers(&self) -> [u32; 5] {
+        [
+            (self.crsr_control as u32) | ((self.crsr_image as u32) << 4) | ((self.crsr_config as u32) << 8),
+            self.crsr_palette0,
+            self.crsr_palette1,
+            self.crsr_xy,
+            self.crsr_clip,
+        ]
+    }
+
+    pub fn set_crsr_registers(&mut self, regs: &[u32; 5]) {
+        self.crsr_control = (regs[0] & 1) as u8;
+        self.crsr_image = ((regs[0] >> 4) & 3) as u8;
+        self.crsr_config = ((regs[0] >> 8) & 3) as u8;
+        self.crsr_palette0 = regs[1];
+        self.crsr_palette1 = regs[2];
+        self.crsr_xy = regs[3] & 0x0FFF_0FFF;
+        self.crsr_clip = regs[4] & 0x003F_003F;
+    }
 }
 
 impl Default for LcdController {
@@ -1191,5 +1256,47 @@ mod tests {
         assert_eq!(lcd.read(regs::UPCURR), 0x00);
         assert_eq!(lcd.read(regs::UPCURR + 1), 0x01);
         assert_eq!(lcd.read(regs::UPCURR + 2), 0xD4);
+    }
+
+    #[test]
+    fn test_reconstruct_raw_palette_roundtrip() {
+        let mut lcd = LcdController::new();
+
+        // Set up a diverse palette via normal writes
+        let test_colors: [(u8, u8); 4] = [
+            (0x1F, 0x00), // Pure red 1555
+            (0x00, 0x7C), // Pure blue 1555
+            (0xE0, 0x03), // Pure green 1555
+            (0xFF, 0x7F), // White 1555 (A=0, B=31, G=31, R=31)
+        ];
+        for (i, &(lo, hi)) in test_colors.iter().enumerate() {
+            lcd.write(0x200 + (i as u32) * 2, lo);
+            lcd.write(0x201 + (i as u32) * 2, hi);
+        }
+
+        // Save the derived arrays
+        let saved_bgr = lcd.palette_bgr565;
+        let saved_rgb = lcd.palette_rgb565;
+
+        // Simulate state restore: zero the raw palette, set derived arrays
+        lcd.palette = [0; 512];
+        lcd.palette_bgr565 = saved_bgr;
+        lcd.palette_rgb565 = saved_rgb;
+
+        // Reconstruct raw palette from BGR565
+        lcd.reconstruct_raw_palette();
+
+        // Now if a single byte of entry 0 is re-written with same value,
+        // the conversion should produce the same BGR565
+        let lo = lcd.palette[0]; // Reconstructed low byte
+        lcd.write(0x200, lo);    // Re-trigger conversion
+        assert_eq!(lcd.palette_bgr565[0], saved_bgr[0],
+            "BGR565 entry 0 corrupted after single byte re-write");
+
+        // Verify all test entries still produce correct BGR565 after reconstruction
+        for i in 0..4 {
+            assert_eq!(lcd.palette_bgr565[i], saved_bgr[i],
+                "BGR565 mismatch at entry {}", i);
+        }
     }
 }
