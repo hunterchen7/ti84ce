@@ -68,6 +68,7 @@ export interface EmulatorPreferences {
   lastRomName?: string;
   preferredBackend?: "rust" | "cemu";
   autoSaveEnabled?: boolean;
+  knownStateVersion?: number;
 }
 
 export class StateStorage {
@@ -227,6 +228,24 @@ export class StateStorage {
       };
     });
   }
+
+  /**
+   * Get the last known stateVersion from preferences.
+   */
+  async getKnownStateVersion(): Promise<number | null> {
+    const prefs = await this.loadPreferences();
+    return prefs.knownStateVersion ?? null;
+  }
+
+  /**
+   * Set the known stateVersion after an update.
+   */
+  async setKnownStateVersion(version: number): Promise<void> {
+    const prefs = await this.loadPreferences();
+    prefs.knownStateVersion = version;
+    await this.savePreferences(prefs);
+  }
+
 
   /**
    * Cache a ROM by its hash.

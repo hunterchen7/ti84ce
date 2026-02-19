@@ -1,4 +1,5 @@
 import { Calculator } from "./Calculator";
+import { UpdateBanner } from "./pwa/UpdateBanner";
 import "./App.css";
 
 function App() {
@@ -22,28 +23,31 @@ function App() {
 
   // Default: Demo mode with bundled ROM
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        display: "flex",
-        justifyContent: "center",
-        alignItems: "flex-start",
-        background: "#111",
-        overflowY: "auto",
-      }}
-    >
+    <>
+      <UpdateBanner />
       <div
         style={{
-          marginTop: "auto",
-          marginBottom: "auto",
-          paddingTop: "1rem",
-          paddingBottom: "1rem",
+          position: "fixed",
+          inset: 0,
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "flex-start",
+          background: "#111",
+          overflowY: "auto",
         }}
       >
-        <Calculator useBundledRom={true} defaultBackend="rust" fullscreen />
+        <div
+          style={{
+            marginTop: "auto",
+            marginBottom: "auto",
+            paddingTop: "1rem",
+            paddingBottom: "1rem",
+          }}
+        >
+          <Calculator useBundledRom={true} defaultBackend="rust" fullscreen />
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
