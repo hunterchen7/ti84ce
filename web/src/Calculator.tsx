@@ -675,6 +675,28 @@ export function Calculator({
         return;
       }
 
+      // Shift+R: clear saved state and reload page (hard refresh for dev)
+      if (e.shiftKey && (e.key === "r" || e.key === "R")) {
+        e.preventDefault();
+        const storage = storageRef.current;
+        const romHash = romHashRef.current;
+        if (storage && romHash) {
+          storage
+            .deleteState(romHash, backendTypeRef.current)
+            .then(() => {
+              console.log("[State] Cleared saved state, reloading...");
+              window.location.reload();
+            })
+            .catch(() => {
+              // Even if delete fails, still reload
+              window.location.reload();
+            });
+        } else {
+          window.location.reload();
+        }
+        return;
+      }
+
       // Ctrl+R / Cmd+R: resend last program files (override browser refresh)
       if ((e.ctrlKey || e.metaKey) && e.key === "r") {
         if (
