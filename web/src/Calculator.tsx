@@ -177,7 +177,7 @@ export function Calculator({
         const t2 = performance.now();
         console.log(
           `[State] snapshot: ${(t1 - t0).toFixed(1)}ms (${(stateData.length / 1024 / 1024).toFixed(1)}MB), ` +
-          `IndexedDB write: ${(t2 - t1).toFixed(1)}ms, total: ${(t2 - t0).toFixed(1)}ms`
+            `IndexedDB write: ${(t2 - t1).toFixed(1)}ms, total: ${(t2 - t0).toFixed(1)}ms`,
         );
       }
     } catch (err) {
@@ -243,11 +243,18 @@ export function Calculator({
             let stateRestored = false;
             try {
               const savedState = await storage.loadState(romHash, backendType);
-              console.log("[State] savedState:", savedState ? `${savedState.length} bytes` : "none");
+              console.log(
+                "[State] savedState:",
+                savedState ? `${savedState.length} bytes` : "none",
+              );
               if (savedState && currentBackend.loadState(savedState)) {
                 stateRestored = true;
-                console.log("[State] restored, lcdOn:", currentBackend.isLcdOn(),
-                  "dump:", (currentBackend as any).dumpState?.());
+                console.log(
+                  "[State] restored, lcdOn:",
+                  currentBackend.isLcdOn(),
+                  "dump:",
+                  (currentBackend as any).dumpState?.(),
+                );
               }
             } catch (e) {
               console.warn(
@@ -264,15 +271,22 @@ export function Calculator({
                 if (cancelled) return;
                 const reloadResult = await freshBackend.loadRom(data);
                 if (reloadResult !== 0) {
-                  if (!cancelled) setError(`Failed to reload ROM: error code ${reloadResult}`);
+                  if (!cancelled)
+                    setError(
+                      `Failed to reload ROM: error code ${reloadResult}`,
+                    );
                   return;
                 }
                 currentBackend = freshBackend;
                 backendRef.current = freshBackend;
                 setBackendName(freshBackend.name);
               } catch (retryErr) {
-                console.error("[State] Failed to recreate backend after state restore failure:", retryErr);
-                if (!cancelled) setError(`Backend recovery failed: ${retryErr}`);
+                console.error(
+                  "[State] Failed to recreate backend after state restore failure:",
+                  retryErr,
+                );
+                if (!cancelled)
+                  setError(`Backend recovery failed: ${retryErr}`);
                 return;
               }
             }
@@ -287,8 +301,8 @@ export function Calculator({
 
               // Auto-launch key sequence if specified (e.g., for chess mode)
               // Only run on fresh boot (no saved state)
-              if (autoLaunch && !stateRestored) {
-                console.log('[AutoLaunch] Starting visual polling...');
+              if (autoLaunch) {
+                console.log("[AutoLaunch] Starting visual polling...");
                 const startTime = performance.now();
                 let launched = false;
 
@@ -297,7 +311,7 @@ export function Calculator({
 
                   const elapsed = performance.now() - startTime;
                   if (elapsed > 2000) {
-                    console.log('[AutoLaunch] Timeout - stopping polling');
+                    console.log("[AutoLaunch] Timeout - stopping polling");
                     return;
                   }
 
@@ -307,28 +321,24 @@ export function Calculator({
                     return;
                   }
 
-                  const ctx = canvas.getContext('2d');
+                  const ctx = canvas.getContext("2d");
                   if (!ctx) {
                     setTimeout(checkScreen, 50);
                     return;
                   }
 
-                  // Get image data to check for homescreen
-                  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-                  // Check for green battery pixel in top-right corner (single pixel check)
-                  // Battery indicator is at approximately x=310, y=4
-                  const batteryX = 310;
-                  const batteryY = 4;
-                  const idx = (batteryY * canvas.width + batteryX) * 4;
-                  const r = imageData.data[idx];
-                  const g = imageData.data[idx + 1];
-                  const b = imageData.data[idx + 2];
+                  // Get single pixel at battery location (310, 10)
+                  const imageData = ctx.getImageData(310, 10, 1, 1);
+                  const r = imageData.data[0];
+                  const g = imageData.data[1];
+                  const b = imageData.data[2];
                   const hasGreenBattery = g > 150 && g > r + 30 && g > b + 30;
 
                   // If green battery pixel found, homescreen is ready
                   if (hasGreenBattery) {
-                    console.log('[AutoLaunch] Green battery detected - screen ready, executing key sequence');
+                    console.log(
+                      "[AutoLaunch] Green battery detected - screen ready, executing key sequence",
+                    );
                     launched = true;
 
                     // Press P twice (clear message + open programs)
@@ -351,7 +361,9 @@ export function Calculator({
                       setTimeout(() => currentBackend.setKey(6, 0, false), 50);
                     }, 350);
                   } else {
-                    console.log('[AutoLaunch] No green battery pixel found, retrying in 50ms...');
+                    console.log(
+                      "[AutoLaunch] No green battery pixel found, retrying in 50ms...",
+                    );
                     setTimeout(checkScreen, 50);
                   }
                 };
@@ -436,7 +448,6 @@ export function Calculator({
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [saveState]);
-
 
   // Handle ROM file loading
   const handleRomLoad = useCallback(async (file: File) => {
@@ -577,7 +588,9 @@ export function Calculator({
             }
           } else {
             if (slowFrameCount > 0) {
-              console.log(`[EMU] Recovered after ${slowFrameCount} slow frames`);
+              console.log(
+                `[EMU] Recovered after ${slowFrameCount} slow frames`,
+              );
             }
             slowFrameCount = 0;
           }
@@ -663,8 +676,11 @@ export function Calculator({
       }
 
       // Ctrl+R / Cmd+R: resend last program files (override browser refresh)
-      if ((e.ctrlKey || e.metaKey) && e.key === 'r') {
-        if (programHandlesRef.current.length > 0 || programDataRef.current.length > 0) {
+      if ((e.ctrlKey || e.metaKey) && e.key === "r") {
+        if (
+          programHandlesRef.current.length > 0 ||
+          programDataRef.current.length > 0
+        ) {
           e.preventDefault();
           resendPrograms();
           return;
@@ -769,7 +785,7 @@ export function Calculator({
 
     // Store for future resets
     programDataRef.current = fileEntries;
-    setProgramFiles(fileEntries.map(f => f.name));
+    setProgramFiles(fileEntries.map((f) => f.name));
 
     const backend = backendRef.current;
 
@@ -781,12 +797,18 @@ export function Calculator({
           const count = backend.sendFileLive(entry.data);
           if (count >= 0) {
             totalInjected += count;
-            console.log(`[Program Live] Injected ${entry.name}: ${count} entries`);
+            console.log(
+              `[Program Live] Injected ${entry.name}: ${count} entries`,
+            );
           } else {
-            console.error(`[Program Live] Failed to inject ${entry.name}: error ${count}`);
+            console.error(
+              `[Program Live] Failed to inject ${entry.name}: error ${count}`,
+            );
           }
         }
-        console.log(`[Program Live] Total entries injected: ${totalInjected}, soft reboot done`);
+        console.log(
+          `[Program Live] Total entries injected: ${totalInjected}, soft reboot done`,
+        );
         // Turbo-speed through boot — slightly undershot so user doesn't notice
         turboUntilRef.current = performance.now() + 300;
         setError(null);
@@ -828,7 +850,9 @@ export function Calculator({
           totalInjected += count;
           console.log(`[Program] Injected ${entry.name}: ${count} entries`);
         } else {
-          console.error(`[Program] Failed to inject ${entry.name}: error ${count}`);
+          console.error(
+            `[Program] Failed to inject ${entry.name}: error ${count}`,
+          );
         }
       }
 
@@ -842,8 +866,8 @@ export function Calculator({
       setRomLoaded(true);
       setIsRunning(true);
       setError(null);
-      freshBackend.setKey(2, 0, true);  // ON key press → powered_on = true
-      setTimeout(() => freshBackend.setKey(2, 0, false), 300);  // Release after boot starts
+      freshBackend.setKey(2, 0, true); // ON key press → powered_on = true
+      setTimeout(() => freshBackend.setKey(2, 0, false), 300); // Release after boot starts
     } catch (err) {
       console.error("[Program] Error:", err);
       setError(`Failed to load programs: ${err}`);
@@ -868,10 +892,14 @@ export function Calculator({
             totalInjected += count;
             console.log(`[Resend] Injected ${file.name}: ${count} entries`);
           } else {
-            console.error(`[Resend] Failed to inject ${file.name}: error ${count}`);
+            console.error(
+              `[Resend] Failed to inject ${file.name}: error ${count}`,
+            );
           }
         }
-        console.log(`[Resend] Total entries injected: ${totalInjected}, soft reboot done`);
+        console.log(
+          `[Resend] Total entries injected: ${totalInjected}, soft reboot done`,
+        );
         turboUntilRef.current = performance.now() + 300;
         setError(null);
       } catch (err) {
@@ -890,12 +918,18 @@ export function Calculator({
           const count = backend.sendFileLive(entry.data);
           if (count >= 0) {
             totalInjected += count;
-            console.log(`[Resend] Injected ${entry.name}: ${count} entries (cached)`);
+            console.log(
+              `[Resend] Injected ${entry.name}: ${count} entries (cached)`,
+            );
           } else {
-            console.error(`[Resend] Failed to inject ${entry.name}: error ${count}`);
+            console.error(
+              `[Resend] Failed to inject ${entry.name}: error ${count}`,
+            );
           }
         }
-        console.log(`[Resend] Total entries injected: ${totalInjected}, soft reboot done`);
+        console.log(
+          `[Resend] Total entries injected: ${totalInjected}, soft reboot done`,
+        );
         turboUntilRef.current = performance.now() + 300;
         setError(null);
       } catch (err) {
@@ -906,13 +940,16 @@ export function Calculator({
   }, []);
 
   // Handle file input change for .8xp/.8xv programs
-  const handleProgramFiles = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    await loadProgramFiles(Array.from(files));
-    // Reset the file input so the same files can be re-selected
-    e.target.value = "";
-  }, [loadProgramFiles]);
+  const handleProgramFiles = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files;
+      if (!files || files.length === 0) return;
+      await loadProgramFiles(Array.from(files));
+      // Reset the file input so the same files can be re-selected
+      e.target.value = "";
+    },
+    [loadProgramFiles],
+  );
 
   // Drag-and-drop support for .rom, .8xp, .8xv files
   const PROGRAM_EXTENSIONS = [".8xp", ".8xv"];
@@ -941,59 +978,64 @@ export function Calculator({
     e.stopPropagation();
   }, []);
 
-  const handleDrop = useCallback(async (e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounterRef.current = 0;
-    setIsDragging(false);
+  const handleDrop = useCallback(
+    async (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current = 0;
+      setIsDragging(false);
 
-    const files = Array.from(e.dataTransfer.files);
-    if (files.length === 0) return;
+      const files = Array.from(e.dataTransfer.files);
+      if (files.length === 0) return;
 
-    const romFiles: File[] = [];
-    const programFilesList: File[] = [];
+      const romFiles: File[] = [];
+      const programFilesList: File[] = [];
 
-    // Try to capture FileSystemFileHandles for program files (Chromium only)
-    const handles: FileSystemFileHandle[] = [];
-    const items = Array.from(e.dataTransfer.items);
+      // Try to capture FileSystemFileHandles for program files (Chromium only)
+      const handles: FileSystemFileHandle[] = [];
+      const items = Array.from(e.dataTransfer.items);
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      const name = file.name.toLowerCase();
-      if (ROM_EXTENSIONS.some(ext => name.endsWith(ext))) {
-        romFiles.push(file);
-      } else if (PROGRAM_EXTENSIONS.some(ext => name.endsWith(ext))) {
-        programFilesList.push(file);
-        // Try to get a persistent handle for re-reading later
-        const item = items[i];
-        if (item && 'getAsFileSystemHandle' in item) {
-          try {
-            const handle = await (item as any).getAsFileSystemHandle();
-            if (handle?.kind === 'file') handles.push(handle);
-          } catch { /* Not supported or permission denied */ }
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const name = file.name.toLowerCase();
+        if (ROM_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+          romFiles.push(file);
+        } else if (PROGRAM_EXTENSIONS.some((ext) => name.endsWith(ext))) {
+          programFilesList.push(file);
+          // Try to get a persistent handle for re-reading later
+          const item = items[i];
+          if (item && "getAsFileSystemHandle" in item) {
+            try {
+              const handle = await (item as any).getAsFileSystemHandle();
+              if (handle?.kind === "file") handles.push(handle);
+            } catch {
+              /* Not supported or permission denied */
+            }
+          }
         }
       }
-    }
 
-    // Store handles if we got them for all program files
-    if (handles.length === programFilesList.length && handles.length > 0) {
-      programHandlesRef.current = handles;
-    }
+      // Store handles if we got them for all program files
+      if (handles.length === programFilesList.length && handles.length > 0) {
+        programHandlesRef.current = handles;
+      }
 
-    // Load ROM first if present (only use the first one)
-    if (romFiles.length > 0) {
-      await handleRomLoad(romFiles[0]);
-    }
+      // Load ROM first if present (only use the first one)
+      if (romFiles.length > 0) {
+        await handleRomLoad(romFiles[0]);
+      }
 
-    // Then inject program files
-    if (programFilesList.length > 0) {
-      await loadProgramFiles(programFilesList);
-    }
+      // Then inject program files
+      if (programFilesList.length > 0) {
+        await loadProgramFiles(programFilesList);
+      }
 
-    if (romFiles.length === 0 && programFilesList.length === 0) {
-      setError("Unsupported file type. Drop .rom, .8xp, or .8xv files.");
-    }
-  }, [handleRomLoad, loadProgramFiles]);
+      if (romFiles.length === 0 && programFilesList.length === 0) {
+        setError("Unsupported file type. Drop .rom, .8xp, or .8xv files.");
+      }
+    },
+    [handleRomLoad, loadProgramFiles],
+  );
 
   const handleBackendChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newBackend = e.target.value as BackendType;
@@ -1007,12 +1049,15 @@ export function Calculator({
     }
   }, []);
 
-  const handleKeypadUp = useCallback((row: number, col: number) => {
-    if (backendRef.current) {
-      backendRef.current.setKey(row, col, false);
-      debouncedSave();
-    }
-  }, [debouncedSave]);
+  const handleKeypadUp = useCallback(
+    (row: number, col: number) => {
+      if (backendRef.current) {
+        backendRef.current.setKey(row, col, false);
+        debouncedSave();
+      }
+    },
+    [debouncedSave],
+  );
 
   // Calculate container width based on fullscreen mode
   const containerWidth = fullscreen
@@ -1055,14 +1100,16 @@ export function Calculator({
             pointerEvents: "none",
           }}
         >
-          <span style={{
-            fontSize: "1.25rem",
-            fontWeight: "bold",
-            color: "rgba(59, 130, 246, 0.8)",
-            background: "rgba(255, 255, 255, 0.9)",
-            padding: "0.75rem 1.5rem",
-            borderRadius: "8px",
-          }}>
+          <span
+            style={{
+              fontSize: "1.25rem",
+              fontWeight: "bold",
+              color: "rgba(59, 130, 246, 0.8)",
+              background: "rgba(255, 255, 255, 0.9)",
+              padding: "0.75rem 1.5rem",
+              borderRadius: "8px",
+            }}
+          >
             Drop .rom, .8xp, or .8xv files
           </span>
         </div>
@@ -1303,7 +1350,10 @@ export function Calculator({
               Numbers: 0-9 | Arrows: Navigate | Enter: Enter | Backspace: Del
             </p>
             <p>+, -, *, / : Math | ( ) : Parens | ^: Power | V: √</p>
-            <p>Shift: 2nd | Alt: Alpha | Escape: Clear | O: ON | P: Prgm | Space: Pause</p>
+            <p>
+              Shift: 2nd | Alt: Alpha | Escape: Clear | O: ON | P: Prgm | Space:
+              Pause
+            </p>
           </div>
         </>
       )}
