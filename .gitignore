@@ -54,3 +54,6 @@ Thumbs.db
 # Claude Code local settings
 .claude/traces/
 /traces
+
+outline.md
+outline_v2.md

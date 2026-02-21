@@ -1,6 +1,6 @@
-export async function decodeRom(): Promise<Uint8Array | null> {
+export async function decodeRom(filename = "/sys84.bin"): Promise<Uint8Array | null> {
   try {
-    const response = await fetch("/sys84.bin");
+    const response = await fetch(filename);
     if (!response.ok) return null;
 
     const compressed = new Uint8Array(await response.arrayBuffer());

@@ -106,6 +106,9 @@ interface CalculatorProps {
   defaultBackend?: BackendType;
   useBundledRom?: boolean;
   fullscreen?: boolean;
+  defaultSpeedIndex?: number;
+  customRomLoader?: () => Promise<Uint8Array | null>;
+  autoLaunch?: boolean;
 }
 
 export function Calculator({
@@ -113,6 +116,9 @@ export function Calculator({
   defaultBackend = "rust",
   useBundledRom = true,
   fullscreen = false,
+  defaultSpeedIndex = 3,
+  customRomLoader,
+  autoLaunch,
 }: CalculatorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const backendRef = useRef<EmulatorBackend | null>(null);
@@ -132,7 +138,7 @@ export function Calculator({
     for (let s = 11; s <= 20; s += 1) steps.push(s);
     return steps;
   }, []);
-  const [speedIndex, setSpeedIndex] = useState(3); // index 3 = 1x
+  const [speedIndex, setSpeedIndex] = useState(defaultSpeedIndex); // index 3 = 1x (default)
   const speed = speedSteps[speedIndex];
   const [programFiles, setProgramFiles] = useState<string[]>([]); // Names of loaded .8xp/.8xv files
   const [isDragging, setIsDragging] = useState(false);
@@ -278,6 +284,80 @@ export function Calculator({
                 currentBackend.setKey(2, 0, true);
                 setTimeout(() => currentBackend.setKey(2, 0, false), 300);
               }
+
+              // Auto-launch key sequence if specified (e.g., for chess mode)
+              // Only run on fresh boot (no saved state)
+              if (autoLaunch && !stateRestored) {
+                console.log('[AutoLaunch] Starting visual polling...');
+                const startTime = performance.now();
+                let launched = false;
+
+                const checkScreen = () => {
+                  if (launched) return;
+
+                  const elapsed = performance.now() - startTime;
+                  if (elapsed > 2000) {
+                    console.log('[AutoLaunch] Timeout - stopping polling');
+                    return;
+                  }
+
+                  const canvas = canvasRef.current;
+                  if (!canvas) {
+                    setTimeout(checkScreen, 50);
+                    return;
+                  }
+
+                  const ctx = canvas.getContext('2d');
+                  if (!ctx) {
+                    setTimeout(checkScreen, 50);
+                    return;
+                  }
+
+                  // Get image data to check for homescreen
+                  const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+                  // Check for green battery pixel in top-right corner (single pixel check)
+                  // Battery indicator is at approximately x=310, y=4
+                  const batteryX = 310;
+                  const batteryY = 4;
+                  const idx = (batteryY * canvas.width + batteryX) * 4;
+                  const r = imageData.data[idx];
+                  const g = imageData.data[idx + 1];
+                  const b = imageData.data[idx + 2];
+                  const hasGreenBattery = g > 150 && g > r + 30 && g > b + 30;
+
+                  // If green battery pixel found, homescreen is ready
+                  if (hasGreenBattery) {
+                    console.log('[AutoLaunch] Green battery detected - screen ready, executing key sequence');
+                    launched = true;
+
+                    // Press P twice (clear message + open programs)
+                    currentBackend.setKey(4, 6, true);
+                    setTimeout(() => currentBackend.setKey(4, 6, false), 50);
+                    setTimeout(() => {
+                      currentBackend.setKey(4, 6, true);
+                      setTimeout(() => currentBackend.setKey(4, 6, false), 50);
+                    }, 100);
+
+                    // Wait 50ms, press 2
+                    setTimeout(() => {
+                      currentBackend.setKey(4, 1, true);
+                      setTimeout(() => currentBackend.setKey(4, 1, false), 50);
+                    }, 250);
+
+                    // Wait 50ms, press Enter
+                    setTimeout(() => {
+                      currentBackend.setKey(6, 0, true);
+                      setTimeout(() => currentBackend.setKey(6, 0, false), 50);
+                    }, 350);
+                  } else {
+                    console.log('[AutoLaunch] No green battery pixel found, retrying in 50ms...');
+                    setTimeout(checkScreen, 50);
+                  }
+                };
+
+                setTimeout(checkScreen, 100);
+              }
             }
           } else {
             if (!cancelled) {
@@ -291,7 +371,8 @@ export function Calculator({
         if (romDataRef.current) {
           await loadRomIntoBackend(romDataRef.current);
         } else if (useBundledRom) {
-          const bundledData = await loadBundledRom();
+          const romLoader = customRomLoader || loadBundledRom;
+          const bundledData = await romLoader();
           if (bundledData && !cancelled) {
             romDataRef.current = bundledData;
             await loadRomIntoBackend(bundledData);
@@ -319,7 +400,7 @@ export function Calculator({
         backendRef.current = null;
       }
     };
-  }, [backendType, useBundledRom]);
+  }, [backendType, useBundledRom, customRomLoader, autoLaunch]);
 
   // Debounced save — triggers 500ms after the last keypress
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -638,7 +719,19 @@ export function Calculator({
     }
   };
 
-  const handleReset = () => {
+  const handleReset = async () => {
+    const storage = storageRef.current;
+    const romHash = romHashRef.current;
+
+    if (storage && romHash) {
+      try {
+        await storage.deleteState(romHash, backendTypeRef.current);
+        console.log("[State] Cleared saved state for reset");
+      } catch (err) {
+        console.warn("[State] Failed to delete state during reset:", err);
+      }
+    }
+
     if (backendRef.current) {
       backendRef.current.reset();
     }
