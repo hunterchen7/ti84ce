@@ -1965,14 +1965,15 @@ impl Cpu {
                 } else {
                     if p == 2 {
                         // ADD IX/IY,IX/IY
-                        let index_reg = if use_ix { self.ix } else { self.iy };
-                        let rp = self.get_index_rp(p, use_ix);
+                        let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
+                        let index_reg = (if use_ix { self.ix } else { self.iy }) & mask;
+                        let rp = self.get_index_rp(p, use_ix) & mask;
                         let result = index_reg.wrapping_add(rp);
 
                         let half = ((index_reg & 0xFFF) + (rp & 0xFFF)) > 0xFFF;
                         self.set_flag_h(half);
                         self.set_flag_n(false);
-                        self.set_flag_c(result > if self.l { 0xFFFFFF } else { 0xFFFF });
+                        self.set_flag_c(result > mask);
                         // S, Z, PV, F3, F5 preserved from previous F (CEmu behavior)
 
                         // CEmu: cpu_write_index applies cpu_mask_mode(value, cpu.L)
@@ -1985,14 +1986,15 @@ impl Cpu {
                         15
                     } else {
                         // ADD IX/IY,rp (for BC/DE/SP)
-                        let index_reg = if use_ix { self.ix } else { self.iy };
-                        let rp = self.get_rp(p);
+                        let mask = if self.l { 0xFFFFFF } else { 0xFFFF };
+                        let index_reg = (if use_ix { self.ix } else { self.iy }) & mask;
+                        let rp = self.get_rp(p) & mask;
                         let result = index_reg.wrapping_add(rp);
 
                         let half = ((index_reg & 0xFFF) + (rp & 0xFFF)) > 0xFFF;
                         self.set_flag_h(half);
                         self.set_flag_n(false);
-                        self.set_flag_c(result > if self.l { 0xFFFFFF } else { 0xFFFF });
+                        self.set_flag_c(result > mask);
                         // S, Z, PV, F3, F5 preserved from previous F (CEmu behavior)
 
                         // CEmu: cpu_write_index applies cpu_mask_mode(value, cpu.L)

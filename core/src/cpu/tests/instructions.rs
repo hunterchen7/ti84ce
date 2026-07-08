@@ -1327,6 +1327,26 @@ fn test_add_ix_bc() {
     assert_eq!(cpu.ix, 0x001234);
 }
 
+#[test]
+fn test_z80_mode_add_ix_bc_masks_operands_for_carry() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.ix = 0x120001;
+    cpu.bc = 0x340001;
+
+    // ADD IX,BC (DD 09). In Z80 data mode, CEmu masks both operands before
+    // computing carry; stale upper bytes must not make this look like overflow.
+    bus.poke_byte(0, 0xDD);
+    bus.poke_byte(1, 0x09);
+    cpu.init_prefetch(&mut bus);
+
+    step_full(&mut cpu, &mut bus);
+
+    assert_eq!(cpu.ix, 0x000002);
+    assert!(!cpu.flag_c());
+}
+
 // NOTE: The following two tests are disabled because F3/F5 (undocumented flags)
 // behavior for ADD IX/IY,rr is not fully understood. CEmu preserves F3/F5 from
 // the previous F register value rather than deriving them from the result.
