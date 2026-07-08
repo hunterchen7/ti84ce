@@ -1733,12 +1733,14 @@ impl Cpu {
         }
 
         // Handle DD DD / FD FD / DD FD / FD DD - chain of prefixes
-        // Just restart with the new prefix
+        // CEmu traps if another index prefix appears while one is active.
         if opcode == 0xDD {
-            return self.execute_index(bus, true);
+            self.opcode_trap(bus, 1);
+            return 0;
         }
         if opcode == 0xFD {
-            return self.execute_index(bus, false);
+            self.opcode_trap(bus, 1);
+            return 0;
         }
 
         let x = (opcode >> 6) & 0x03;
@@ -2638,5 +2640,19 @@ impl Cpu {
         self.adl = mode;
         self.prefetch(bus, address);
         self.pc = address;
+    }
+
+    /// OPCODETRAP entry used by illegal eZ80 opcode forms.
+    /// CEmu: cpu_trap_rewind(rewind) then cpu_interrupt(0x00).
+    pub(super) fn opcode_trap(&mut self, bus: &mut Bus, rewind: u32) {
+        self.prefetch_discard(bus);
+        bus.add_cycles(1);
+        self.pc = self.wrap_pc(self.pc.wrapping_sub(rewind));
+        self.l = self.adl;
+        self.il = self.adl;
+        self.suffix = false;
+        self.prefix = 0;
+        let mode = self.adl || self.madl;
+        self.rst_impl(bus, 0x00, self.adl, mode, self.madl);
     }
 }

@@ -1159,6 +1159,32 @@ fn test_dd_ed_cancels_prefix_and_consumes_ed() {
 }
 
 #[test]
+fn test_chained_index_prefix_traps_instead_of_recursing() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.mbase = 0xD0;
+    cpu.set_sp_both(0x0200);
+
+    // DD DD should trap while the second prefix is active, rewinding to the
+    // trapped prefix and entering RST 00h instead of recursively consuming more.
+    bus.poke_byte(0xD00000, 0xA5);
+    bus.poke_byte(0xD00100, 0xDD);
+    bus.poke_byte(0xD00101, 0xDD);
+    bus.poke_byte(0xD00102, 0x00);
+    cpu.pc = 0x0100;
+    cpu.init_prefetch(&mut bus);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.pc, 0x0000);
+    assert_eq!(cpu.prefetch, 0xA5);
+    assert_eq!(cpu.sp(), 0x01FE);
+    assert_eq!(bus.peek_byte(0xD001FE), 0x01);
+    assert_eq!(bus.peek_byte(0xD001FF), 0x01);
+}
+
+#[test]
 fn test_ld_mb_a_parity() {
     // LD MB,A (ED 6D) - Load A into MBASE (only in ADL mode)
     let mut cpu = Cpu::new();
