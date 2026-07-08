@@ -33,8 +33,6 @@ pub struct SpiController {
     int_status: u32,
     /// TX FIFO valid entries (number of pending transfers)
     tfve: u8,
-    /// TX FIFO write index (where next write goes)
-    tfwi: u8,
     /// TX FIFO read index (where next transfer reads from)
     tfvi: u8,
     /// RX FIFO valid entries
@@ -66,7 +64,6 @@ impl SpiController {
             int_ctrl: 0,
             int_status: 0,
             tfve: 0,
-            tfwi: 0,
             tfvi: 0,
             rfve: 0,
             rfvi: 0,
@@ -227,10 +224,7 @@ impl SpiController {
             if Self::trace_enabled() {
                 eprintln!(
                     "[spi] complete cycle={} now={} queued={} transfer_bits={}",
-                    next_cycle,
-                    current_cycles,
-                    self.tfve,
-                    self.transfer_bits
+                    next_cycle, current_cycles, self.tfve, self.transfer_bits
                 );
             }
 
@@ -376,7 +370,6 @@ impl SpiController {
                 }
                 // Bit 3: Reset TX FIFO
                 if masked_value & (1 << 3) != 0 {
-                    self.tfwi = 0;
                     self.tfvi = 0;
                     self.tfve = 0;
                 }
@@ -401,28 +394,22 @@ impl SpiController {
             }
             // DATA (0x18-0x1B) - writing adds to TX FIFO
             6 => {
-                // Accumulate bytes into current FIFO entry (CEmu: spi.txFifo[idx] |= value << shift)
+                let fifo_idx =
+                    (self.tfvi.wrapping_add(self.tfve) & (SPI_TXFIFO_DEPTH - 1)) as usize;
                 if self.tfve < SPI_TXFIFO_DEPTH {
-                    let fifo_idx = (self.tfwi & (SPI_TXFIFO_DEPTH - 1)) as usize;
-                    if shift == 0 {
-                        // First byte clears the entry
-                        self.tx_fifo[fifo_idx] = value32;
-                    } else {
-                        self.tx_fifo[fifo_idx] |= value32;
-                    }
+                    // CEmu updates only the addressed byte lane, so DATA+1 written
+                    // before DATA survives the low-byte commit for 9-bit frames.
+                    self.tx_fifo[fifo_idx] &= mask;
+                    self.tx_fifo[fifo_idx] |= value32;
                 }
                 if shift == 0 && self.tfve < SPI_TXFIFO_DEPTH {
                     // Commit entry on byte 0 write
                     self.tfve += 1;
-                    self.tfwi = self.tfwi.wrapping_add(1);
                     state_changed = true; // May need to start transfer
                     if Self::trace_enabled() {
-                        let fifo_idx = ((self.tfwi.wrapping_sub(1)) & (SPI_TXFIFO_DEPTH - 1)) as usize;
                         eprintln!(
                             "[spi] data write tfve={} cr2=0x{:03X} data=0x{:08X}",
-                            self.tfve,
-                            self.cr2,
-                            self.tx_fifo[fifo_idx]
+                            self.tfve, self.cr2, self.tx_fifo[fifo_idx]
                         );
                     }
                 }
@@ -445,9 +432,7 @@ impl SpiController {
         if Self::trace_enabled() {
             eprintln!(
                 "[spi] sched_complete queued={} transfer_bits={} tx_data=0x{:03X}",
-                self.tfve,
-                self.transfer_bits,
-                self.current_tx_data
+                self.tfve, self.transfer_bits, self.current_tx_data
             );
         }
 
@@ -598,6 +583,17 @@ mod tests {
         // STATUS byte 1 should report tfve = 1 (upper nibble)
         let status1 = spi.read(0x0D, 0, CPU_SPEED_24MHZ);
         assert_eq!(status1, 0x10);
+    }
+
+    #[test]
+    fn test_data_high_byte_survives_low_byte_commit() {
+        let mut spi = SpiController::new();
+
+        spi.write(0x19, 0x01, 0, CPU_SPEED_24MHZ);
+        spi.write(0x18, 0x2A, 0, CPU_SPEED_24MHZ);
+
+        assert_eq!(spi.tfve, 1);
+        assert_eq!(spi.tx_fifo[0] & 0x1FF, 0x12A);
     }
 
     #[test]
