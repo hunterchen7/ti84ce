@@ -735,13 +735,13 @@ impl Bus {
                         (self.ports.read(port_offset, &keys, self.cycles), Some(IoTarget::MmioPort))
                     }
                 } else {
-                    // Unmapped MMIO: CEmu returns random data with cycle penalty
+                    // Unmapped MMIO: CEmu leaves the default read value at 0.
                     if addr >= 0xFB0000 && addr < 0xFF0000 {
                         self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES; // 3
                     } else {
                         self.mem_cycles += Self::UNMAPPED_MMIO_OTHER_CYCLES; // 2
                     }
-                    (self.rng.next(), None)
+                    (0, None)
                 }
             }
             MemoryRegion::Unmapped => {
@@ -1735,6 +1735,20 @@ mod tests {
         let mut bus2 = Bus::new();
         bus2.seed_rng(0x12, 0x34, 0x56);
         assert_eq!(bus2.read_byte(0xC00000), 0x12);
+    }
+
+    #[test]
+    fn test_unmapped_mmio_reads_return_zero() {
+        let mut bus = Bus::new();
+        bus.seed_rng(0x12, 0x34, 0x56);
+
+        assert_eq!(bus.read_byte(0xE40000), 0);
+        assert_eq!(bus.mem_cycles(), Bus::UNMAPPED_MMIO_OTHER_CYCLES);
+
+        bus.reset_cycles();
+
+        assert_eq!(bus.read_byte(0xFB0000), 0);
+        assert_eq!(bus.mem_cycles(), Bus::UNMAPPED_MMIO_PROTECTED_CYCLES);
     }
 
     #[test]
