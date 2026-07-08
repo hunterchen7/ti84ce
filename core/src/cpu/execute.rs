@@ -1287,11 +1287,12 @@ impl Cpu {
                 self.hl = self.wrap_data(self.hl.wrapping_add(1));
                 self.de = self.wrap_data(self.de.wrapping_add(1));
                 // BC is a counter - use L mode for masking (CEmu: cpu_dec_bc_partial_mode)
-                let _ = self.dec_bc_partial_mode();
+                // PV must use the masked (16-bit in Z80 mode) return, not full 24-bit self.bc.
+                let bc_val = self.dec_bc_partial_mode();
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
-                self.set_flag_pv(self.bc != 0);
+                self.set_flag_pv(bc_val != 0);
                 // F3/F5 preserved (CEmu behavior)
                 bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for LDI)
                 16
@@ -1305,11 +1306,12 @@ impl Cpu {
                 self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                 self.de = self.wrap_data(self.de.wrapping_sub(1));
                 // BC is a counter - use L mode for masking (CEmu: cpu_dec_bc_partial_mode)
-                let _ = self.dec_bc_partial_mode();
+                // PV must use the masked (16-bit in Z80 mode) return, not full 24-bit self.bc.
+                let bc_val = self.dec_bc_partial_mode();
 
                 self.set_flag_h(false);
                 self.set_flag_n(false);
-                self.set_flag_pv(self.bc != 0);
+                self.set_flag_pv(bc_val != 0);
                 bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for LDD)
                 // F3/F5 preserved (CEmu behavior)
                 16
@@ -1324,17 +1326,21 @@ impl Cpu {
                     bus.write_byte(self.mask_addr(self.de), val);
                     self.hl = self.wrap_data(self.hl.wrapping_add(1));
                     self.de = self.wrap_data(self.de.wrapping_add(1));
-                    let _ = self.dec_bc_partial_mode();
+                    // Terminate and flag on the masked (16-bit in Z80 mode) BC, matching
+                    // CEmu's cpu_dec_bc_partial_mode() return. The old code tested the
+                    // full 24-bit self.bc, so with a nonzero BCU in Z80 mode the low 16
+                    // bits wrapped 0->0xFFFF and this loop spun forever (hard hang).
+                    let bc_val = self.dec_bc_partial_mode();
 
                     self.set_flag_h(false);
                     self.set_flag_n(false);
-                    self.set_flag_pv(self.bc != 0);
+                    self.set_flag_pv(bc_val != 0);
                     // F3/F5 preserved (CEmu behavior)
 
                     // CEmu: cpu.cycles += internalCycles (1 for LDIR)
                     bus.add_cycles(1);
 
-                    if self.bc == 0 {
+                    if bc_val == 0 {
                         break;
                     }
                 }
@@ -1350,17 +1356,20 @@ impl Cpu {
                     bus.write_byte(self.mask_addr(self.de), val);
                     self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                     self.de = self.wrap_data(self.de.wrapping_sub(1));
-                    let _ = self.dec_bc_partial_mode();
+                    // Terminate and flag on the masked (16-bit in Z80 mode) BC, matching
+                    // CEmu's cpu_dec_bc_partial_mode() return. Testing full 24-bit self.bc
+                    // here spun forever when BCU != 0 in Z80 mode (hard hang).
+                    let bc_val = self.dec_bc_partial_mode();
 
                     self.set_flag_h(false);
                     self.set_flag_n(false);
-                    self.set_flag_pv(self.bc != 0);
+                    self.set_flag_pv(bc_val != 0);
                     // F3/F5 preserved (CEmu behavior)
 
                     // CEmu: cpu.cycles += internalCycles (1 for LDDR)
                     bus.add_cycles(1);
 
-                    if self.bc == 0 {
+                    if bc_val == 0 {
                         break;
                     }
                 }
@@ -1373,12 +1382,13 @@ impl Cpu {
                 let result = self.a.wrapping_sub(val);
                 self.hl = self.wrap_data(self.hl.wrapping_add(1));
                 // BC is a counter - use L mode for masking
-                let _ = self.dec_bc_partial_mode();
+                // PV must use the masked (16-bit in Z80 mode) return, not full 24-bit self.bc.
+                let bc_val = self.dec_bc_partial_mode();
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
                 self.set_flag_n(true);
-                self.set_flag_pv(self.bc != 0);
+                self.set_flag_pv(bc_val != 0);
                 // F3/F5 handling for CPI is complex
                 let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
@@ -1392,12 +1402,13 @@ impl Cpu {
                 let result = self.a.wrapping_sub(val);
                 self.hl = self.wrap_data(self.hl.wrapping_sub(1));
                 // BC is a counter - use L mode for masking
-                let _ = self.dec_bc_partial_mode();
+                // PV must use the masked (16-bit in Z80 mode) return, not full 24-bit self.bc.
+                let bc_val = self.dec_bc_partial_mode();
 
                 self.set_sz_flags(result);
                 self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
                 self.set_flag_n(true);
-                self.set_flag_pv(self.bc != 0);
+                self.set_flag_pv(bc_val != 0);
                 let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
                 self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
                 bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for CPD)
@@ -1412,17 +1423,20 @@ impl Cpu {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     let result = self.a.wrapping_sub(val);
                     self.hl = self.wrap_data(self.hl.wrapping_add(1));
-                    // BC is a counter - use L mode for masking
-                    let _ = self.dec_bc_partial_mode();
+                    // BC is a counter - use L mode for masking. Terminate and flag on the
+                    // masked (16-bit in Z80 mode) BC, matching CEmu's cpu_dec_bc_partial_mode()
+                    // return. Testing full 24-bit self.bc here spun forever (never matching A)
+                    // when BCU != 0 in Z80 mode (hard hang).
+                    let bc_val = self.dec_bc_partial_mode();
 
                     self.set_sz_flags(result);
                     self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
                     self.set_flag_n(true);
-                    self.set_flag_pv(self.bc != 0);
+                    self.set_flag_pv(bc_val != 0);
                     let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
                     self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
-                    if self.bc != 0 && result != 0 {
+                    if bc_val != 0 && result != 0 {
                         // CEmu: cpu.cycles += internalCycles (2 for CPIR when repeating)
                         bus.add_cycles(2);
                     } else {
@@ -1442,17 +1456,20 @@ impl Cpu {
                     let val = bus.read_byte(self.mask_addr(self.hl));
                     let result = self.a.wrapping_sub(val);
                     self.hl = self.wrap_data(self.hl.wrapping_sub(1));
-                    // BC is a counter - use L mode for masking
-                    let _ = self.dec_bc_partial_mode();
+                    // BC is a counter - use L mode for masking. Terminate and flag on the
+                    // masked (16-bit in Z80 mode) BC, matching CEmu's cpu_dec_bc_partial_mode()
+                    // return. Testing full 24-bit self.bc here spun forever (never matching A)
+                    // when BCU != 0 in Z80 mode (hard hang).
+                    let bc_val = self.dec_bc_partial_mode();
 
                     self.set_sz_flags(result);
                     self.set_flag_h((self.a & 0x0F) < (val & 0x0F));
                     self.set_flag_n(true);
-                    self.set_flag_pv(self.bc != 0);
+                    self.set_flag_pv(bc_val != 0);
                     let n = result.wrapping_sub(if self.flag_h() { 1 } else { 0 });
                     self.f = (self.f & !(flags::F5 | flags::F3)) | ((n & 0x02) << 4) | (n & 0x08);
 
-                    if self.bc != 0 && result != 0 {
+                    if bc_val != 0 && result != 0 {
                         // CEmu: cpu.cycles += internalCycles (2 for CPDR when repeating)
                         bus.add_cycles(2);
                     } else {

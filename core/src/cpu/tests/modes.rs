@@ -478,6 +478,82 @@ fn test_z80_mode_ldir_16bit_counters() {
     assert_eq!(cpu.de & 0xFFFF, 0x0303);
 }
 
+// Regression: LDIR/CPIR in Z80 register mode must terminate on the 16-bit-masked
+// BC (CEmu's cpu_dec_bc_partial_mode return), NOT the full 24-bit self.bc. When the
+// upper byte BCU is nonzero, testing full 24-bit self.bc never reaches 0 (the low 16
+// wrap 0->0xFFFF), so the atomic block loop spun forever and hard-hung the emulator.
+#[test]
+fn test_z80_mode_ldir_nonzero_bcu_terminates() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    bus.poke_byte(0xD00200, 0x11);
+    bus.poke_byte(0xD00201, 0x22);
+    bus.poke_byte(0xD00202, 0x33);
+
+    // LDIR (ED B0) at the Z80-mode fetch address (mbase 0xD0 : pc 0x0100).
+    bus.poke_byte(0xD00100, 0xED);
+    bus.poke_byte(0xD00101, 0xB0);
+    setup_z80_mode_with_prefetch(&mut cpu, &mut bus); // adl=false => l=false at execute
+
+    // Count = 3 in the low 16 bits, with a stale nonzero BCU (upper byte = 0x01)
+    // carried in from a prior ADL-mode load. This is the freezing state.
+    cpu.hl = 0x0200;
+    cpu.de = 0x0300;
+    cpu.bc = 0x01_0003;
+
+    // Single step runs all iterations; must return rather than hang.
+    cpu.step(&mut bus);
+
+    // Data copied for exactly the low-16 count (3 bytes).
+    assert_eq!(bus.peek_byte(0xD00300), 0x11);
+    assert_eq!(bus.peek_byte(0xD00301), 0x22);
+    assert_eq!(bus.peek_byte(0xD00302), 0x33);
+
+    // Low 16 bits reached 0; BCU (upper byte) preserved, matching Z80-mode semantics.
+    assert_eq!(cpu.bc & 0xFFFF, 0, "low-16 BC should be 0 after LDIR");
+    assert_eq!(
+        cpu.bc & 0xFF0000,
+        0x01_0000,
+        "BCU must be preserved in Z80 mode"
+    );
+    assert!(!cpu.flag_pv(), "PV reflects the masked count == 0");
+}
+
+#[test]
+fn test_z80_mode_cpir_nonzero_bcu_terminates() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    bus.poke_byte(0xD00200, 0x11);
+    bus.poke_byte(0xD00201, 0x22);
+    bus.poke_byte(0xD00202, 0x33);
+
+    // CPIR (ED B1)
+    bus.poke_byte(0xD00100, 0xED);
+    bus.poke_byte(0xD00101, 0xB1);
+    setup_z80_mode_with_prefetch(&mut cpu, &mut bus);
+
+    // A never matches any scanned byte, so termination depends solely on the counter.
+    cpu.a = 0xFF;
+    cpu.hl = 0x0200;
+    cpu.bc = 0x01_0003; // low-16 count 3, stale nonzero BCU
+
+    // Must terminate on the masked count hitting 0 rather than spinning forever.
+    cpu.step(&mut bus);
+
+    assert_eq!(
+        cpu.bc & 0xFFFF,
+        0,
+        "low-16 BC should be 0 after unmatched CPIR"
+    );
+    assert_eq!(
+        cpu.bc & 0xFF0000,
+        0x01_0000,
+        "BCU must be preserved in Z80 mode"
+    );
+}
+
 #[test]
 fn test_z80_mode_jr_relative() {
     let mut cpu = Cpu::new();
