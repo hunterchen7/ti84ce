@@ -250,6 +250,29 @@ fn test_adl_jp_indirect_24bit() {
 }
 
 #[test]
+fn test_suffix_sil_jp_uses_l_for_post_jump_mode() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    // .SIL JP 0x100200: IL=true fetches a 24-bit operand, L=false means the
+    // jump target is executed in Z80 instruction mode at MBASE:0200.
+    bus.poke_byte(0xD00100, 0x52);
+    bus.poke_byte(0xD00101, 0xC3);
+    bus.poke_byte(0xD00102, 0x00);
+    bus.poke_byte(0xD00103, 0x02);
+    bus.poke_byte(0xD00104, 0x10);
+    bus.poke_byte(0xD00200, 0xA5);
+    bus.poke_byte(0x100200, 0x5A);
+    setup_z80_mode_with_prefetch(&mut cpu, &mut bus);
+
+    cpu.step(&mut bus);
+
+    assert!(!cpu.adl, "JP must commit L=false, not IL=true");
+    assert_eq!(cpu.pc, 0x0200);
+    assert_eq!(cpu.prefetch, 0xA5, "target prefetch should use MBASE:0200");
+}
+
+#[test]
 fn test_adl_rst_pushes_24bit() {
     // RST should push 24-bit return address in ADL mode
     let mut cpu = Cpu::new();

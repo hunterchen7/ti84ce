@@ -404,14 +404,15 @@ impl Cpu {
             }
             2 => {
                 // JP cc,nn
-                // Fetch uses IL mode, then ADL becomes IL if jump is taken
+                // Fetch width uses IL mode, but the post-jump instruction mode uses L.
+                // CEmu: cpu_jump(cpu_fetch_word_no_prefetch(), cpu.L)
                 // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
                     let nn = self.fetch_addr_no_prefetch(bus);
                     bus.add_cycles(1); // CEmu: cpu.cycles++ for jump taken
+                    self.adl = self.l;
                     self.prefetch(bus, nn); // Reload prefetch at target
-                    self.pc = nn;
-                    self.adl = self.il;
+                    self.pc = self.wrap_pc(nn);
                 } else {
                     // When not taken, use regular fetch which maintains prefetch correctly
                     let _ = self.fetch_addr(bus);
@@ -422,13 +423,14 @@ impl Cpu {
                 match y {
                     0 => {
                         // JP nn
-                        // Fetch uses IL mode (set by suffix), then ADL becomes IL
+                        // Fetch width uses IL mode (set by suffix), but post-jump
+                        // instruction mode uses L. CEmu: cpu_jump(..., cpu.L)
                         // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
                         bus.add_cycles(1); // CEmu: cpu.cycles++ for JP nn
                         let target = self.fetch_addr_no_prefetch(bus);
+                        self.adl = self.l;
                         self.prefetch(bus, target); // Reload prefetch at target
-                        self.pc = target;
-                        self.adl = self.il;
+                        self.pc = self.wrap_pc(target);
                         10
                     }
                     1 => {
@@ -2336,13 +2338,13 @@ impl Cpu {
                 }
             }
             2 => {
-                // JP cc,nn - not affected by prefix but needs prefetch
+                // JP cc,nn - fetch width uses IL, post-jump mode uses L
                 // CEmu: uses no_prefetch only when taken, regular fetch otherwise
                 if self.check_cc(y) {
                     let nn = self.fetch_addr_no_prefetch(bus);
+                    self.adl = self.l;
                     self.prefetch(bus, nn); // Reload prefetch at target
-                    self.pc = nn;
-                    self.adl = self.il;
+                    self.pc = self.wrap_pc(nn);
                 } else {
                     // When not taken, use regular fetch which maintains prefetch correctly
                     let _ = self.fetch_addr(bus);
@@ -2352,12 +2354,12 @@ impl Cpu {
             3 => {
                 match y {
                     0 => {
-                        // JP nn - not affected by prefix but needs prefetch
+                        // JP nn - fetch width uses IL, post-jump mode uses L
                         // Use fetch_addr_no_prefetch to match CEmu's cpu_fetch_word_no_prefetch
                         let target = self.fetch_addr_no_prefetch(bus);
+                        self.adl = self.l;
                         self.prefetch(bus, target); // Reload prefetch at target
-                        self.pc = target;
-                        self.adl = self.il;
+                        self.pc = self.wrap_pc(target);
                         10
                     }
                     1 => {
