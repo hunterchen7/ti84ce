@@ -323,6 +323,17 @@ impl Cpu {
         }
     }
 
+    /// Wrap relative-branch target based on L mode (no MBASE added).
+    /// CEmu: cpu_mask_mode(r->PC + offset, cpu.L)
+    #[inline]
+    pub fn wrap_pc_l(&self, addr: u32) -> u32 {
+        if self.l {
+            addr & 0xFFFFFF
+        } else {
+            addr & 0xFFFF
+        }
+    }
+
     /// Wrap data register (HL, DE) to stay within address width based on L mode
     /// Use for data register modifications in block instructions (LDI, LDIR, etc.)
     /// CEmu: cpu_mask_mode(r->HL + delta, cpu.L)

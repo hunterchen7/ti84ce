@@ -273,6 +273,32 @@ fn test_suffix_sil_jp_uses_l_for_post_jump_mode() {
 }
 
 #[test]
+fn test_suffix_sis_jr_masks_target_with_l_mode() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.adl = true;
+    cpu.pc = 0x120100;
+
+    // .SIS JR +0: ADL remains true for fetch/pre-fetch width, but L=false
+    // means CEmu masks the relative branch target to 16 bits.
+    bus.poke_byte(0x120100, 0x40);
+    bus.poke_byte(0x120101, 0x18);
+    bus.poke_byte(0x120102, 0x00);
+    bus.poke_byte(0x120103, 0x5A);
+    bus.poke_byte(0x000103, 0xA5);
+    cpu.init_prefetch(&mut bus);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.pc, 0x0103);
+    assert_eq!(
+        cpu.prefetch, 0xA5,
+        "JR target prefetch should use the L-masked PC"
+    );
+}
+
+#[test]
 fn test_adl_rst_pushes_24bit() {
     // RST should push 24-bit return address in ADL mode
     let mut cpu = Cpu::new();
