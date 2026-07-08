@@ -86,6 +86,9 @@ pub struct LcdEventResult {
 
 /// Result from process_dma: optional reschedule info
 pub struct LcdDmaResult {
+    /// Clock48M ticks consumed on the memory bus by this DMA callback.
+    /// CEmu returns this from lcd_dma(), separately from the next DMA interval.
+    pub bus_ticks: u64,
     /// If Some(ticks), repeat LcdDma after this many Clock48M ticks.
     /// If None, don't reschedule (DMA complete for now).
     pub repeat_ticks: Option<u64>,
@@ -497,12 +500,14 @@ impl LcdController {
             // Advance UPCURR by 64 bytes (simulating DMA read)
             self.upcurr = self.upcurr.wrapping_add(64);
             self.pos = self.pos.wrapping_add(64);
+            let bus_ticks = if self.pos & 64 != 0 { 18 } else { 19 };
 
             // pos wraps u8: after 4 fills (4*64=256), pos wraps to 0 -> prefill done
             if self.pos != 0 {
                 // More prefill needed
                 let repeat = if self.pos == 128 { 22 } else { 19 };
                 return LcdDmaResult {
+                    bus_ticks,
                     repeat_ticks: Some(repeat),
                     schedule_relative: None,
                 };
@@ -513,6 +518,7 @@ impl LcdController {
                 // Prefill finished during active video transition —
                 // schedule DMA relative to LCD event
                 return LcdDmaResult {
+                    bus_ticks,
                     repeat_ticks: None,
                     schedule_relative: Some(
                         (self.hsw as u64 + self.hbp as u64) * self.pcd as u64,
@@ -521,6 +527,7 @@ impl LcdController {
             }
             // Prefill done, no more DMA until ACTIVE_VIDEO
             return LcdDmaResult {
+                bus_ticks,
                 repeat_ticks: None,
                 schedule_relative: None,
             };
@@ -540,6 +547,7 @@ impl LcdController {
 
         // Calculate ticks for lcd_words equivalent
         let ticks = self.process_words_ticks(words);
+        let bus_ticks = if self.wtrmrk != 0 { 19 } else { 11 };
 
         // Fill FIFO (advance upcurr)
         self.upcurr = self.upcurr.wrapping_add(fill_bytes);
@@ -547,12 +555,14 @@ impl LcdController {
         if self.cur_row < self.lpp {
             // More scanlines to process
             LcdDmaResult {
+                bus_ticks,
                 repeat_ticks: Some(ticks),
                 schedule_relative: None,
             }
         } else {
             // Frame complete
             LcdDmaResult {
+                bus_ticks,
                 repeat_ticks: None,
                 schedule_relative: None,
             }
@@ -1208,23 +1218,29 @@ mod tests {
         let result = lcd.process_dma();
         assert_eq!(lcd.upcurr, 0xD40000 + 64);
         assert_eq!(lcd.pos, 64);
+        assert_eq!(result.bus_ticks, 18);
         assert!(result.repeat_ticks.is_some());
+        assert_eq!(result.repeat_ticks.unwrap(), 19);
 
         // Second DMA call — pos = 128
         let result = lcd.process_dma();
         assert_eq!(lcd.pos, 128);
+        assert_eq!(result.bus_ticks, 19);
         assert!(result.repeat_ticks.is_some());
         assert_eq!(result.repeat_ticks.unwrap(), 22); // special timing for pos==128
 
         // Third DMA call — pos = 192
         let result = lcd.process_dma();
         assert_eq!(lcd.pos, 192);
+        assert_eq!(result.bus_ticks, 18);
         assert!(result.repeat_ticks.is_some());
+        assert_eq!(result.repeat_ticks.unwrap(), 19);
 
         // Fourth DMA call — pos wraps to 0, prefill complete
         let result = lcd.process_dma();
         assert_eq!(lcd.pos, 0);
         assert!(!lcd.prefill);
+        assert_eq!(result.bus_ticks, 19);
         // Not in FRONT_PORCH, so no schedule_relative
         assert!(result.repeat_ticks.is_none());
     }
@@ -1246,6 +1262,7 @@ mod tests {
 
         let result = lcd.process_dma();
         assert!(lcd.upcurr > 0xD40000); // UPCURR advanced
+        assert_eq!(result.bus_ticks, 11);
         assert!(result.repeat_ticks.is_some()); // More rows to process
     }
 

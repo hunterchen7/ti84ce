@@ -1540,8 +1540,8 @@ impl Emu {
                     let result = self.bus.ports.lcd.process_dma();
                     let tick_unit = crate::scheduler::ClockId::Clock48M
                         .base_ticks_per_tick(self.scheduler.cpu_speed());
+                    self.scheduler.dma_last_mem_timestamp += result.bus_ticks * tick_unit;
                     if let Some(ticks) = result.repeat_ticks {
-                        self.scheduler.dma_last_mem_timestamp += ticks * tick_unit;
                         let skipped = self.scheduler.repeat_catchup(EventId::LcdDma, ticks);
                         if skipped > 0 {
                             // Fast-forward LCD DMA state for the skipped events
