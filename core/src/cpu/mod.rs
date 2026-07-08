@@ -469,6 +469,7 @@ impl Cpu {
 
         // Disable interrupts and clear state
         self.iff1 = false;
+        self.iff2 = false;
         self.halted = false;
 
         // CEmu: cpu_interrupt(0x38) → cpu_rst(0x38, cpu.ADL, cpu.ADL|cpu.MADL, cpu.MADL)

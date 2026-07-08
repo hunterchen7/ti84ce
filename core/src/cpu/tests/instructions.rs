@@ -650,6 +650,34 @@ fn test_di_ei() {
 }
 
 #[test]
+fn test_irq_entry_clears_iff2_before_reti() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+
+    cpu.pc = 0x1234;
+    cpu.mbase = 0xD0;
+    cpu.set_sp_both(0x0200);
+    cpu.iff1 = true;
+    cpu.iff2 = true;
+    cpu.irq_pending = true;
+
+    // RETI at the maskable IRQ vector.
+    bus.poke_byte(0xD00038, 0xED);
+    bus.poke_byte(0xD00039, 0x4D);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.pc, 0x0038);
+    assert!(!cpu.iff1);
+    assert!(!cpu.iff2);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.pc, 0x1234);
+    assert!(!cpu.iff1, "RETI must not re-enable after IRQ entry");
+}
+
+#[test]
 fn test_djnz() {
     let mut cpu = Cpu::new();
     let mut bus = Bus::new();
