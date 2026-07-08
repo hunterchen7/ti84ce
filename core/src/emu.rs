@@ -2002,14 +2002,18 @@ impl Emu {
         buffer[pos] = if self.boot_init_done { 1 } else { 0 }; pos += 1;
         pos += 6; // Padding to 16 bytes
 
-        // Write RAM
+        // Write RAM. RAM is lazily allocated; an untouched RAM image is all zeroes.
         let ram_data = self.bus.ram.data();
-        buffer[pos..pos+RAM_SIZE].copy_from_slice(ram_data);
+        buffer[pos..pos+RAM_SIZE].fill(0);
+        let ram_len = ram_data.len().min(RAM_SIZE);
+        buffer[pos..pos+ram_len].copy_from_slice(&ram_data[..ram_len]);
         pos += RAM_SIZE;
 
-        // Write Flash
+        // Write Flash. Uninitialized flash reads as erased bytes.
         let flash_data = self.bus.flash.data();
-        buffer[pos..pos+FLASH_SIZE].copy_from_slice(flash_data);
+        buffer[pos..pos+FLASH_SIZE].fill(0xFF);
+        let flash_len = flash_data.len().min(FLASH_SIZE);
+        buffer[pos..pos+flash_len].copy_from_slice(&flash_data[..flash_len]);
         pos += FLASH_SIZE;
 
         log_evt!("STATE_SAVED: {} bytes", pos);
@@ -3026,6 +3030,19 @@ mod tests {
         let mut emu = Emu::new();
         let file = make_test_8xp(0x05, b"TEST\0\0\0\0", 0, 0, &[0, 0, 0xEF, 0x7B]);
         assert_eq!(emu.send_file(&file), Err(-10));
+    }
+
+    #[test]
+    fn test_save_state_before_ram_allocation() {
+        let mut emu = Emu::new();
+        let rom = vec![0xFF; 1024];
+        emu.load_rom(&rom).unwrap();
+        assert!(emu.bus.ram.data().is_empty());
+
+        let mut buffer = vec![0xAA; emu.save_state_size()];
+        let written = emu.save_state(&mut buffer).unwrap();
+
+        assert_eq!(written, buffer.len());
     }
 
     #[test]

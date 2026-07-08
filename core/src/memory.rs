@@ -271,6 +271,9 @@ impl Flash {
 
     /// Load flash data from save state
     pub fn load_data(&mut self, data: &[u8]) {
+        if self.data.len() != addr::FLASH_SIZE {
+            self.data = vec![0xFF; addr::FLASH_SIZE];
+        }
         let len = data.len().min(addr::FLASH_SIZE);
         self.data[..len].copy_from_slice(&data[..len]);
         self.initialized = true;
