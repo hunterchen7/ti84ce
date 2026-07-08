@@ -391,7 +391,7 @@ impl Scheduler {
         }
         let base_ticks_remaining = timestamp - self.base_ticks;
         let base_ticks_per_tick = item.clock.base_ticks_per_tick(self.cpu_speed);
-        base_ticks_remaining / base_ticks_per_tick
+        (base_ticks_remaining + base_ticks_per_tick - 1) / base_ticks_per_tick
     }
 
     /// Check if an event has fired (timestamp reached)
@@ -655,6 +655,19 @@ mod tests {
 
         sched.clear(EventId::Rtc);
         assert!(!sched.is_active(EventId::Rtc));
+    }
+
+    #[test]
+    fn test_ticks_remaining_ceil_partial_tick() {
+        let mut sched = Scheduler::new();
+        sched.set_cpu_speed(3); // 48 MHz
+
+        // RTC in one 32K tick. Advance by one CPU cycle so less than one
+        // RTC tick remains; CEmu's sched_ticks_remaining uses div_ceil.
+        sched.set(EventId::Rtc, 1);
+        sched.advance(1);
+
+        assert_eq!(sched.ticks_remaining(EventId::Rtc), 1);
     }
 
     #[test]
