@@ -1452,8 +1452,8 @@ impl Emu {
                     // Process RTC event using 3-state machine (TICK/LATCH/LOAD_LATCH)
                     let (next_delay, raise_interrupt) = self.bus.ports.rtc.process_event();
                     if raise_interrupt {
-                        // TODO: Wire RTC interrupt to interrupt controller
-                        // CEmu: intrpt_set(INT_RTC, true) — INT_RTC is a dedicated line
+                        self.bus.ports.interrupt.raise(sources::RTC);
+                        self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
                     }
                     // Schedule next RTC event
                     self.scheduler.repeat(EventId::Rtc, next_delay);

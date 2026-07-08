@@ -303,7 +303,12 @@ impl Peripherals {
 
             // RTC Controller (0xF80000 - 0xF800FF)
             a if a >= RTC_BASE && a < RTC_END => {
-                self.rtc.write(a - RTC_BASE, value, current_cycles, cpu_speed)
+                self.rtc.write(a - RTC_BASE, value, current_cycles, cpu_speed);
+                if self.rtc.has_interrupt() {
+                    self.interrupt.raise(sources::RTC);
+                } else {
+                    self.interrupt.clear_raw(sources::RTC);
+                }
             }
 
             // Backlight Controller (0xFB0000 - 0xFB00FF)
@@ -929,6 +934,28 @@ mod tests {
         // Tick should detect key and raise interrupt
         let pending = p.tick(1, 0);
         assert!(pending);
+    }
+
+    #[test]
+    fn test_rtc_ack_clears_interrupt_line() {
+        let mut p = Peripherals::new();
+
+        // Enable RTC interrupt source (bit 12) in the interrupt controller.
+        p.interrupt.write(0x05, (sources::RTC >> 8) as u8);
+
+        // Enable RTC ticking + second interrupt, then drive LATCH -> TICK.
+        p.rtc.write(0x20, 0x83, 0, 0);
+        p.rtc.process_event();
+        let (_, raise) = p.rtc.process_event();
+        assert!(raise);
+        p.interrupt.raise(sources::RTC);
+        assert!(p.interrupt.irq_pending());
+
+        // Acknowledge all RTC status bits through the MMIO dispatch path.
+        p.write(RTC_BASE + 0x34, 0xFF, 0);
+
+        assert!(!p.rtc.has_interrupt());
+        assert!(!p.interrupt.irq_pending());
     }
 
     /// Helper to process all pending delay tiers and raise timer interrupts

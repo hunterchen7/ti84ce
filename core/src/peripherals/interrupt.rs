@@ -10,6 +10,7 @@
 //! - Bit 4: OS Timer
 //! - Bit 10: Keypad (any key in scan mode)
 //! - Bit 11: LCD (VBLANK)
+//! - Bit 12: RTC
 //! - Bit 15: Power
 //! - Bit 19: Wake (power-on wake signal)
 
@@ -22,6 +23,7 @@ pub mod sources {
     pub const OSTIMER: u32 = 1 << 4;
     pub const KEYPAD: u32 = 1 << 10;
     pub const LCD: u32 = 1 << 11;
+    pub const RTC: u32 = 1 << 12;
     pub const PWR: u32 = 1 << 15;
     pub const WAKE: u32 = 1 << 19;
 }
@@ -217,11 +219,13 @@ impl InterruptController {
         if pending & sources::OSTIMER != 0 { names.push("OST"); }
         if pending & sources::KEYPAD != 0 { names.push("KPD"); }
         if pending & sources::LCD != 0 { names.push("LCD"); }
+        if pending & sources::RTC != 0 { names.push("RTC"); }
         if pending & sources::PWR != 0 { names.push("PWR"); }
         if pending & sources::WAKE != 0 { names.push("WAKE"); }
         // Check for unknown bits
         let known = sources::ON_KEY | sources::TIMER1 | sources::TIMER2 | sources::TIMER3
-            | sources::OSTIMER | sources::KEYPAD | sources::LCD | sources::PWR | sources::WAKE;
+            | sources::OSTIMER | sources::KEYPAD | sources::LCD | sources::RTC | sources::PWR
+            | sources::WAKE;
         let unknown = pending & !known;
         if unknown != 0 {
             names.push("UNK");
