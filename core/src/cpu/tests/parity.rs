@@ -1140,6 +1140,25 @@ fn test_ld_a_mb_parity() {
 }
 
 #[test]
+fn test_dd_ed_cancels_prefix_and_consumes_ed() {
+    let mut cpu = Cpu::new();
+    let mut bus = Bus::new();
+    cpu.adl = true;
+    cpu.mbase = 0xD0;
+
+    // DD ED 6E: ED cancels DD, then ED 6E executes as LD A,MB.
+    bus.poke_byte(0, 0xDD);
+    bus.poke_byte(1, 0xED);
+    bus.poke_byte(2, 0x6E);
+    cpu.init_prefetch(&mut bus);
+
+    cpu.step(&mut bus);
+
+    assert_eq!(cpu.a, 0xD0);
+    assert_eq!(cpu.pc, 3);
+}
+
+#[test]
 fn test_ld_mb_a_parity() {
     // LD MB,A (ED 6D) - Load A into MBASE (only in ADL mode)
     let mut cpu = Cpu::new();

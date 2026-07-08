@@ -546,13 +546,9 @@ impl Cpu {
                         1 => {
                             // DD prefix (IX instructions)
                             // Execute the indexed instruction in the same step (not deferred)
-                            // If next byte is ED, CEmu ignores DD and executes ED in the same step
-                            let next = bus.peek_byte_fetch(self.mask_addr_instr(self.pc));
-                            if next == 0xED {
-                                self.execute_ed(bus)
-                            } else {
-                                self.execute_index(bus, true)
-                            }
+                            // execute_index consumes ED before dispatching, matching CEmu's
+                            // "ED cancels DD/FD" behavior.
+                            self.execute_index(bus, true)
                         }
                         2 => {
                             // ED prefix (extended instructions)
@@ -561,13 +557,9 @@ impl Cpu {
                         3 => {
                             // FD prefix (IY instructions)
                             // Execute the indexed instruction in the same step (not deferred)
-                            // If next byte is ED, CEmu ignores FD and executes ED in the same step
-                            let next = bus.peek_byte_fetch(self.mask_addr_instr(self.pc));
-                            if next == 0xED {
-                                self.execute_ed(bus)
-                            } else {
-                                self.execute_index(bus, false)
-                            }
+                            // execute_index consumes ED before dispatching, matching CEmu's
+                            // "ED cancels DD/FD" behavior.
+                            self.execute_index(bus, false)
                         }
                         _ => 4,
                     }
