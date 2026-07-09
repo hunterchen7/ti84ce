@@ -212,10 +212,14 @@ impl Peripherals {
             a if a >= WATCHDOG_BASE && a < WATCHDOG_END => self.watchdog.read(a - WATCHDOG_BASE),
 
             // RTC Controller (0xF80000 - 0xF800FF)
-            a if a >= RTC_BASE && a < RTC_END => self.rtc.read(a - RTC_BASE, current_cycles, cpu_speed),
+            a if a >= RTC_BASE && a < RTC_END => {
+                self.rtc.read(a - RTC_BASE, current_cycles, cpu_speed)
+            }
 
             // Backlight Controller (0xFB0000 - 0xFB00FF)
-            a if a >= BACKLIGHT_BASE && a < BACKLIGHT_END => self.backlight.read(a - BACKLIGHT_BASE),
+            a if a >= BACKLIGHT_BASE && a < BACKLIGHT_END => {
+                self.backlight.read(a - BACKLIGHT_BASE)
+            }
 
             // Unmapped - return from fallback storage
             _ => {
@@ -234,7 +238,9 @@ impl Peripherals {
 
         match addr {
             // Control Ports (0xE00000 - 0xE000FF)
-            a if a >= CONTROL_BASE && a < CONTROL_END => self.control.write(a - CONTROL_BASE, value),
+            a if a >= CONTROL_BASE && a < CONTROL_END => {
+                self.control.write(a - CONTROL_BASE, value)
+            }
 
             // Flash Controller (0xE10000 - 0xE100FF)
             a if a >= FLASH_BASE && a < FLASH_END => self.flash.write(a - FLASH_BASE, value),
@@ -279,7 +285,10 @@ impl Peripherals {
                 let flag_after = self.keypad.needs_any_key_check;
 
                 if flag_after && !flag_before {
-                    crate::emu::log_evt!("KEYPAD: offset=0x{:02X} set needs_any_key_check flag", offset);
+                    crate::emu::log_evt!(
+                        "KEYPAD: offset=0x{:02X} set needs_any_key_check flag",
+                        offset
+                    );
                 }
 
                 // CEmu calls keypad_any_check() after certain writes (STATUS, SIZE, CONTROL mode 0/1)
@@ -299,7 +308,9 @@ impl Peripherals {
             }
 
             // Watchdog Controller (0xF60000 - 0xF600FF)
-            a if a >= WATCHDOG_BASE && a < WATCHDOG_END => self.watchdog.write(a - WATCHDOG_BASE, value),
+            a if a >= WATCHDOG_BASE && a < WATCHDOG_END => {
+                self.watchdog.write(a - WATCHDOG_BASE, value)
+            }
 
             // RTC Controller (0xF80000 - 0xF800FF)
             a if a >= RTC_BASE && a < RTC_END => {
@@ -380,8 +391,15 @@ impl Peripherals {
     ///   2. sched_repeat(id, ...)                       — reschedule
     ///   3. gpt.osTimerState = !gpt.osTimerState        — toggle state
     fn tick_os_timer(&mut self, cycles: u32) {
-        // Get CPU speed from control port (bits 0-1)
+        // CPU speed (control port 0x01) drives ONLY the 32K-tick -> CPU-cycle conversion.
         let speed = (self.control.read(0x01) & 0x03) as usize;
+        // The OS timer period table is indexed by the power register (control port 0x00),
+        // matching CEmu's ost_ticks[control.ports[0] & 3]. The OST runs on a fixed 32K
+        // clock, so the CPU clock must NOT scale its period. Port 0x00's low bits normally
+        // stay 0, so this resolves to OS_TIMER_TICKS[0]=73 regardless of CPU speed (whereas
+        // indexing by CPU speed made INT_OSTIMER fire ~2-4x too slow once the OS boosts the
+        // clock to 12/24/48 MHz).
+        let ost_index = (self.control.read(0x00) & 0x03) as usize;
 
         // CPU clock rates: 6MHz, 12MHz, 24MHz, 48MHz
         let cpu_clock: u64 = match speed {
@@ -404,7 +422,7 @@ impl Peripherals {
             let ticks_needed = if self.os_timer_state {
                 1u64
             } else {
-                Self::OS_TIMER_TICKS[speed] as u64
+                Self::OS_TIMER_TICKS[ost_index] as u64
             };
             let cycles_needed = ticks_needed * cycles_per_32k_tick;
 
@@ -444,73 +462,119 @@ impl Peripherals {
         let mut pos = 0;
 
         // Control ports - essential registers (32 bytes)
-        buf[pos] = self.control.read(0x00); pos += 1;  // power
-        buf[pos] = self.control.read(0x01); pos += 1;  // cpu_speed
-        buf[pos] = self.control.read(0x03); pos += 1;  // device_type
-        buf[pos] = self.control.read(0x05); pos += 1;  // control_flags
-        buf[pos] = self.control.read(0x06); pos += 1;  // unlock_status
-        buf[pos] = self.control.read(0x0D); pos += 1;  // lcd_enable
-        buf[pos] = self.control.read(0x0F); pos += 1;  // usb_control
-        buf[pos] = self.control.read(0x28); pos += 1;  // flash_unlock
-        // Privileged boundary (3 bytes at 0x1D-0x1F)
-        buf[pos] = self.control.read(0x1D); pos += 1;
-        buf[pos] = self.control.read(0x1E); pos += 1;
-        buf[pos] = self.control.read(0x1F); pos += 1;
+        buf[pos] = self.control.read(0x00);
+        pos += 1; // power
+        buf[pos] = self.control.read(0x01);
+        pos += 1; // cpu_speed
+        buf[pos] = self.control.read(0x03);
+        pos += 1; // device_type
+        buf[pos] = self.control.read(0x05);
+        pos += 1; // control_flags
+        buf[pos] = self.control.read(0x06);
+        pos += 1; // unlock_status
+        buf[pos] = self.control.read(0x0D);
+        pos += 1; // lcd_enable
+        buf[pos] = self.control.read(0x0F);
+        pos += 1; // usb_control
+        buf[pos] = self.control.read(0x28);
+        pos += 1; // flash_unlock
+                  // Privileged boundary (3 bytes at 0x1D-0x1F)
+        buf[pos] = self.control.read(0x1D);
+        pos += 1;
+        buf[pos] = self.control.read(0x1E);
+        pos += 1;
+        buf[pos] = self.control.read(0x1F);
+        pos += 1;
         // Protected port boundaries (6 bytes at 0x20-0x25)
-        buf[pos] = self.control.read(0x20); pos += 1;
-        buf[pos] = self.control.read(0x21); pos += 1;
-        buf[pos] = self.control.read(0x22); pos += 1;
-        buf[pos] = self.control.read(0x23); pos += 1;
-        buf[pos] = self.control.read(0x24); pos += 1;
-        buf[pos] = self.control.read(0x25); pos += 1;
+        buf[pos] = self.control.read(0x20);
+        pos += 1;
+        buf[pos] = self.control.read(0x21);
+        pos += 1;
+        buf[pos] = self.control.read(0x22);
+        pos += 1;
+        buf[pos] = self.control.read(0x23);
+        pos += 1;
+        buf[pos] = self.control.read(0x24);
+        pos += 1;
+        buf[pos] = self.control.read(0x25);
+        pos += 1;
         // Stack limit (3 bytes at 0x3A-0x3C)
-        buf[pos] = self.control.read(0x3A); pos += 1;
-        buf[pos] = self.control.read(0x3B); pos += 1;
-        buf[pos] = self.control.read(0x3C); pos += 1;
+        buf[pos] = self.control.read(0x3A);
+        pos += 1;
+        buf[pos] = self.control.read(0x3B);
+        pos += 1;
+        buf[pos] = self.control.read(0x3C);
+        pos += 1;
         // Protection status (0x3D) + off flag
-        buf[pos] = self.control.read(0x3D); pos += 1;
-        buf[pos] = if self.control.is_off() { 1 } else { 0 }; pos += 1;
+        buf[pos] = self.control.read(0x3D);
+        pos += 1;
+        buf[pos] = if self.control.is_off() { 1 } else { 0 };
+        pos += 1;
         pos += 10; // Padding to 32 bytes
 
         // Flash controller (8 bytes)
-        buf[pos] = self.flash.read(0x00); pos += 1;  // enabled
-        buf[pos] = self.flash.read(0x01); pos += 1;  // size_config
-        buf[pos] = self.flash.read(0x02); pos += 1;  // map_select
-        buf[pos] = self.flash.read(0x05); pos += 1;  // wait_states
+        buf[pos] = self.flash.read(0x00);
+        pos += 1; // enabled
+        buf[pos] = self.flash.read(0x01);
+        pos += 1; // size_config
+        buf[pos] = self.flash.read(0x02);
+        pos += 1; // map_select
+        buf[pos] = self.flash.read(0x05);
+        pos += 1; // wait_states
         pos += 4; // Padding to 8 bytes
 
         // Interrupt controller (32 bytes)
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.status_word(0).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.status_word(1).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.enabled_word(0).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.enabled_word(1).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.latched_word(0).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.latched_word(1).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.inverted_word(0).to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.interrupt.inverted_word(1).to_le_bytes()); pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.status_word(0).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.status_word(1).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.enabled_word(0).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.enabled_word(1).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.latched_word(0).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.latched_word(1).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.inverted_word(0).to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.interrupt.inverted_word(1).to_le_bytes());
+        pos += 4;
 
         // Timers (3 × 24 bytes = 72 bytes)
         for i in 0..3 {
-            buf[pos..pos+4].copy_from_slice(&self.timers.counter(i).to_le_bytes()); pos += 4;
-            buf[pos..pos+4].copy_from_slice(&self.timers.reset_value(i).to_le_bytes()); pos += 4;
-            buf[pos..pos+4].copy_from_slice(&self.timers.match_val(i, 0).to_le_bytes()); pos += 4;
-            buf[pos..pos+4].copy_from_slice(&self.timers.match_val(i, 1).to_le_bytes()); pos += 4;
-            buf[pos..pos+4].copy_from_slice(&self.timers.accum_cycles(i).to_le_bytes()); pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&self.timers.counter(i).to_le_bytes());
+            pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&self.timers.reset_value(i).to_le_bytes());
+            pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&self.timers.match_val(i, 0).to_le_bytes());
+            pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&self.timers.match_val(i, 1).to_le_bytes());
+            pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&self.timers.accum_cycles(i).to_le_bytes());
+            pos += 4;
             pos += 4; // Padding to 24 bytes
         }
 
         // LCD controller (24 bytes)
-        buf[pos..pos+4].copy_from_slice(&self.lcd.control().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.upbase().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.int_mask().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.int_status().to_le_bytes()); pos += 4;
-        buf[pos] = self.lcd.compare_state(); pos += 1;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.control().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.upbase().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.int_mask().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.int_status().to_le_bytes());
+        pos += 4;
+        buf[pos] = self.lcd.compare_state();
+        pos += 1;
         pos += 7; // Padding to 24 bytes
 
         // OS Timer state (16 bytes)
-        buf[pos] = if self.os_timer_state { 1 } else { 0 }; pos += 1;
+        buf[pos] = if self.os_timer_state { 1 } else { 0 };
+        pos += 1;
         pos += 7; // Align to 8 bytes
-        buf[pos..pos+8].copy_from_slice(&self.os_timer_cycles.to_le_bytes()); pos += 8;
+        buf[pos..pos + 8].copy_from_slice(&self.os_timer_cycles.to_le_bytes());
+        pos += 8;
 
         // Key state as bit-packed (8 bytes - 64 bits for 8x8 matrix)
         for row in 0..KEYPAD_ROWS {
@@ -529,35 +593,47 @@ impl Peripherals {
         // causing ~100x faster refresh cycles and massive CPU overhead.
         let timing = self.lcd.timing();
         for t in &timing {
-            buf[pos..pos+4].copy_from_slice(&t.to_le_bytes()); pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&t.to_le_bytes());
+            pos += 4;
         }
-        buf[pos..pos+4].copy_from_slice(&self.lcd.upcurr().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.cur_row().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.lcd.cur_col().to_le_bytes()); pos += 4;
-        buf[pos] = if self.lcd.prefill() { 1 } else { 0 }; pos += 1;
-        buf[pos] = self.lcd.pos(); pos += 1;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.upcurr().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.cur_row().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.lcd.cur_col().to_le_bytes());
+        pos += 4;
+        buf[pos] = if self.lcd.prefill() { 1 } else { 0 };
+        pos += 1;
+        buf[pos] = self.lcd.pos();
+        pos += 1;
         pos += 2; // Padding to 32 bytes
 
         // Timer control/status/mask words (12 bytes)
-        buf[pos..pos+4].copy_from_slice(&self.timers.control_word().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timers.status_word().to_le_bytes()); pos += 4;
-        buf[pos..pos+4].copy_from_slice(&self.timers.mask_word().to_le_bytes()); pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.timers.control_word().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.timers.status_word().to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.timers.mask_word().to_le_bytes());
+        pos += 4;
 
         // LCD palette (1024 bytes: 512 bgr565 + 512 rgb565)
         for &val in self.lcd.palette_bgr565() {
-            buf[pos..pos+2].copy_from_slice(&val.to_le_bytes()); pos += 2;
+            buf[pos..pos + 2].copy_from_slice(&val.to_le_bytes());
+            pos += 2;
         }
         for &val in self.lcd.palette_rgb565() {
-            buf[pos..pos+2].copy_from_slice(&val.to_le_bytes()); pos += 2;
+            buf[pos..pos + 2].copy_from_slice(&val.to_le_bytes());
+            pos += 2;
         }
 
         // Cursor image (1024 bytes)
-        buf[pos..pos+1024].copy_from_slice(self.lcd.cursor_image());
+        buf[pos..pos + 1024].copy_from_slice(self.lcd.cursor_image());
         pos += 1024;
 
         // Cursor registers (20 bytes: 5 × u32)
         for &val in self.lcd.crsr_registers().iter() {
-            buf[pos..pos+4].copy_from_slice(&val.to_le_bytes()); pos += 4;
+            buf[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
+            pos += 4;
         }
 
         let _ = pos; // suppress unused warning
@@ -573,14 +649,22 @@ impl Peripherals {
         let mut pos = 0;
 
         // Control ports
-        self.control.write(0x00, buf[pos]); pos += 1;
-        self.control.write(0x01, buf[pos]); pos += 1;
-        self.control.write(0x03, buf[pos]); pos += 1;
-        self.control.write(0x05, buf[pos]); pos += 1;
-        self.control.write(0x06, buf[pos]); pos += 1;
-        self.control.write(0x0D, buf[pos]); pos += 1;
-        self.control.write(0x0F, buf[pos]); pos += 1;
-        self.control.write(0x28, buf[pos]); pos += 1;
+        self.control.write(0x00, buf[pos]);
+        pos += 1;
+        self.control.write(0x01, buf[pos]);
+        pos += 1;
+        self.control.write(0x03, buf[pos]);
+        pos += 1;
+        self.control.write(0x05, buf[pos]);
+        pos += 1;
+        self.control.write(0x06, buf[pos]);
+        pos += 1;
+        self.control.write(0x0D, buf[pos]);
+        pos += 1;
+        self.control.write(0x0F, buf[pos]);
+        pos += 1;
+        self.control.write(0x28, buf[pos]);
+        pos += 1;
         // Skip restoring memory protection registers (privileged boundary,
         // protected range, stack limit, protection status). Leave them at
         // defaults: privileged=0 (all code privileged), protected range empty,
@@ -592,48 +676,96 @@ impl Peripherals {
         pos += 6; // protected range (0x20-0x25)
         pos += 3; // stack limit (0x3A-0x3C)
         pos += 1; // protection status (0x3D)
-        self.control.set_off(buf[pos] != 0); pos += 1;
+        self.control.set_off(buf[pos] != 0);
+        pos += 1;
         pos += 10;
 
         // Flash controller
-        self.flash.write(0x00, buf[pos]); pos += 1;
-        self.flash.write(0x01, buf[pos]); pos += 1;
-        self.flash.write(0x02, buf[pos]); pos += 1;
-        self.flash.write(0x05, buf[pos]); pos += 1;
+        self.flash.write(0x00, buf[pos]);
+        pos += 1;
+        self.flash.write(0x01, buf[pos]);
+        pos += 1;
+        self.flash.write(0x02, buf[pos]);
+        pos += 1;
+        self.flash.write(0x05, buf[pos]);
+        pos += 1;
         pos += 4;
 
         // Interrupt controller
-        self.interrupt.set_status_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_status_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_enabled_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_enabled_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_latched_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_latched_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_inverted_word(0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.interrupt.set_inverted_word(1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.interrupt
+            .set_status_word(0, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_status_word(1, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_enabled_word(0, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_enabled_word(1, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_latched_word(0, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_latched_word(1, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_inverted_word(0, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.interrupt
+            .set_inverted_word(1, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
 
         // Timers (3 × 24 bytes)
         for i in 0..3 {
-            self.timers.set_counter(i, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-            self.timers.set_reset_value(i, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-            self.timers.set_match_val(i, 0, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-            self.timers.set_match_val(i, 1, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-            self.timers.set_accum_cycles(i, u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+            self.timers
+                .set_counter(i, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+            self.timers
+                .set_reset_value(i, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
+            self.timers.set_match_val(
+                i,
+                0,
+                u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()),
+            );
+            pos += 4;
+            self.timers.set_match_val(
+                i,
+                1,
+                u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()),
+            );
+            pos += 4;
+            self.timers
+                .set_accum_cycles(i, u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+            pos += 4;
             pos += 4; // Padding
         }
 
         // LCD controller
-        self.lcd.set_control(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_upbase(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_int_mask(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_int_status(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_compare_state(buf[pos]); pos += 1;
+        self.lcd
+            .set_control(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd
+            .set_upbase(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd
+            .set_int_mask(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd
+            .set_int_status(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd.set_compare_state(buf[pos]);
+        pos += 1;
         pos += 7;
 
         // OS Timer state
-        self.os_timer_state = buf[pos] != 0; pos += 1;
+        self.os_timer_state = buf[pos] != 0;
+        pos += 1;
         pos += 7;
-        self.os_timer_cycles = u64::from_le_bytes(buf[pos..pos+8].try_into().unwrap()); pos += 8;
+        self.os_timer_cycles = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
+        pos += 8;
 
         // Key state
         for row in 0..KEYPAD_ROWS {
@@ -647,34 +779,51 @@ impl Peripherals {
         // LCD DMA state (32 bytes) — timing registers + DMA progress
         let mut timing = [0u32; 4];
         for t in &mut timing {
-            *t = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos += 4;
+            *t = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+            pos += 4;
         }
         self.lcd.set_timing(timing);
-        self.lcd.set_upcurr(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_cur_row(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_cur_col(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.lcd.set_prefill(buf[pos] != 0); pos += 1;
-        self.lcd.set_pos(buf[pos]); pos += 1;
+        self.lcd
+            .set_upcurr(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd
+            .set_cur_row(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd
+            .set_cur_col(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.lcd.set_prefill(buf[pos] != 0);
+        pos += 1;
+        self.lcd.set_pos(buf[pos]);
+        pos += 1;
         pos += 2; // Skip padding
 
         // Re-derive timing parameters from restored timing registers
         self.lcd.recompute_timing();
 
         // Timer control/status/mask words (12 bytes)
-        self.timers.set_control_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timers.set_status_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
-        self.timers.set_mask_word(u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap())); pos += 4;
+        self.timers
+            .set_control_word(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.timers
+            .set_status_word(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
+        self.timers
+            .set_mask_word(u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()));
+        pos += 4;
 
         // LCD palette (1024 bytes: 512 bgr565 + 512 rgb565)
         let mut palette_bgr = [0u16; 256];
         for val in &mut palette_bgr {
-            *val = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos += 2;
+            *val = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap());
+            pos += 2;
         }
         self.lcd.set_palette_bgr565(&palette_bgr);
 
         let mut palette_rgb = [0u16; 256];
         for val in &mut palette_rgb {
-            *val = u16::from_le_bytes(buf[pos..pos+2].try_into().unwrap()); pos += 2;
+            *val = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap());
+            pos += 2;
         }
         self.lcd.set_palette_rgb565(&palette_rgb);
 
@@ -686,14 +835,15 @@ impl Peripherals {
 
         // Cursor image (1024 bytes)
         let mut cursor_img = [0u8; 1024];
-        cursor_img.copy_from_slice(&buf[pos..pos+1024]);
+        cursor_img.copy_from_slice(&buf[pos..pos + 1024]);
         self.lcd.set_cursor_image(&cursor_img);
         pos += 1024;
 
         // Cursor registers (20 bytes: 5 × u32)
         let mut crsr_regs = [0u32; 5];
         for val in &mut crsr_regs {
-            *val = u32::from_le_bytes(buf[pos..pos+4].try_into().unwrap()); pos += 4;
+            *val = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+            pos += 4;
         }
         self.lcd.set_crsr_registers(&crsr_regs);
 
@@ -880,7 +1030,7 @@ mod tests {
         // Write low byte: 0x05 (enable + overflow), then high byte with bit 9 (count up)
         p.write_test(TIMER_BASE + 0x30, 0x05); // Timer 0: enable + overflow
         p.write_test(TIMER_BASE + 0x31, 0x02); // bit 9 = count up (bit 1 of byte 1)
-        // Set timer mask to trigger on overflow (bit 2 = timer 0 overflow)
+                                               // Set timer mask to trigger on overflow (bit 2 = timer 0 overflow)
         p.write_test(TIMER_BASE + 0x38, 0x04);
         // Set counter to max via write API
         p.write_test(TIMER_BASE, 0xFF);
@@ -1048,7 +1198,7 @@ mod tests {
         p.write_test(TIMER_BASE + 0x30, 0x05); // enable + overflow
         p.write_test(TIMER_BASE + 0x31, 0x02); // bit 9 = count up
         p.write_test(TIMER_BASE + 0x38, 0x04); // mask overflow bit
-        // Set counter to max
+                                               // Set counter to max
         p.write_test(TIMER_BASE, 0xFF);
         p.write_test(TIMER_BASE + 1, 0xFF);
         p.write_test(TIMER_BASE + 2, 0xFF);

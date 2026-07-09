@@ -20,8 +20,8 @@ const RTC_DATETIME_BITS: u8 = RTC_TIME_BITS + 16; // 40 bits
 const RTC_DATETIME_MASK: u64 = (1u64 << RTC_DATETIME_BITS) - 1;
 
 /// Load status gets set 1 tick after each load completes (from CEmu)
-const LOAD_SEC_FINISHED: u8 = 1 + 8;      // 9 ticks for seconds
-const LOAD_MIN_FINISHED: u8 = LOAD_SEC_FINISHED + 8;  // 17 ticks for minutes
+const LOAD_SEC_FINISHED: u8 = 1 + 8; // 9 ticks for seconds
+const LOAD_MIN_FINISHED: u8 = LOAD_SEC_FINISHED + 8; // 17 ticks for minutes
 const LOAD_HOUR_FINISHED: u8 = LOAD_MIN_FINISHED + 8; // 25 ticks for hours
 const LOAD_DAY_FINISHED: u8 = LOAD_HOUR_FINISHED + 16; // 41 ticks for day
 /// Total ticks needed to complete a full load
@@ -87,13 +87,6 @@ struct RtcAlarm {
     hour: u8,
 }
 
-impl RtcAlarm {
-    /// Pack into u32 matching CEmu's rtc_time_t: hour[23:16] | min[15:8] | sec[7:0]
-    fn to_value(&self) -> u32 {
-        (self.hour as u32) << 16 | (self.min as u32) << 8 | (self.sec as u32)
-    }
-}
-
 /// RTC Controller
 #[derive(Debug, Clone)]
 pub struct RtcController {
@@ -126,7 +119,7 @@ impl RtcController {
             control: 0,
             interrupt: 0,
             load_ticks_processed: LOAD_TOTAL_TICKS, // Load complete initially
-            mode: RtcMode::Latch, // CEmu: rtc.mode = RTC_LATCH after reset
+            mode: RtcMode::Latch,                   // CEmu: rtc.mode = RTC_LATCH after reset
             counter: RtcDatetime::default(),
             latched: RtcDatetime::default(),
             load: RtcDatetime::default(),
@@ -161,7 +154,8 @@ impl RtcController {
         let write_mask = (RTC_DATETIME_MASK >> start_tick) & !(RTC_DATETIME_MASK >> effective_end);
         let counter_val = self.counter.to_value();
         let load_val = self.load.to_value();
-        self.counter = RtcDatetime::from_value((counter_val & !write_mask) | (load_val & write_mask));
+        self.counter =
+            RtcDatetime::from_value((counter_val & !write_mask) | (load_val & write_mask));
     }
 
     /// Read a register byte
@@ -206,9 +200,9 @@ impl RtcController {
                     0
                 } else {
                     8 | ((ticks < LOAD_SEC_FINISHED as i8) as u8) << 4
-                      | ((ticks < LOAD_MIN_FINISHED as i8) as u8) << 5
-                      | ((ticks < LOAD_HOUR_FINISHED as i8) as u8) << 6
-                      | ((ticks < LOAD_DAY_FINISHED as i8) as u8) << 7
+                        | ((ticks < LOAD_MIN_FINISHED as i8) as u8) << 5
+                        | ((ticks < LOAD_HOUR_FINISHED as i8) as u8) << 6
+                        | ((ticks < LOAD_DAY_FINISHED as i8) as u8) << 7
                 }
             }
 
@@ -334,10 +328,17 @@ impl RtcController {
                         self.counter.sec = 0;
                     }
 
-                    // Check alarm match
-                    // CEmu: counter.value >> (RTC_DATETIME_BITS - RTC_TIME_BITS) == alarm.value
-                    let counter_time = (self.counter.to_value() >> (RTC_DATETIME_BITS - RTC_TIME_BITS)) as u32;
-                    if counter_time == self.alarm.to_value() {
+                    // Check alarm match on the time fields (hour:min:sec).
+                    // CEmu compares counter.value >> 16 == alarm.value, which relies on
+                    // CEmu's day-in-low-bits bitfield layout. Our RtcDatetime/RtcAlarm
+                    // pack the bytes in the mirror order (day in the HIGH bits), so copying
+                    // the >>16 shift made counter_time == (day<<8)|hour, which can never
+                    // equal an alarm of (hour<<16)|(min<<8)|sec — the alarm IRQ never fired.
+                    // Compare the fields directly; this is packing-independent.
+                    if self.counter.hour == self.alarm.hour
+                        && self.counter.min == self.alarm.min
+                        && self.counter.sec == self.alarm.sec
+                    {
                         interrupts |= 16;
                     }
 
@@ -399,8 +400,7 @@ impl RtcController {
 
     /// Check if more scheduler ticks are needed for the current load
     pub fn needs_more_ticks(&self) -> bool {
-        self.load_ticks_processed != LOAD_PENDING
-            && self.load_ticks_processed < LOAD_TOTAL_TICKS
+        self.load_ticks_processed != LOAD_PENDING && self.load_ticks_processed < LOAD_TOTAL_TICKS
     }
 
     /// Mark the load as started (called when scheduler event is first set)
@@ -666,8 +666,17 @@ mod tests {
 
         let combined: u32 = 30 | (15 << 6) | (8 << 12) | (100 << 17);
         assert_eq!(rtc.read(0x44, 0, CPU_SPEED_48MHZ), (combined & 0xFF) as u8);
-        assert_eq!(rtc.read(0x45, 0, CPU_SPEED_48MHZ), ((combined >> 8) & 0xFF) as u8);
-        assert_eq!(rtc.read(0x46, 0, CPU_SPEED_48MHZ), ((combined >> 16) & 0xFF) as u8);
-        assert_eq!(rtc.read(0x47, 0, CPU_SPEED_48MHZ), ((combined >> 24) & 0xFF) as u8);
+        assert_eq!(
+            rtc.read(0x45, 0, CPU_SPEED_48MHZ),
+            ((combined >> 8) & 0xFF) as u8
+        );
+        assert_eq!(
+            rtc.read(0x46, 0, CPU_SPEED_48MHZ),
+            ((combined >> 16) & 0xFF) as u8
+        );
+        assert_eq!(
+            rtc.read(0x47, 0, CPU_SPEED_48MHZ),
+            ((combined >> 24) & 0xFF) as u8
+        );
     }
 }

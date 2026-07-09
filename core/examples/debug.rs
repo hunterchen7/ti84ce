@@ -21,7 +21,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use emu_core::{Emu, StepInfo, IoTarget, IoOpType, disassemble};
+use emu_core::{disassemble, Emu, IoOpType, IoTarget, StepInfo};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -88,7 +88,9 @@ fn main() {
         }
         "runprog" => {
             if args.len() < 3 {
-                eprintln!("Usage: debug runprog <file.8xp> [lib1.8xv lib2.8xv ...] [--run-cycles N]");
+                eprintln!(
+                    "Usage: debug runprog <file.8xp> [lib1.8xv lib2.8xv ...] [--run-cycles N]"
+                );
                 return;
             }
             // Parse --run-cycles if provided, default to 100M
@@ -110,11 +112,13 @@ fn main() {
         }
         "run" => {
             if args.len() < 3 {
-                eprintln!("Usage: debug run <file.8xp> [lib1.8xv ...] [--timeout <secs>] [--speed <multiplier>]");
+                eprintln!("Usage: debug run <file.8xp> [lib1.8xv ...] [--timeout <secs>] [--speed <multiplier>] [--rom <path>]");
                 return;
             }
             let mut timeout_secs = 30u64;
             let mut speed: Option<f64> = None;
+            let mut rom_override: Option<String> = None;
+            let mut inject_keys = false;
             let mut file_args: Vec<&str> = Vec::new();
             let mut i = 2;
             while i < args.len() {
@@ -128,12 +132,26 @@ fn main() {
                         speed = Some(val);
                     }
                     i += 2;
+                } else if args[i] == "--rom" {
+                    if let Some(val) = args.get(i + 1) {
+                        rom_override = Some(val.clone());
+                    }
+                    i += 2;
+                } else if args[i] == "--keys" {
+                    inject_keys = true;
+                    i += 1;
                 } else {
                     file_args.push(&args[i]);
                     i += 1;
                 }
             }
-            cmd_run(&file_args, timeout_secs, speed);
+            cmd_run(
+                &file_args,
+                timeout_secs,
+                speed,
+                rom_override.as_deref(),
+                inject_keys,
+            );
         }
         "diagchk" => {
             if args.len() < 3 {
@@ -144,8 +162,12 @@ fn main() {
             cmd_diagchk(&file_refs);
         }
         "disasm" => {
-            let addr = args.get(2)
-                .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+            let addr = args
+                .get(2)
+                .and_then(|s| {
+                    u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                        .ok()
+                })
                 .unwrap_or(0x2050C);
             let count = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(40usize);
             cmd_disasm(addr, count);
@@ -246,7 +268,11 @@ fn load_rom() -> Option<Vec<u8>> {
     for path in &rom_paths {
         if Path::new(path).exists() {
             if let Ok(data) = fs::read(path) {
-                eprintln!("Loaded ROM from: {} ({:.2} MB)", path, data.len() as f64 / 1024.0 / 1024.0);
+                eprintln!(
+                    "Loaded ROM from: {} ({:.2} MB)",
+                    path,
+                    data.len() as f64 / 1024.0 / 1024.0
+                );
                 return Some(data);
             }
         }
@@ -258,7 +284,9 @@ fn load_rom() -> Option<Vec<u8>> {
 fn create_emu() -> Option<Emu> {
     // Check environment variable for flash mode
     // Default is parallel flash (Bus::new() default), set SERIAL_FLASH=1 for serial flash
-    let serial_flash = std::env::var("SERIAL_FLASH").map(|v| v == "1").unwrap_or(false);
+    let serial_flash = std::env::var("SERIAL_FLASH")
+        .map(|v| v == "1")
+        .unwrap_or(false);
     create_emu_with_serial_flash(serial_flash)
 }
 
@@ -299,7 +327,6 @@ fn cmd_boot() {
         total_executed += executed as u64;
 
         let pc = emu.pc();
-
 
         // Progress every 10M cycles
         if total_executed % 10_000_000 < chunk_size as u64 {
@@ -360,7 +387,11 @@ fn cmd_boot() {
     // LCD state
     let lcd = emu.lcd_snapshot();
     println!("\n=== LCD State ===");
-    println!("Control: 0x{:08X} (enabled={})", lcd.control, (lcd.control & 1) != 0);
+    println!(
+        "Control: 0x{:08X} (enabled={})",
+        lcd.control,
+        (lcd.control & 1) != 0
+    );
     println!("VRAM base: 0x{:06X}", lcd.upbase);
 
     // Screen analysis
@@ -407,18 +438,27 @@ fn cmd_trace(max_steps: u64) {
         // Debug: print detailed info for early steps
         if step_count < 10 {
             let pc_after = emu.pc();
-            eprintln!("Step {}: PC {:06X} -> {:06X}, cycles {} (delta {})",
-                     step_count, step_info.pc, pc_after, step_info.total_cycles, step_info.cycles);
+            eprintln!(
+                "Step {}: PC {:06X} -> {:06X}, cycles {} (delta {})",
+                step_count, step_info.pc, pc_after, step_info.total_cycles, step_info.cycles
+            );
         }
 
         step_count += 1;
 
         if step_count % 100_000 == 0 {
-            eprintln!("Progress: {} steps ({:.1}%)", step_count, 100.0 * step_count as f64 / max_steps as f64);
+            eprintln!(
+                "Progress: {} steps ({:.1}%)",
+                step_count,
+                100.0 * step_count as f64 / max_steps as f64
+            );
         }
 
         if emu.is_halted() {
-            eprintln!("HALT at step {} / cycle {}", step_count, step_info.total_cycles);
+            eprintln!(
+                "HALT at step {} / cycle {}",
+                step_count, step_info.total_cycles
+            );
             break;
         }
     }
@@ -484,11 +524,18 @@ fn cmd_fulltrace(max_steps: u64) {
         prev_step = Some(step_info.clone());
 
         if step_count % 10_000 == 0 {
-            eprintln!("Progress: {} steps ({:.1}%)", step_count, 100.0 * step_count as f64 / max_steps as f64);
+            eprintln!(
+                "Progress: {} steps ({:.1}%)",
+                step_count,
+                100.0 * step_count as f64 / max_steps as f64
+            );
         }
 
         if emu.is_halted() {
-            eprintln!("HALT at step {} / cycle {}", step_count, step_info.total_cycles);
+            eprintln!(
+                "HALT at step {} / cycle {}",
+                step_count, step_info.total_cycles
+            );
             // Write final step - use current emulator state as post-execution registers
             if let Some(prev) = prev_step.take() {
                 if !first_entry {
@@ -516,7 +563,12 @@ fn cmd_fulltrace(max_steps: u64) {
                     total_cycles: emu.total_cycles(),
                     io_ops: vec![],
                 };
-                write_fulltrace_json_with_post_regs(&mut writer, step_count - 1, &prev, &final_regs);
+                write_fulltrace_json_with_post_regs(
+                    &mut writer,
+                    step_count - 1,
+                    &prev,
+                    &final_regs,
+                );
             }
             break;
         }
@@ -593,7 +645,12 @@ fn write_fulltrace_json_with_post_regs(
     // Opcode info
     write!(writer, "    \"opcode\": {{\n").expect("Failed to write");
     write!(writer, "      \"bytes\": \"{}\",\n", opcode_hex).expect("Failed to write");
-    write!(writer, "      \"mnemonic\": \"{}\"\n", escape_json(&disasm.mnemonic)).expect("Failed to write");
+    write!(
+        writer,
+        "      \"mnemonic\": \"{}\"\n",
+        escape_json(&disasm.mnemonic)
+    )
+    .expect("Failed to write");
     write!(writer, "    }},\n").expect("Failed to write");
 
     // Registers - use CURRENT step's pre-state (which is prev step's post-state)
@@ -632,10 +689,13 @@ fn write_fulltrace_json_with_post_regs(
         write!(writer, "        \"target\": \"{}\",\n", target_str).expect("Failed to write");
         write!(writer, "        \"addr\": \"0x{:06X}\",\n", io_op.addr).expect("Failed to write");
         if matches!(io_op.op_type, IoOpType::Write) {
-            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value).expect("Failed to write");
-            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value)
+                .expect("Failed to write");
+            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value)
+                .expect("Failed to write");
         } else {
-            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value)
+                .expect("Failed to write");
         }
         if i < prev_info.io_ops.len() - 1 {
             write!(writer, "      }},\n").expect("Failed to write");
@@ -676,7 +736,12 @@ fn write_fulltrace_json(writer: &mut BufWriter<File>, step: u64, info: &StepInfo
     // Opcode info
     write!(writer, "    \"opcode\": {{\n").expect("Failed to write");
     write!(writer, "      \"bytes\": \"{}\",\n", opcode_hex).expect("Failed to write");
-    write!(writer, "      \"mnemonic\": \"{}\"\n", escape_json(&disasm.mnemonic)).expect("Failed to write");
+    write!(
+        writer,
+        "      \"mnemonic\": \"{}\"\n",
+        escape_json(&disasm.mnemonic)
+    )
+    .expect("Failed to write");
     write!(writer, "    }},\n").expect("Failed to write");
 
     // Registers before
@@ -715,10 +780,13 @@ fn write_fulltrace_json(writer: &mut BufWriter<File>, step: u64, info: &StepInfo
         write!(writer, "        \"target\": \"{}\",\n", target_str).expect("Failed to write");
         write!(writer, "        \"addr\": \"0x{:06X}\",\n", io_op.addr).expect("Failed to write");
         if matches!(io_op.op_type, IoOpType::Write) {
-            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value).expect("Failed to write");
-            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+            write!(writer, "        \"old\": \"0x{:02X}\",\n", io_op.old_value)
+                .expect("Failed to write");
+            write!(writer, "        \"new\": \"0x{:02X}\"\n", io_op.new_value)
+                .expect("Failed to write");
         } else {
-            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value).expect("Failed to write");
+            write!(writer, "        \"value\": \"0x{:02X}\"\n", io_op.new_value)
+                .expect("Failed to write");
         }
         if i < info.io_ops.len() - 1 {
             write!(writer, "      }},\n").expect("Failed to write");
@@ -736,10 +804,10 @@ fn write_fulltrace_json(writer: &mut BufWriter<File>, step: u64, info: &StepInfo
 /// Escape special characters for JSON string
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\")
-     .replace('"', "\\\"")
-     .replace('\n', "\\n")
-     .replace('\r', "\\r")
-     .replace('\t', "\\t")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
 }
 
 /// Compare two fulltrace JSON files and report divergence
@@ -795,19 +863,41 @@ fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
         }
 
         // Compare registers
-        if ours.a != cemu.a { diffs.push(format!("A: 0x{:02X} vs 0x{:02X}", ours.a, cemu.a)); }
-        if ours.f != cemu.f { diffs.push(format!("F: 0x{:02X} vs 0x{:02X}", ours.f, cemu.f)); }
-        if ours.bc != cemu.bc { diffs.push(format!("BC: 0x{:06X} vs 0x{:06X}", ours.bc, cemu.bc)); }
-        if ours.de != cemu.de { diffs.push(format!("DE: 0x{:06X} vs 0x{:06X}", ours.de, cemu.de)); }
-        if ours.hl != cemu.hl { diffs.push(format!("HL: 0x{:06X} vs 0x{:06X}", ours.hl, cemu.hl)); }
-        if ours.ix != cemu.ix { diffs.push(format!("IX: 0x{:06X} vs 0x{:06X}", ours.ix, cemu.ix)); }
-        if ours.iy != cemu.iy { diffs.push(format!("IY: 0x{:06X} vs 0x{:06X}", ours.iy, cemu.iy)); }
-        if ours.sp != cemu.sp { diffs.push(format!("SP: 0x{:06X} vs 0x{:06X}", ours.sp, cemu.sp)); }
+        if ours.a != cemu.a {
+            diffs.push(format!("A: 0x{:02X} vs 0x{:02X}", ours.a, cemu.a));
+        }
+        if ours.f != cemu.f {
+            diffs.push(format!("F: 0x{:02X} vs 0x{:02X}", ours.f, cemu.f));
+        }
+        if ours.bc != cemu.bc {
+            diffs.push(format!("BC: 0x{:06X} vs 0x{:06X}", ours.bc, cemu.bc));
+        }
+        if ours.de != cemu.de {
+            diffs.push(format!("DE: 0x{:06X} vs 0x{:06X}", ours.de, cemu.de));
+        }
+        if ours.hl != cemu.hl {
+            diffs.push(format!("HL: 0x{:06X} vs 0x{:06X}", ours.hl, cemu.hl));
+        }
+        if ours.ix != cemu.ix {
+            diffs.push(format!("IX: 0x{:06X} vs 0x{:06X}", ours.ix, cemu.ix));
+        }
+        if ours.iy != cemu.iy {
+            diffs.push(format!("IY: 0x{:06X} vs 0x{:06X}", ours.iy, cemu.iy));
+        }
+        if ours.sp != cemu.sp {
+            diffs.push(format!("SP: 0x{:06X} vs 0x{:06X}", ours.sp, cemu.sp));
+        }
 
         // Compare flags
-        if ours.adl != cemu.adl { diffs.push(format!("ADL: {} vs {}", ours.adl, cemu.adl)); }
-        if ours.iff1 != cemu.iff1 { diffs.push(format!("IFF1: {} vs {}", ours.iff1, cemu.iff1)); }
-        if ours.iff2 != cemu.iff2 { diffs.push(format!("IFF2: {} vs {}", ours.iff2, cemu.iff2)); }
+        if ours.adl != cemu.adl {
+            diffs.push(format!("ADL: {} vs {}", ours.adl, cemu.adl));
+        }
+        if ours.iff1 != cemu.iff1 {
+            diffs.push(format!("IFF1: {} vs {}", ours.iff1, cemu.iff1));
+        }
+        if ours.iff2 != cemu.iff2 {
+            diffs.push(format!("IFF2: {} vs {}", ours.iff2, cemu.iff2));
+        }
 
         // Compare cycle count
         if ours.cycle != cemu.cycle {
@@ -816,7 +906,10 @@ fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
 
         // Compare I/O operations count
         if ours.io_ops_count != cemu.io_ops_count {
-            diffs.push(format!("io_ops: {} vs {}", ours.io_ops_count, cemu.io_ops_count));
+            diffs.push(format!(
+                "io_ops: {} vs {}",
+                ours.io_ops_count, cemu.io_ops_count
+            ));
         }
 
         if !diffs.is_empty() {
@@ -851,8 +944,11 @@ fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
     }
 
     if ours_entries.len() != cemu_entries.len() {
-        println!("Warning: Different number of entries ({} vs {})",
-                 ours_entries.len(), cemu_entries.len());
+        println!(
+            "Warning: Different number of entries ({} vs {})",
+            ours_entries.len(),
+            cemu_entries.len()
+        );
     }
 }
 
@@ -968,7 +1064,9 @@ fn extract_json_hex32(line: &str, key: &str) -> Option<u32> {
         return None;
     }
     let rest = line.split(':').nth(1)?;
-    let value = rest.trim().trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    let value = rest
+        .trim()
+        .trim_matches(|c| c == '"' || c == ',' || c == ' ');
     let hex_str = value.trim_start_matches("0x").trim_start_matches("0X");
     u32::from_str_radix(hex_str, 16).ok()
 }
@@ -978,7 +1076,9 @@ fn extract_json_hex8(line: &str, key: &str) -> Option<u8> {
         return None;
     }
     let rest = line.split(':').nth(1)?;
-    let value = rest.trim().trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    let value = rest
+        .trim()
+        .trim_matches(|c| c == '"' || c == ',' || c == ' ');
     let hex_str = value.trim_start_matches("0x").trim_start_matches("0X");
     u8::from_str_radix(hex_str, 16).ok()
 }
@@ -988,7 +1088,9 @@ fn extract_json_string(line: &str, key: &str) -> Option<String> {
         return None;
     }
     let rest = line.split(':').nth(1)?;
-    let value = rest.trim().trim_matches(|c| c == '"' || c == ',' || c == ' ');
+    let value = rest
+        .trim()
+        .trim_matches(|c| c == '"' || c == ',' || c == ' ');
     Some(value.to_string())
 }
 
@@ -1002,8 +1104,14 @@ fn log_step_info_post(writer: &mut BufWriter<File>, step: u64, info: &StepInfo, 
 
     // Format opcode bytes (from pre-execution state)
     let op_str = match info.opcode_len {
-        4 => format!("{:02X}{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]),
-        3 => format!("{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2]),
+        4 => format!(
+            "{:02X}{:02X}{:02X}{:02X}",
+            info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]
+        ),
+        3 => format!(
+            "{:02X}{:02X}{:02X}",
+            info.opcode[0], info.opcode[1], info.opcode[2]
+        ),
         2 => format!("{:02X}{:02X}", info.opcode[0], info.opcode[1]),
         _ => format!("{:02X}", info.opcode[0]),
     };
@@ -1017,14 +1125,24 @@ fn log_step_info_post(writer: &mut BufWriter<File>, step: u64, info: &StepInfo, 
     writeln!(
         writer,
         "{:06} {:08} {:06X} {:06X} {:04X} {:06X} {:06X} {:06X} {:06X} {:06X} {} {} {} {} {} {}",
-        step, cycles_after, info.pc, emu.sp(), af, emu.bc(), emu.de(), emu.hl(), emu.ix(), emu.iy(),
+        step,
+        cycles_after,
+        info.pc,
+        emu.sp(),
+        af,
+        emu.bc(),
+        emu.de(),
+        emu.hl(),
+        emu.ix(),
+        emu.iy(),
         if emu.adl() { 1 } else { 0 },
         if emu.iff1() { 1 } else { 0 },
         if emu.iff2() { 1 } else { 0 },
         im_str,
         if emu.is_halted() { 1 } else { 0 },
         op_str
-    ).expect("Failed to write trace line");
+    )
+    .expect("Failed to write trace line");
 }
 
 /// Log a step using pre-execution state from StepInfo (legacy, for compatibility)
@@ -1034,8 +1152,14 @@ fn log_step_info(writer: &mut BufWriter<File>, step: u64, info: &StepInfo) {
 
     // Format opcode bytes
     let op_str = match info.opcode_len {
-        4 => format!("{:02X}{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]),
-        3 => format!("{:02X}{:02X}{:02X}", info.opcode[0], info.opcode[1], info.opcode[2]),
+        4 => format!(
+            "{:02X}{:02X}{:02X}{:02X}",
+            info.opcode[0], info.opcode[1], info.opcode[2], info.opcode[3]
+        ),
+        3 => format!(
+            "{:02X}{:02X}{:02X}",
+            info.opcode[0], info.opcode[1], info.opcode[2]
+        ),
         2 => format!("{:02X}{:02X}", info.opcode[0], info.opcode[1]),
         _ => format!("{:02X}", info.opcode[0]),
     };
@@ -1048,14 +1172,24 @@ fn log_step_info(writer: &mut BufWriter<File>, step: u64, info: &StepInfo) {
     writeln!(
         writer,
         "{:06} {:08} {:06X} {:06X} {:04X} {:06X} {:06X} {:06X} {:06X} {:06X} {} {} {} {} {} {}",
-        step, cycles_before, info.pc, info.sp, af, info.bc, info.de, info.hl, info.ix, info.iy,
+        step,
+        cycles_before,
+        info.pc,
+        info.sp,
+        af,
+        info.bc,
+        info.de,
+        info.hl,
+        info.ix,
+        info.iy,
         if info.adl { 1 } else { 0 },
         if info.iff1 { 1 } else { 0 },
         if info.iff2 { 1 } else { 0 },
         im_str,
         if info.halted { 1 } else { 0 },
         op_str
-    ).expect("Failed to write trace line");
+    )
+    .expect("Failed to write trace line");
 }
 
 /// Legacy log function for compatibility (uses current emu state)
@@ -1097,14 +1231,24 @@ fn log_trace_line(writer: &mut BufWriter<File>, emu: &mut Emu, step: u64, cycles
     writeln!(
         writer,
         "{:06} {:08} {:06X} {:06X} {:04X} {:06X} {:06X} {:06X} {:06X} {:06X} {} {} {} {} {} {}",
-        step, cycles, pc, sp, af, bc, de, hl, ix, iy,
+        step,
+        cycles,
+        pc,
+        sp,
+        af,
+        bc,
+        de,
+        hl,
+        ix,
+        iy,
         if adl { 1 } else { 0 },
         if iff1 { 1 } else { 0 },
         if iff2 { 1 } else { 0 },
         im_str,
         if halted { 1 } else { 0 },
         op_str
-    ).expect("Failed to write trace line");
+    )
+    .expect("Failed to write trace line");
 }
 
 // === Calculation Test ===
@@ -1163,7 +1307,7 @@ fn cmd_calc(expr: &str) {
     emu.set_key(6, 0, true);
     emu.run_cycles(500_000);
     emu.set_key(6, 0, false);
-    emu.run_cycles(2_000_000);  // Give time to process
+    emu.run_cycles(2_000_000); // Give time to process
 
     // Helper to show OP1
     fn show_op1(emu: &mut Emu, label: &str) {
@@ -1177,9 +1321,18 @@ fn cmd_calc(expr: &str) {
     show_op1(&mut emu, "after boot");
     let int_status = emu.interrupt_status();
     let int_enabled = emu.interrupt_enabled();
-    println!("  Keypad mode: {}, CPU halted: {}, IFF1: {}", emu.keypad_mode(), emu.is_halted(), emu.iff1());
-    println!("  int_status: 0x{:08X}, int_enabled: 0x{:08X}, pending: 0x{:08X}",
-             int_status, int_enabled, int_status & int_enabled);
+    println!(
+        "  Keypad mode: {}, CPU halted: {}, IFF1: {}",
+        emu.keypad_mode(),
+        emu.is_halted(),
+        emu.iff1()
+    );
+    println!(
+        "  int_status: 0x{:08X}, int_enabled: 0x{:08X}, pending: 0x{:08X}",
+        int_status,
+        int_enabled,
+        int_status & int_enabled
+    );
 
     // Type the expression
     println!("\nTyping expression: {}", expr);
@@ -1187,12 +1340,17 @@ fn cmd_calc(expr: &str) {
         if let Some((row, col)) = char_to_key(c) {
             println!("  Key '{}' -> row={}, col={}", c, row, col);
             emu.set_key(row, col, true);
-            let cycles = emu.run_cycles(500_000);  // ~10ms hold
+            let cycles = emu.run_cycles(500_000); // ~10ms hold
             let int_pending = emu.interrupt_status() & emu.interrupt_enabled();
-            println!("    Executed {} cycles, halted={}, PC=0x{:06X}, int_pending=0x{:08X}",
-                     cycles, emu.is_halted(), emu.pc(), int_pending);
+            println!(
+                "    Executed {} cycles, halted={}, PC=0x{:06X}, int_pending=0x{:08X}",
+                cycles,
+                emu.is_halted(),
+                emu.pc(),
+                int_pending
+            );
             emu.set_key(row, col, false);
-            emu.run_cycles(500_000);  // ~10ms release
+            emu.run_cycles(500_000); // ~10ms release
             show_op1(&mut emu, &format!("after '{}'", c));
         } else {
             eprintln!("  Unknown key: '{}'", c);
@@ -1205,7 +1363,11 @@ fn cmd_calc(expr: &str) {
     // Create trace file
     fs::create_dir_all("../traces").ok();
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let output_path = format!("../traces/calc_{}_{}.log", expr.replace("+", "plus").replace("-", "minus"), timestamp);
+    let output_path = format!(
+        "../traces/calc_{}_{}.log",
+        expr.replace("+", "plus").replace("-", "minus"),
+        timestamp
+    );
     let file = File::create(&output_path).expect("Failed to create trace file");
     let mut writer = BufWriter::new(file);
 
@@ -1235,9 +1397,12 @@ fn cmd_calc(expr: &str) {
     println!("\nTrace saved to: {}", output_path);
 
     // Render and save screen
-    emu.run_cycles(5_000_000);  // Let display update
+    emu.run_cycles(5_000_000); // Let display update
     emu.render_frame();
-    let screen_path = format!("calc_{}_result.ppm", expr.replace("+", "plus").replace("-", "minus"));
+    let screen_path = format!(
+        "calc_{}_result.ppm",
+        expr.replace("+", "plus").replace("-", "minus")
+    );
     save_framebuffer_ppm(&emu, &screen_path);
     println!("Screen saved to: {}", screen_path);
 
@@ -1444,11 +1609,15 @@ fn analyze_framebuffer(emu: &Emu) {
 
     println!(
         "Non-black pixels: {} / {} ({:.1}%)",
-        non_black, total, 100.0 * non_black as f64 / total as f64
+        non_black,
+        total,
+        100.0 * non_black as f64 / total as f64
     );
     println!(
         "White pixels: {} / {} ({:.1}%)",
-        white, total, 100.0 * white as f64 / total as f64
+        white,
+        total,
+        100.0 * white as f64 / total as f64
     );
 }
 
@@ -1543,8 +1712,16 @@ fn cmd_compare(cemu_file: &str) {
 
     println!("\n=== Results ===");
     println!("Lines compared: {}", line_num);
-    println!("PC matches: {} ({:.1}%)", pc_match_count, 100.0 * pc_match_count as f64 / line_num as f64);
-    println!("Full matches: {} ({:.1}%)", full_match_count, 100.0 * full_match_count as f64 / line_num as f64);
+    println!(
+        "PC matches: {} ({:.1}%)",
+        pc_match_count,
+        100.0 * pc_match_count as f64 / line_num as f64
+    );
+    println!(
+        "Full matches: {} ({:.1}%)",
+        full_match_count,
+        100.0 * full_match_count as f64 / line_num as f64
+    );
 
     if let Some((line, ours, cemu)) = first_divergence {
         println!("\n=== First Divergence at Line {} ===", line);
@@ -1595,12 +1772,19 @@ fn cmd_mathprint_trace() {
 
         // Report progress every 10M cycles
         if total_cycles - last_report >= 10_000_000 {
-            println!("  ... {} cycles, {} writes so far", total_cycles, emu.write_trace_total());
+            println!(
+                "  ... {} cycles, {} writes so far",
+                total_cycles,
+                emu.write_trace_total()
+            );
             last_report = total_cycles;
         }
     }
 
-    println!("\nBoot complete: {} cycles, {} steps\n", total_cycles, steps);
+    println!(
+        "\nBoot complete: {} cycles, {} steps\n",
+        total_cycles, steps
+    );
 
     // Get the detailed write log
     let write_log = emu.get_write_log();
@@ -1612,7 +1796,8 @@ fn cmd_mathprint_trace() {
     let backup_addr = 0xD003E6u32;
 
     println!("=== Writes to MathPrint Flag (0xD000C4) ===");
-    let mp_writes: Vec<_> = write_log.iter()
+    let mp_writes: Vec<_> = write_log
+        .iter()
         .filter(|(addr, _, _)| *addr == mathprint_addr)
         .collect();
 
@@ -1620,9 +1805,17 @@ fn cmd_mathprint_trace() {
         println!("NO WRITES to 0xD000C4 during boot!");
     } else {
         for (addr, value, cycle) in &mp_writes {
-            println!("  Cycle {:10}: 0x{:06X} <- 0x{:02X} (bit5={})",
-                cycle, addr, value,
-                if value & 0x20 != 0 { "SET (MathPrint ON)" } else { "CLEAR (Classic)" });
+            println!(
+                "  Cycle {:10}: 0x{:06X} <- 0x{:02X} (bit5={})",
+                cycle,
+                addr,
+                value,
+                if value & 0x20 != 0 {
+                    "SET (MathPrint ON)"
+                } else {
+                    "CLEAR (Classic)"
+                }
+            );
         }
     }
 
@@ -1633,9 +1826,15 @@ fn cmd_mathprint_trace() {
     println!("=== Final Values ===");
     let final_mp = emu.peek_byte(mathprint_addr);
     let final_backup = emu.peek_byte(backup_addr);
-    println!("mathprintFlagsLoc (0xD000C4): 0x{:02X} (bit5={})",
+    println!(
+        "mathprintFlagsLoc (0xD000C4): 0x{:02X} (bit5={})",
         final_mp,
-        if final_mp & 0x20 != 0 { "SET - MathPrint ON" } else { "CLEAR - Classic mode" });
+        if final_mp & 0x20 != 0 {
+            "SET - MathPrint ON"
+        } else {
+            "CLEAR - Classic mode"
+        }
+    );
     println!("mathprintBackup (0xD003E6): 0x{:02X}", final_backup);
 
     // Also show all writes to the flag area
@@ -1650,20 +1849,30 @@ fn cmd_mathprint_trace() {
 
     // Check write count for the specific address
     println!("\n=== Write Counts for Key Addresses ===");
-    println!("0xD000C4: {} writes", emu.address_write_count(mathprint_addr));
+    println!(
+        "0xD000C4: {} writes",
+        emu.address_write_count(mathprint_addr)
+    );
     for offset in 0..16u32 {
         let addr = 0xD000C0 + offset;
         let count = emu.address_write_count(addr);
         if count > 0 {
-            println!("0x{:06X}: {} writes (final value: 0x{:02X})",
-                addr, count, emu.peek_byte(addr));
+            println!(
+                "0x{:06X}: {} writes (final value: 0x{:02X})",
+                addr,
+                count,
+                emu.peek_byte(addr)
+            );
         }
     }
 
     // Check the source of MathPrint value
     let mp_source = 0xD01171u32;
     println!("\n=== MathPrint Source Address ===");
-    println!("0xD01171 (source of MathPrint value): 0x{:02X}", emu.peek_byte(mp_source));
+    println!(
+        "0xD01171 (source of MathPrint value): 0x{:02X}",
+        emu.peek_byte(mp_source)
+    );
     println!("  This value is loaded and written to 0xD000C4 by ROM code at 0x0008AED0");
 
     // Check if there's anything interesting around 0xD01170
@@ -1710,10 +1919,20 @@ fn cmd_ports() {
     // Also show some key memory values that might affect MathPrint
     println!("\n=== Key Memory Values ===");
     let mathprint_flags = emu.peek_byte(0xD000C4);
-    println!("0xD000C4 (mathprintFlags): 0x{:02X} (bit5={} -> {})",
+    println!(
+        "0xD000C4 (mathprintFlags): 0x{:02X} (bit5={} -> {})",
         mathprint_flags,
-        if mathprint_flags & 0x20 != 0 { "SET" } else { "CLEAR" },
-        if mathprint_flags & 0x20 != 0 { "MathPrint" } else { "Classic" });
+        if mathprint_flags & 0x20 != 0 {
+            "SET"
+        } else {
+            "CLEAR"
+        },
+        if mathprint_flags & 0x20 != 0 {
+            "MathPrint"
+        } else {
+            "Classic"
+        }
+    );
 
     let mathprint_backup = emu.peek_byte(0xD003E6);
     println!("0xD003E6 (mathprintBackup): 0x{:02X}", mathprint_backup);
@@ -1856,7 +2075,12 @@ fn cmd_sendfile(files: &[String]) {
     let lcd = emu.lcd_snapshot();
     let bpp_mode = emu.lcd_snapshot().control >> 1 & 0x7;
     println!("\n=== LCD State ===");
-    println!("Control: 0x{:08X} (enabled={}, bpp_mode={})", lcd.control, (lcd.control & 1) != 0, bpp_mode);
+    println!(
+        "Control: 0x{:08X} (enabled={}, bpp_mode={})",
+        lcd.control,
+        (lcd.control & 1) != 0,
+        bpp_mode
+    );
     println!("VRAM base: 0x{:06X}", lcd.upbase);
 
     // Save as PPM
@@ -1911,10 +2135,8 @@ fn cmd_sendfile(files: &[String]) {
         }
         if flag == 0xF0 {
             // Deleted entry — skip using size field
-            let size = u16::from_le_bytes([
-                emu.peek_byte(addr + 1),
-                emu.peek_byte(addr + 2),
-            ]) as u32;
+            let size =
+                u16::from_le_bytes([emu.peek_byte(addr + 1), emu.peek_byte(addr + 2)]) as u32;
             if size > 0 && size < sector_size {
                 deleted += 1;
                 addr += 3 + size;
@@ -1931,10 +2153,7 @@ fn cmd_sendfile(files: &[String]) {
         }
 
         // Valid entry (0xFC) or in-progress (0xFE)
-        let size = u16::from_le_bytes([
-            emu.peek_byte(addr + 1),
-            emu.peek_byte(addr + 2),
-        ]) as u32;
+        let size = u16::from_le_bytes([emu.peek_byte(addr + 1), emu.peek_byte(addr + 2)]) as u32;
         // Read: type1, type2, version, self-addr(3), namelen, name
         let var_type = emu.peek_byte(addr + 3);
         let _type2 = emu.peek_byte(addr + 4);
@@ -1971,7 +2190,10 @@ fn cmd_sendfile(files: &[String]) {
             break;
         }
     }
-    println!("Archive: {} valid, {} deleted, free at 0x{:06X}", found, deleted, addr);
+    println!(
+        "Archive: {} valid, {} deleted, free at 0x{:06X}",
+        found, deleted, addr
+    );
 }
 
 // === Bake ROM Command ===
@@ -2025,9 +2247,16 @@ fn cmd_bakerom(output_path: &str, files: &[String]) {
     let flash = emu.flash_data();
     fs::write(output_path, flash).expect("Failed to write output ROM");
 
-    println!("Wrote {} to: {} ({} bytes)",
-        if total_entries > 0 { "baked ROM" } else { "ROM copy" },
-        output_path, flash.len());
+    println!(
+        "Wrote {} to: {} ({} bytes)",
+        if total_entries > 0 {
+            "baked ROM"
+        } else {
+            "ROM copy"
+        },
+        output_path,
+        flash.len()
+    );
     println!("\nThis ROM can be loaded directly — programs will appear in TI-OS.");
 }
 
@@ -2074,7 +2303,11 @@ fn cmd_watchpoint_mathprint() {
         if new_value != prev_value {
             writes_found.push((total_cycles, pc_before, prev_value, new_value));
 
-            let mode = if new_value & 0x20 != 0 { "MathPrint" } else { "Classic" };
+            let mode = if new_value & 0x20 != 0 {
+                "MathPrint"
+            } else {
+                "Classic"
+            };
             println!("=== WRITE DETECTED ===");
             println!("  Cycle: {}", total_cycles);
             println!("  Step: {}", step_count);
@@ -2084,9 +2317,20 @@ fn cmd_watchpoint_mathprint() {
 
             // Dump registers at time of write
             println!("\n  === Registers ===");
-            println!("  AF={:02X}{:02X} BC={:06X} DE={:06X} HL={:06X}",
-                emu.a(), emu.f(), emu.bc(), emu.de(), emu.hl());
-            println!("  IX={:06X} IY={:06X} SP={:06X}", emu.ix(), emu.iy(), emu.sp());
+            println!(
+                "  AF={:02X}{:02X} BC={:06X} DE={:06X} HL={:06X}",
+                emu.a(),
+                emu.f(),
+                emu.bc(),
+                emu.de(),
+                emu.hl()
+            );
+            println!(
+                "  IX={:06X} IY={:06X} SP={:06X}",
+                emu.ix(),
+                emu.iy(),
+                emu.sp()
+            );
 
             // Read instruction bytes at PC
             print!("  Instruction at PC: ");
@@ -2121,8 +2365,12 @@ fn cmd_watchpoint_mathprint() {
 
         // Progress report every 5M cycles
         if total_cycles - last_report >= 5_000_000 {
-            println!("  ... {} cycles ({} steps), {} writes found so far",
-                total_cycles, step_count, writes_found.len());
+            println!(
+                "  ... {} cycles ({} steps), {} writes found so far",
+                total_cycles,
+                step_count,
+                writes_found.len()
+            );
             last_report = total_cycles;
         }
     }
@@ -2135,17 +2383,29 @@ fn cmd_watchpoint_mathprint() {
     if !writes_found.is_empty() {
         println!("\nAll writes:");
         for (cycle, pc, old, new) in &writes_found {
-            let mode = if new & 0x20 != 0 { "MathPrint" } else { "Classic" };
-            println!("  Cycle {:10} | PC=0x{:06X} | 0x{:02X} -> 0x{:02X} ({})",
-                cycle, pc, old, new, mode);
+            let mode = if new & 0x20 != 0 {
+                "MathPrint"
+            } else {
+                "Classic"
+            };
+            println!(
+                "  Cycle {:10} | PC=0x{:06X} | 0x{:02X} -> 0x{:02X} ({})",
+                cycle, pc, old, new, mode
+            );
         }
     }
 
     // Final state
     let final_value = emu.peek_byte(MATHPRINT_ADDR);
-    println!("\nFinal value at 0xD000C4: 0x{:02X} ({})",
+    println!(
+        "\nFinal value at 0xD000C4: 0x{:02X} ({})",
         final_value,
-        if final_value & 0x20 != 0 { "MathPrint" } else { "Classic" });
+        if final_value & 0x20 != 0 {
+            "MathPrint"
+        } else {
+            "Classic"
+        }
+    );
 }
 
 // === Run DOOM Test ===
@@ -2155,12 +2415,16 @@ fn vram_pixel_count(emu: &mut Emu) -> (u32, u32) {
     let upbase = 0xD40000u32;
     let mut non_white = 0u32;
     let mut black = 0u32;
-    for i in (0..320*240*2).step_by(2) {
+    for i in (0..320 * 240 * 2).step_by(2) {
         let lo = emu.peek_byte(upbase + i as u32);
         let hi = emu.peek_byte(upbase + i as u32 + 1);
         let pixel = (lo as u16) | ((hi as u16) << 8);
-        if pixel != 0xFFFF { non_white += 1; }
-        if pixel == 0x0000 { black += 1; }
+        if pixel != 0xFFFF {
+            non_white += 1;
+        }
+        if pixel == 0x0000 {
+            black += 1;
+        }
     }
     (non_white, black)
 }
@@ -2189,34 +2453,66 @@ fn dump_os_state(emu: &mut Emu, label: &str) {
         | ((emu.peek_byte(0xE30013) as u32) << 24);
 
     println!("  OS state [{}]:", label);
-    println!("    curRow={} curCol={} penCol={} penRow={}", cur_row, cur_col, pen_col, pen_row);
-    println!("    drawFGColor={:04X} drawBGColor={:04X} ({})",
-        fg, bg, if fg == bg { "SAME! invisible text" } else { "ok" });
-    println!("    mathprint_flags={:02X} ({}) LCD_CTRL={:08X} BPP={} UPBASE={:06X}",
-        mathprint, if mathprint & 0x20 != 0 { "MathPrint" } else { "Classic" },
-        lcd_ctrl, bpp, upbase);
+    println!(
+        "    curRow={} curCol={} penCol={} penRow={}",
+        cur_row, cur_col, pen_col, pen_row
+    );
+    println!(
+        "    drawFGColor={:04X} drawBGColor={:04X} ({})",
+        fg,
+        bg,
+        if fg == bg {
+            "SAME! invisible text"
+        } else {
+            "ok"
+        }
+    );
+    println!(
+        "    mathprint_flags={:02X} ({}) LCD_CTRL={:08X} BPP={} UPBASE={:06X}",
+        mathprint,
+        if mathprint & 0x20 != 0 {
+            "MathPrint"
+        } else {
+            "Classic"
+        },
+        lcd_ctrl,
+        bpp,
+        upbase
+    );
 
     // Check plotSScreen for content (0xD52C00, 8400 bytes)
     let mut plot_nonzero = 0u32;
     for i in 0..8400u32 {
-        if emu.peek_byte(0xD52C00 + i) != 0 { plot_nonzero += 1; }
+        if emu.peek_byte(0xD52C00 + i) != 0 {
+            plot_nonzero += 1;
+        }
     }
     println!("    plotSScreen: {} non-zero bytes (of 8400)", plot_nonzero);
 
     // Check a sample of VRAM at row 40 center (where text might be)
     let sample_addr = 0xD40000u32 + 40 * 640 + 160 * 2; // row 40, col 160
     print!("    VRAM@row40,col160: ");
-    for i in 0..8 { print!("{:02X}", emu.peek_byte(sample_addr + i)); }
+    for i in 0..8 {
+        print!("{:02X}", emu.peek_byte(sample_addr + i));
+    }
     println!();
 
     // Check userMem region (D1A881) for program code
     let user_mem = 0xD1A881u32;
     print!("    userMem@{:06X}: ", user_mem);
-    for i in 0..16 { print!("{:02X} ", emu.peek_byte(user_mem + i)); }
+    for i in 0..16 {
+        print!("{:02X} ", emu.peek_byte(user_mem + i));
+    }
     println!();
 }
 
-fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
+fn cmd_run(
+    files: &[&str],
+    timeout_secs: u64,
+    speed: Option<f64>,
+    rom_override: Option<&str>,
+    inject_keys: bool,
+) {
     if files.is_empty() {
         eprintln!("No program file specified.");
         return;
@@ -2229,10 +2525,27 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
         .unwrap_or("UNKNOWN")
         .to_uppercase();
 
-    // Load ROM
-    let rom_data = match load_rom() {
-        Some(data) => data,
-        None => return,
+    // Load ROM (use override if provided, e.g. baked ROM with clibs)
+    let rom_data = if let Some(path) = rom_override {
+        match fs::read(path) {
+            Ok(data) => {
+                eprintln!(
+                    "Loaded ROM from: {} ({:.2} MB)",
+                    path,
+                    data.len() as f64 / 1024.0 / 1024.0
+                );
+                data
+            }
+            Err(e) => {
+                eprintln!("Failed to read ROM {}: {}", path, e);
+                return;
+            }
+        }
+    } else {
+        match load_rom() {
+            Some(data) => data,
+            None => return,
+        }
     };
 
     let mut emu = Emu::new();
@@ -2257,6 +2570,9 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
     // Enable debug port interception
     emu.enable_debug_ports();
 
+    // Track user-code PCs (CE-Doom .text section range from map file)
+    emu.set_user_text_range(0xD1AA25, 0xD2CE4E);
+
     // Boot TI-OS
     eprintln!("Booting TI-OS...");
     emu.press_on_key();
@@ -2266,7 +2582,18 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
     }
     emu.release_on_key();
     emu.run_cycles(2_000_000);
-    eprintln!("Boot complete at {:.1}M cycles, PC={:06X}", total as f64 / 1e6, emu.pc());
+    eprintln!(
+        "Boot complete at {:.1}M cycles, PC={:06X}",
+        total as f64 / 1e6,
+        emu.pc()
+    );
+    // Snapshot flash routine area after boot
+    eprintln!(
+        "Flash routine after boot: D18C47={:02X} D18C4E={:02X} D08C47={:02X}",
+        emu.peek_byte(0xD18C47),
+        emu.peek_byte(0xD18C4E),
+        emu.peek_byte(0xD08C47)
+    );
 
     // Launch via sendKey: ENTER → CLEAR → Asm( → prgm → <NAME> → ENTER
     eprintln!("Launching Asm(prgm{})...", prog_name);
@@ -2286,6 +2613,12 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
     send_os_key_wait(&mut emu, 0x05, "ENTER-exec");
     eprintln!("Program launched.");
 
+    // Trace writes to the OS flash routine area (D18C22-D18C78)
+    // to find what writes the flash programming code into RAM
+    emu.set_write_trace_filter(0xD18C00, 0xD18C80);
+    emu.enable_write_tracing();
+    eprintln!("Write tracing enabled for D18C00-D18C80");
+
     // Run loop with debug output capture
     let timeout_cycles = timeout_secs * 48_000_000;
     let mut exec_cycles = 0u64;
@@ -2297,15 +2630,61 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
     let frame_duration = std::time::Duration::from_millis(16);
 
     if throttled {
-        eprintln!("Running at {:.1}x speed (timeout: {}s)...", speed.unwrap(), timeout_secs);
+        eprintln!(
+            "Running at {:.1}x speed (timeout: {}s)...",
+            speed.unwrap(),
+            timeout_secs
+        );
     } else {
         eprintln!("Running unthrottled (timeout: {}s)...", timeout_secs);
     }
 
+    let mut last_pc_report = 0u64;
+    let mut key_injected = false;
+    let mut key_released = false;
     loop {
         let frame_start = Instant::now();
 
         exec_cycles += emu.run_cycles(cycles_per_frame) as u64;
+
+        // Key injection: press LEFT arrow at 300M cycles, release at 600M cycles
+        if inject_keys && !key_injected && exec_cycles >= 300_000_000 {
+            eprintln!(
+                "[KEY] Pressing LEFT arrow at {:.0}M cycles",
+                exec_cycles as f64 / 1e6
+            );
+            emu.set_key(7, 1, true); // LEFT arrow: row 7, col 1
+            key_injected = true;
+        }
+        if inject_keys && key_injected && !key_released && exec_cycles >= 600_000_000 {
+            eprintln!(
+                "[KEY] Releasing LEFT arrow at {:.0}M cycles",
+                exec_cycles as f64 / 1e6
+            );
+            emu.set_key(7, 1, false);
+            key_released = true;
+            // Take an intermediate screenshot after key release
+            emu.render_frame();
+            save_framebuffer_ppm(&emu, "/tmp/run_screen_after_turn.ppm");
+            convert_ppm_to_png(
+                "/tmp/run_screen_after_turn.ppm",
+                "/tmp/run_screen_after_turn.png",
+            );
+            eprintln!("[KEY] Intermediate screenshot saved to /tmp/run_screen_after_turn.png");
+        }
+
+        // Periodic PC report (every ~50M cycles = ~1 second)
+        if exec_cycles - last_pc_report >= 48_000_000 {
+            let pc = emu.pc();
+            let halted = emu.is_halted();
+            eprintln!(
+                "[{:.0}M] PC={:06X} halted={}",
+                exec_cycles as f64 / 1e6,
+                pc,
+                halted
+            );
+            last_pc_report = exec_cycles;
+        }
 
         // Drain and print debug output
         for line in emu.take_debug_stdout() {
@@ -2315,6 +2694,22 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
             eprint!("{}", line);
         }
 
+        // Detect crash: halted at non-idle PC (OS error handler)
+        if emu.is_halted() && emu.pc() < 0x010000 {
+            // Flush debug output first
+            for line in emu.take_debug_stdout() {
+                print!("{}", line);
+            }
+            let wall_elapsed = wall_start.elapsed().as_secs_f64();
+            eprintln!(
+                "\n[CRASH at PC={:06X} after {:.2}M cycles, {:.2}s wall time]",
+                emu.pc(),
+                exec_cycles as f64 / 1e6,
+                wall_elapsed
+            );
+            break;
+        }
+
         // Check termination conditions
         if emu.debug_terminated() {
             // Flush any remaining buffered output
@@ -2322,20 +2717,30 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
                 print!("{}", line);
             }
             let wall_elapsed = wall_start.elapsed().as_secs_f64();
-            eprintln!("\n[Terminated via null sentinel after {:.2}M cycles, {:.2}s wall time]",
-                exec_cycles as f64 / 1e6, wall_elapsed);
+            eprintln!(
+                "\n[Terminated via null sentinel after {:.2}M cycles, {:.2}s wall time]",
+                exec_cycles as f64 / 1e6,
+                wall_elapsed
+            );
             break;
         }
         if exec_cycles >= timeout_cycles {
             let wall_elapsed = wall_start.elapsed().as_secs_f64();
-            eprintln!("\n[Timeout after {}s ({:.2}M cycles, {:.2}s wall time)]",
-                timeout_secs, exec_cycles as f64 / 1e6, wall_elapsed);
+            eprintln!(
+                "\n[Timeout after {}s ({:.2}M cycles, {:.2}s wall time)]",
+                timeout_secs,
+                exec_cycles as f64 / 1e6,
+                wall_elapsed
+            );
             break;
         }
         if emu.is_off() {
             let wall_elapsed = wall_start.elapsed().as_secs_f64();
-            eprintln!("\n[Calculator powered off after {:.2}M cycles, {:.2}s wall time]",
-                exec_cycles as f64 / 1e6, wall_elapsed);
+            eprintln!(
+                "\n[Calculator powered off after {:.2}M cycles, {:.2}s wall time]",
+                exec_cycles as f64 / 1e6,
+                wall_elapsed
+            );
             break;
         }
 
@@ -2347,6 +2752,97 @@ fn cmd_run(files: &[&str], timeout_secs: u64, speed: Option<f64>) {
             }
         }
     }
+
+    // Dump state if halted at unexpected PC (not idle loop)
+    let final_pc = emu.pc();
+    if emu.is_halted() && final_pc != 0x085B80 {
+        eprintln!("=== CRASH DETECTED at PC={:06X} ===", final_pc);
+        eprintln!("{}", emu.dump_registers());
+        eprintln!("{}", emu.dump_user_pcs());
+
+        // Dump NMI violation info
+        let (nmi_count, nmi_pc, nmi_sp, nmi_vaddr, nmi_raw_pc) = emu.take_nmi_log();
+        eprintln!("=== NMI state ===");
+        eprintln!("  NMI count: {}", nmi_count);
+        if nmi_count > 0 {
+            eprintln!("  Last NMI PC: {:06X}, SP: {:06X}", nmi_pc, nmi_sp);
+            eprintln!(
+                "  Violation addr: {:06X}, raw_pc: {:06X}",
+                nmi_vaddr, nmi_raw_pc
+            );
+        }
+        // Dump memory protection configuration from control ports
+        eprintln!("{}", emu.dump_control_ports());
+
+        // Dump write trace for flash routine area
+        let write_log = emu.get_write_log();
+        eprintln!(
+            "=== Write trace for D18C00-D18C80 ({} writes) ===",
+            emu.write_trace_total()
+        );
+        for (addr, value, cycle) in write_log.iter().take(200) {
+            eprintln!("  cycle {:10}: {:06X} <- {:02X}", cycle, addr, value);
+        }
+
+        // Dump bytes at P_SpawnMobj to see the instruction sequence
+        // Direct peek at the flash routine area and MBASE alias
+        eprintln!("=== Flash routine area at crash ===");
+        for addr in [0xD18C40u32, 0xD18C47, 0xD18C4E, 0xD18C55] {
+            eprintln!("  peek {:06X} = {:02X}", addr, emu.peek_byte(addr));
+        }
+        // Check MBASE alias: D0:8C47 = D08C47
+        for addr in [0xD08C40u32, 0xD08C47, 0xD08C4E] {
+            eprintln!(
+                "  peek {:06X} = {:02X} (MBASE alias)",
+                addr,
+                emu.peek_byte(addr)
+            );
+        }
+
+        eprintln!("=== P_SpawnMobj (D214D1) disasm ===");
+        for offset in (0u32..0x80).step_by(16) {
+            let addr = 0xD214D1 + offset;
+            let mut bytes = String::new();
+            for i in 0..16u32 {
+                let b = emu.peek_byte(addr + i);
+                bytes.push_str(&format!("{:02X} ", b));
+            }
+            eprintln!("  {:06X}: {}", addr, bytes);
+        }
+
+        eprintln!("{}", emu.dump_history());
+
+        // Dump stack memory around SP to find return addresses
+        // The program's SP during execution was ~D3EF2D; the OS reset it to D1A87E
+        // Dump memory around the program's likely SP to find return addresses
+        let sp = emu.sp();
+        eprintln!("=== Stack dump at SP={:06X} ===", sp);
+        for offset in (0..96).step_by(3) {
+            let addr = sp.wrapping_add(offset);
+            let b0 = emu.peek_byte(addr);
+            let b1 = emu.peek_byte(addr + 1);
+            let b2 = emu.peek_byte(addr + 2);
+            let val24 = (b2 as u32) << 16 | (b1 as u32) << 8 | b0 as u32;
+            eprintln!("  SP+{:02X} [{:06X}]: {:06X}", offset, addr, val24);
+        }
+        // Also dump around D3EF2D (the program's SP before crash)
+        let prog_sp: u32 = 0xD3EF2D;
+        eprintln!("=== Program stack dump at {:06X} ===", prog_sp);
+        for offset in (0..96).step_by(3) {
+            let addr = prog_sp.wrapping_add(offset);
+            let b0 = emu.peek_byte(addr);
+            let b1 = emu.peek_byte(addr + 1);
+            let b2 = emu.peek_byte(addr + 2);
+            let val24 = (b2 as u32) << 16 | (b1 as u32) << 8 | b0 as u32;
+            eprintln!("  SP+{:02X} [{:06X}]: {:06X}", offset, addr, val24);
+        }
+    }
+
+    // Save screenshot at end of run
+    emu.render_frame();
+    save_framebuffer_ppm(&emu, "/tmp/run_screen.ppm");
+    convert_ppm_to_png("/tmp/run_screen.ppm", "/tmp/run_screen.png");
+    eprintln!("Screenshot saved to /tmp/run_screen.png");
 }
 
 fn cmd_runprog(files: &[&str], post_launch_cycles: u64) {
@@ -2403,7 +2899,11 @@ fn cmd_runprog(files: &[&str], post_launch_cycles: u64) {
     while total < 175_000_000 {
         total += emu.run_cycles(1_000_000) as u64;
     }
-    println!("Boot complete. PC={:06X}, halted={}", emu.pc(), emu.is_halted());
+    println!(
+        "Boot complete. PC={:06X}, halted={}",
+        emu.pc(),
+        emu.is_halted()
+    );
 
     emu.release_on_key();
     emu.run_cycles(2_000_000);
@@ -2454,7 +2954,10 @@ fn cmd_runprog(files: &[&str], post_launch_cycles: u64) {
     send_os_key_wait(&mut emu, 0x05, "ENTER-exec");
 
     // Run for the requested number of cycles
-    println!("  Running {:.0}M cycles...", post_launch_cycles as f64 / 1_000_000.0);
+    println!(
+        "  Running {:.0}M cycles...",
+        post_launch_cycles as f64 / 1_000_000.0
+    );
     let mut ran = 0u64;
     while ran < post_launch_cycles {
         let chunk = std::cmp::min(1_000_000, (post_launch_cycles - ran) as u32);
@@ -2477,7 +2980,11 @@ fn cmd_rundoom() {
     let rom_path = "/tmp/TI84CE-DOOM.rom";
     let rom_data = match fs::read(rom_path) {
         Ok(data) => {
-            eprintln!("Loaded baked ROM from: {} ({:.2} MB)", rom_path, data.len() as f64 / 1024.0 / 1024.0);
+            eprintln!(
+                "Loaded baked ROM from: {} ({:.2} MB)",
+                rom_path,
+                data.len() as f64 / 1024.0 / 1024.0
+            );
             data
         }
         Err(_) => {
@@ -2499,7 +3006,11 @@ fn cmd_rundoom() {
     while total < 175_000_000 {
         total += emu.run_cycles(1_000_000) as u64;
     }
-    println!("Boot complete. PC={:06X}, halted={}", emu.pc(), emu.is_halted());
+    println!(
+        "Boot complete. PC={:06X}, halted={}",
+        emu.pc(),
+        emu.is_halted()
+    );
 
     emu.release_on_key();
     emu.run_cycles(2_000_000);
@@ -2543,16 +3054,23 @@ fn cmd_rundoom() {
     // Dump homescreen state
     let cursor_row = emu.peek_byte(0xD00595);
     let cursor_col = emu.peek_byte(0xD00598);
-    println!("\n  Homescreen: curRow={}, curCol={}", cursor_row, cursor_col);
+    println!(
+        "\n  Homescreen: curRow={}, curCol={}",
+        cursor_row, cursor_col
+    );
 
     // Check what's in kbdKey area
     print!("  kbdKey @D0058C: ");
-    for i in 0..8 { print!("{:02X} ", emu.peek_byte(0xD0058C + i)); }
+    for i in 0..8 {
+        print!("{:02X} ", emu.peek_byte(0xD0058C + i));
+    }
     println!();
 
     // Check userMem before execution
     print!("  userMem @D1A881 (before): ");
-    for i in 0..16 { print!("{:02X} ", emu.peek_byte(0xD1A881 + i)); }
+    for i in 0..16 {
+        print!("{:02X} ", emu.peek_byte(0xD1A881 + i));
+    }
     println!();
 
     // Phase 3: Execute!
@@ -2573,7 +3091,8 @@ fn cmd_rundoom() {
 
     // Read and analyze the trace
     if let Ok(log_data) = fs::read_to_string("emu.log") {
-        let lines: Vec<&str> = log_data.lines()
+        let lines: Vec<&str> = log_data
+            .lines()
             .filter(|l| l.starts_with("INST["))
             .collect();
         println!("  Captured {} traced instructions", lines.len());
@@ -2595,7 +3114,7 @@ fn cmd_rundoom() {
         let mut pc_hist: HashMap<String, u32> = HashMap::new();
         for line in &lines {
             if let Some(pc_start) = line.find("PC=") {
-                let pc_str = &line[pc_start+3..pc_start+9];
+                let pc_str = &line[pc_start + 3..pc_start + 9];
                 *pc_hist.entry(pc_str.to_string()).or_insert(0) += 1;
             }
         }
@@ -2603,7 +3122,12 @@ fn cmd_rundoom() {
         pc_counts.sort_by(|a, b| b.1.cmp(a.1));
         println!("\n  === Top 15 PCs (most visited) ===");
         for (pc, count) in pc_counts.iter().take(15) {
-            println!("    PC={}: {} times ({:.1}%)", pc, count, **count as f64 / lines.len() as f64 * 100.0);
+            println!(
+                "    PC={}: {} times ({:.1}%)",
+                pc,
+                count,
+                **count as f64 / lines.len() as f64 * 100.0
+            );
         }
     } else {
         println!("  WARNING: Could not read emu.log");
@@ -2613,23 +3137,35 @@ fn cmd_rundoom() {
     println!("\n=== Final State ===");
     let bpp = (emu.peek_byte(0xE30018) >> 1) & 0x7;
     let errno = emu.peek_byte(0xD008DF);
-    println!("PC={:06X} halted={} BPP={} errno=0x{:02X}", emu.pc(), emu.is_halted(), bpp, errno);
+    println!(
+        "PC={:06X} halted={} BPP={} errno=0x{:02X}",
+        emu.pc(),
+        emu.is_halted(),
+        bpp,
+        errno
+    );
 
     print!("userMem @D1A881: ");
-    for i in 0..32 { print!("{:02X} ", emu.peek_byte(0xD1A881 + i)); }
+    for i in 0..32 {
+        print!("{:02X} ", emu.peek_byte(0xD1A881 + i));
+    }
     println!();
 
     // Dump the archive data around the LibLoad library
     println!("\n  LibLoad archive entry @0C6CBE:");
     print!("    Header: ");
-    for i in 0..20 { print!("{:02X} ", emu.peek_byte(0x0C6CBE + i)); }
+    for i in 0..20 {
+        print!("{:02X} ", emu.peek_byte(0x0C6CBE + i));
+    }
     println!();
 
     // Check what's at key flash addresses the CPU is visiting
     println!("\n  Flash data at key PCs:");
     for addr in [0x0C6DB0u32, 0x0C6DC0, 0x0C6DCA, 0x0B3B70] {
         print!("    @{:06X}: ", addr);
-        for i in 0..16 { print!("{:02X} ", emu.peek_byte(addr + i)); }
+        for i in 0..16 {
+            print!("{:02X} ", emu.peek_byte(addr + i));
+        }
         println!();
     }
 
@@ -2650,9 +3186,14 @@ fn send_os_key_wait(emu: &mut Emu, key: u16, name: &str) {
     let mut wait_cycles = 0u64;
     loop {
         let flags = emu.peek_byte(CE_GRAPH_FLAGS2);
-        if flags & CE_KEY_READY == 0 { break; }
+        if flags & CE_KEY_READY == 0 {
+            break;
+        }
         if wait_cycles >= 50_000_000 {
-            println!("    TIMEOUT: OS didn't consume previous key before {} (waited 50M cycles)", name);
+            println!(
+                "    TIMEOUT: OS didn't consume previous key before {} (waited 50M cycles)",
+                name
+            );
             return;
         }
         emu.run_cycles(48_000);
@@ -2662,7 +3203,10 @@ fn send_os_key_wait(emu: &mut Emu, key: u16, name: &str) {
     // Send the key
     let ok = emu.send_key(key);
     if !ok {
-        println!("    FAILED: send_key returned false for {} (0x{:04X})", name, key);
+        println!(
+            "    FAILED: send_key returned false for {} (0x{:04X})",
+            name, key
+        );
         return;
     }
 
@@ -2672,10 +3216,16 @@ fn send_os_key_wait(emu: &mut Emu, key: u16, name: &str) {
         emu.run_cycles(48_000);
         consumed_cycles += 48_000;
         let flags = emu.peek_byte(CE_GRAPH_FLAGS2);
-        if flags & CE_KEY_READY == 0 { break; }
+        if flags & CE_KEY_READY == 0 {
+            break;
+        }
         if consumed_cycles >= 50_000_000 {
-            println!("    WARNING: OS didn't consume {} after 50M cycles, PC={:06X}, halted={}",
-                name, emu.pc(), emu.is_halted());
+            println!(
+                "    WARNING: OS didn't consume {} after 50M cycles, PC={:06X}, halted={}",
+                name,
+                emu.pc(),
+                emu.is_halted()
+            );
             return;
         }
     }
@@ -2683,8 +3233,13 @@ fn send_os_key_wait(emu: &mut Emu, key: u16, name: &str) {
     // Extra settle time for the OS to process the key action
     emu.run_cycles(2_000_000);
 
-    println!("    {} (0x{:04X}): consumed after {}K cycles, PC={:06X}",
-        name, key, consumed_cycles / 1000, emu.pc());
+    println!(
+        "    {} (0x{:04X}): consumed after {}K cycles, PC={:06X}",
+        name,
+        key,
+        consumed_cycles / 1000,
+        emu.pc()
+    );
 }
 
 fn press_key(emu: &mut Emu, row: usize, col: usize, hold_cycles: u32, release_cycles: u32) {
@@ -2694,16 +3249,35 @@ fn press_key(emu: &mut Emu, row: usize, col: usize, hold_cycles: u32, release_cy
     emu.run_cycles(release_cycles);
 }
 
-fn press_key_verbose(emu: &mut Emu, name: &str, row: usize, col: usize, hold_cycles: u32, release_cycles: u32) {
+fn press_key_verbose(
+    emu: &mut Emu,
+    name: &str,
+    row: usize,
+    col: usize,
+    hold_cycles: u32,
+    release_cycles: u32,
+) {
     println!("  Pressing {} (row={}, col={})...", name, row, col);
     emu.set_key(row, col, true);
     let held = emu.run_cycles(hold_cycles);
-    println!("    Hold: ran {} of {} cycles, PC={:06X}, halted={}, is_off={}",
-        held, hold_cycles, emu.pc(), emu.is_halted(), emu.is_off());
+    println!(
+        "    Hold: ran {} of {} cycles, PC={:06X}, halted={}, is_off={}",
+        held,
+        hold_cycles,
+        emu.pc(),
+        emu.is_halted(),
+        emu.is_off()
+    );
     emu.set_key(row, col, false);
     let released = emu.run_cycles(release_cycles);
-    println!("    Release: ran {} of {} cycles, PC={:06X}, halted={}, is_off={}",
-        released, release_cycles, emu.pc(), emu.is_halted(), emu.is_off());
+    println!(
+        "    Release: ran {} of {} cycles, PC={:06X}, halted={}, is_off={}",
+        released,
+        release_cycles,
+        emu.pc(),
+        emu.is_halted(),
+        emu.is_off()
+    );
 }
 
 fn convert_ppm_to_png(ppm_path: &str, png_path: &str) {
@@ -2762,7 +3336,10 @@ fn dump_vat(emu: &mut Emu) {
             static mut PRINTED_BOUNDARY: bool = false;
             unsafe {
                 if !PRINTED_BOUNDARY {
-                    println!("    --- entered named/program section (vat={:06X}) ---", vat);
+                    println!(
+                        "    --- entered named/program section (vat={:06X}) ---",
+                        vat
+                    );
                     PRINTED_BOUNDARY = true;
                 }
             }
@@ -2780,8 +3357,15 @@ fn dump_vat(emu: &mut Emu) {
                 name_bytes.push(emu.peek_byte(vat));
                 vat -= 1;
             }
-            let name_str: String = name_bytes.iter()
-                .map(|&b| if b >= 0x20 && b < 0x7F { b as char } else { '.' })
+            let name_str: String = name_bytes
+                .iter()
+                .map(|&b| {
+                    if b >= 0x20 && b < 0x7F {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
                 .collect();
             (nl, name_str)
         } else {
@@ -2791,7 +3375,8 @@ fn dump_vat(emu: &mut Emu) {
                 name_bytes.push(emu.peek_byte(vat));
                 vat -= 1;
             }
-            let name_str: String = name_bytes.iter()
+            let name_str: String = name_bytes
+                .iter()
                 .map(|&b| format!("{:02X}", b))
                 .collect::<Vec<_>>()
                 .join("");
@@ -2818,8 +3403,12 @@ fn dump_vat(emu: &mut Emu) {
             let flag_byte = emu.peek_byte(address);
             let data_namelen = emu.peek_byte(address + 9) as u32;
             let data_start = address + 10 + data_namelen;
-            let first_data = [emu.peek_byte(data_start), emu.peek_byte(data_start + 1),
-                              emu.peek_byte(data_start + 2), emu.peek_byte(data_start + 3)];
+            let first_data = [
+                emu.peek_byte(data_start),
+                emu.peek_byte(data_start + 1),
+                emu.peek_byte(data_start + 2),
+                emu.peek_byte(data_start + 3),
+            ];
             println!("           flash@{:06X}: flag={:02X} namelen={} data@{:06X}=[{:02X} {:02X} {:02X} {:02X}]",
                 address, flag_byte, data_namelen, data_start,
                 first_data[0], first_data[1], first_data[2], first_data[3]);
@@ -2865,8 +3454,13 @@ fn dump_vram_full(emu: &mut Emu, label: &str) {
         }
     }
 
-    println!("  VRAM [{}]: {} non-white px ({} black) across {} rows",
-        label, non_white_count, black_count, content_rows.len());
+    println!(
+        "  VRAM [{}]: {} non-white px ({} black) across {} rows",
+        label,
+        non_white_count,
+        black_count,
+        content_rows.len()
+    );
     for &(row, nw, bl) in content_rows.iter().take(10) {
         println!("    row {:3}: {} non-white ({} black)", row, nw, bl);
     }
@@ -2896,7 +3490,11 @@ fn cmd_disasm(addr: u32, count: usize) {
             bytes[i] = emu.peek_byte(pc + i as u32);
         }
         let result = disassemble(&bytes, true); // ADL mode
-        let hex: String = bytes[..result.length].iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+        let hex: String = bytes[..result.length]
+            .iter()
+            .map(|b| format!("{:02X}", b))
+            .collect::<Vec<_>>()
+            .join(" ");
         println!("  {:06X}: {:<18} {}", pc, hex, result.mnemonic);
         pc += result.length as u32;
     }
@@ -2951,7 +3549,11 @@ fn cmd_diagchk(files: &[&str]) {
     }
     emu.release_on_key();
     emu.run_cycles(2_000_000);
-    eprintln!("Boot complete at {:.1}M cycles, PC={:06X}", total as f64 / 1e6, emu.pc());
+    eprintln!(
+        "Boot complete at {:.1}M cycles, PC={:06X}",
+        total as f64 / 1e6,
+        emu.pc()
+    );
 
     // Before launch, dump OP1 and VAT state
     println!("\n=== Pre-launch state ===");
@@ -3009,15 +3611,21 @@ fn cmd_diagchk(files: &[&str]) {
         // After 200M cycles, send keypad ENTER to trigger menu action
         // (chess programs need user input to start a game, which triggers book_init)
         if !enter_sent && exec_cycles >= 200_000_000 {
-            eprintln!("[{:.0}M] Sending keypad ENTER to trigger menu action...", exec_cycles as f64 / 1e6);
-            emu.set_key(6, 0, true);  // Enter key down
+            eprintln!(
+                "[{:.0}M] Sending keypad ENTER to trigger menu action...",
+                exec_cycles as f64 / 1e6
+            );
+            emu.set_key(6, 0, true); // Enter key down
             emu.run_cycles(500_000);
             exec_cycles += 500_000;
             emu.set_key(6, 0, false); // Enter key up
             emu.run_cycles(500_000);
             exec_cycles += 500_000;
             enter_sent = true;
-            eprintln!("[{:.0}M] ENTER sent, continuing to watch for _ChkFindSym...", exec_cycles as f64 / 1e6);
+            eprintln!(
+                "[{:.0}M] ENTER sent, continuing to watch for _ChkFindSym...",
+                exec_cycles as f64 / 1e6
+            );
         }
 
         // Drain debug output
@@ -3040,19 +3648,27 @@ fn cmd_diagchk(files: &[&str]) {
             for i in 0..10 {
                 op1[i] = emu.peek_byte(0xD005F8 + i as u32);
                 print!("{:02X}", op1[i]);
-                if i < 9 { print!(" "); }
+                if i < 9 {
+                    print!(" ");
+                }
             }
             print!("]");
 
             // Decode OP1: type + name
             let var_type = op1[0];
             let name_end = op1[1..9].iter().position(|&b| b == 0).unwrap_or(8);
-            let name = std::str::from_utf8(&op1[1..1+name_end]).unwrap_or("???");
+            let name = std::str::from_utf8(&op1[1..1 + name_end]).unwrap_or("???");
             println!(" type=0x{:02X} name=\"{}\"", var_type, name);
 
             // Dump current register state
-            println!("         F={:02X}(C={}) A={:02X} DE={:06X} HL={:06X}",
-                flags, carry, emu.a(), emu.de(), emu.hl());
+            println!(
+                "         F={:02X}(C={}) A={:02X} DE={:06X} HL={:06X}",
+                flags,
+                carry,
+                emu.a(),
+                emu.de(),
+                emu.hl()
+            );
 
             // Now single-step through _ChkFindSym to see what it does
             println!("         Tracing _ChkFindSym execution:");
@@ -3079,8 +3695,10 @@ fn cmd_diagchk(files: &[&str]) {
                 };
 
                 // Track call depth
-                if opcode_str.contains("CALL") && info.pc != new_pc
-                    && !(opcode_str.contains("CALL ") && info.pc + info.opcode_len as u32 == new_pc) {
+                if opcode_str.contains("CALL")
+                    && info.pc != new_pc
+                    && !(opcode_str.contains("CALL ") && info.pc + info.opcode_len as u32 == new_pc)
+                {
                     call_depth += 1;
                 }
                 let is_ret = opcode_str.starts_with("RET")
@@ -3131,12 +3749,16 @@ fn cmd_diagchk(files: &[&str]) {
                         let new_carry2 = new_flags2 & 0x01;
                         let new_z2 = (new_flags2 & 0x40) != 0;
                         let opcode_str2 = {
-                            let result = disassemble(&info2.opcode[..info2.opcode_len.min(4)], true);
+                            let result =
+                                disassemble(&info2.opcode[..info2.opcode_len.min(4)], true);
                             result.mnemonic
                         };
                         // Track call depth relative to caller
-                        if opcode_str2.contains("CALL") && info2.pc != new_pc2
-                            && !(opcode_str2.contains("CALL ") && info2.pc + info2.opcode_len as u32 == new_pc2) {
+                        if opcode_str2.contains("CALL")
+                            && info2.pc != new_pc2
+                            && !(opcode_str2.contains("CALL ")
+                                && info2.pc + info2.opcode_len as u32 == new_pc2)
+                        {
                             call_depth += 1;
                         }
                         let is_ret2 = opcode_str2.starts_with("RET")
@@ -3148,14 +3770,23 @@ fn cmd_diagchk(files: &[&str]) {
                         }
                         // Log most instructions in post-trace
                         let is_interesting2 = opcode_str2.contains("CP")
-                            || is_ret2 || opcode_str2.contains("JP") || opcode_str2.contains("JR")
-                            || opcode_str2.contains("CALL") || opcode_str2.starts_with("LD A,")
-                            || opcode_str2.contains("OR") || opcode_str2.starts_with("LD (")
-                            || opcode_str2.starts_with("LD HL") || opcode_str2.starts_with("LD DE")
-                            || opcode_str2.starts_with("LD BC") || opcode_str2.starts_with("PUSH")
-                            || opcode_str2.starts_with("POP") || opcode_str2.starts_with("AND")
-                            || opcode_str2.starts_with("XOR") || opcode_str2.starts_with("INC")
-                            || opcode_str2.starts_with("DEC") || new_z2 != last_z;
+                            || is_ret2
+                            || opcode_str2.contains("JP")
+                            || opcode_str2.contains("JR")
+                            || opcode_str2.contains("CALL")
+                            || opcode_str2.starts_with("LD A,")
+                            || opcode_str2.contains("OR")
+                            || opcode_str2.starts_with("LD (")
+                            || opcode_str2.starts_with("LD HL")
+                            || opcode_str2.starts_with("LD DE")
+                            || opcode_str2.starts_with("LD BC")
+                            || opcode_str2.starts_with("PUSH")
+                            || opcode_str2.starts_with("POP")
+                            || opcode_str2.starts_with("AND")
+                            || opcode_str2.starts_with("XOR")
+                            || opcode_str2.starts_with("INC")
+                            || opcode_str2.starts_with("DEC")
+                            || new_z2 != last_z;
                         if is_interesting2 || trace_steps <= 30 {
                             println!("         [{:4}] {:06X}: {:<24} F={:02X}(C={} Z={}) A={:02X} HL={:06X} DE={:06X} depth={}",
                                 trace_steps, info2.pc, opcode_str2,
@@ -3165,8 +3796,12 @@ fn cmd_diagchk(files: &[&str]) {
                         last_z = new_z2;
                         // Stop when we return from ti_Open (depth < caller_depth)
                         if call_depth < caller_depth {
-                            println!("         [ti_Open returned] A={:02X} HL={:06X} depth={}",
-                                emu.a(), emu.hl(), call_depth);
+                            println!(
+                                "         [ti_Open returned] A={:02X} HL={:06X} depth={}",
+                                emu.a(),
+                                emu.hl(),
+                                call_depth
+                            );
                             break;
                         }
                     }
@@ -3189,7 +3824,11 @@ fn cmd_diagchk(files: &[&str]) {
         }
 
         if exec_cycles >= max_cycles {
-            println!("\nReached {:.0}M cycles without {} more hits.", max_cycles as f64 / 1e6, max_hits - hit_count);
+            println!(
+                "\nReached {:.0}M cycles without {} more hits.",
+                max_cycles as f64 / 1e6,
+                max_hits - hit_count
+            );
             break;
         }
 
@@ -3199,5 +3838,9 @@ fn cmd_diagchk(files: &[&str]) {
         }
     }
 
-    println!("\n=== Summary: {} _ChkFindSym hits in {:.1}M cycles ===", hit_count, exec_cycles as f64 / 1e6);
+    println!(
+        "\n=== Summary: {} _ChkFindSym hits in {:.1}M cycles ===",
+        hit_count,
+        exec_cycles as f64 / 1e6
+    );
 }

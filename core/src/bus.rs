@@ -52,7 +52,9 @@ struct BusRng {
 
 impl BusRng {
     fn new() -> Self {
-        Self { state: [0x9A, 0x59, 0xC6] }
+        Self {
+            state: [0x9A, 0x59, 0xC6],
+        }
     }
 
     fn seed(&mut self, s1: u8, s2: u8, s3: u8) {
@@ -62,8 +64,11 @@ impl BusRng {
     /// Generate next pseudo-random byte
     fn next(&mut self) -> u8 {
         // Simple LFSR-style generator
-        let bit = ((self.state[0] >> 7) ^ (self.state[0] >> 5) ^
-                   (self.state[0] >> 4) ^ (self.state[0] >> 3)) & 1;
+        let bit = ((self.state[0] >> 7)
+            ^ (self.state[0] >> 5)
+            ^ (self.state[0] >> 4)
+            ^ (self.state[0] >> 3))
+            & 1;
         let result = self.state[0];
         self.state[0] = (self.state[0] << 1) | ((self.state[1] >> 7) & 1);
         self.state[1] = (self.state[1] << 1) | ((self.state[2] >> 7) & 1);
@@ -79,23 +84,23 @@ impl BusRng {
 /// NOTE: Some ROMs use a single DI, others use double DI before IM 2/IM 1.
 const FLASH_UNLOCK_SEQUENCE: [u8; 16] = [
     0xF3, 0x18, 0x00, // DI; JR 0
-    0xF3,             // DI (single, not double like CEmu's sequence)
-    0xED, 0x7E,       // IM 2
-    0xED, 0x56,       // IM 1
+    0xF3, // DI (single, not double like CEmu's sequence)
+    0xED, 0x7E, // IM 2
+    0xED, 0x56, // IM 1
     0xED, 0x39, 0x28, // OUT0 (0x28), A
     0xED, 0x38, 0x28, // IN0 A, (0x28)
-    0xCB, 0x57,       // BIT 2, A - detection triggers on this last byte
+    0xCB, 0x57, // BIT 2, A - detection triggers on this last byte
 ];
 
 /// Alternate unlock sequence with double DI (CEmu reference)
 const FLASH_UNLOCK_SEQUENCE_DOUBLE_DI: [u8; 17] = [
     0xF3, 0x18, 0x00, // DI; JR 0
-    0xF3, 0xF3,       // DI, DI (double)
-    0xED, 0x7E,       // IM 2
-    0xED, 0x56,       // IM 1
+    0xF3, 0xF3, // DI, DI (double)
+    0xED, 0x7E, // IM 2
+    0xED, 0x56, // IM 1
     0xED, 0x39, 0x28, // OUT0 (0x28), A
     0xED, 0x38, 0x28, // IN0 A, (0x28)
-    0xCB, 0x57,       // BIT 2, A - detection triggers on this last byte
+    0xCB, 0x57, // BIT 2, A - detection triggers on this last byte
 ];
 
 /// Size of the fetch buffer for sequence detection
@@ -273,7 +278,9 @@ impl WriteTracer {
 
     /// Get addresses sorted by write count (descending)
     pub fn top_addresses(&self, limit: usize) -> Vec<(u32, u32)> {
-        let mut sorted: Vec<_> = self.address_counts.iter()
+        let mut sorted: Vec<_> = self
+            .address_counts
+            .iter()
             .map(|(&addr, &count)| (addr, count))
             .collect();
         sorted.sort_by(|a, b| b.1.cmp(&a.1));
@@ -324,7 +331,10 @@ impl WriteTracer {
         }
 
         if !self.detailed_log.is_empty() {
-            s.push_str(&format!("\nFirst {} writes:\n", self.detailed_log.len().min(50)));
+            s.push_str(&format!(
+                "\nFirst {} writes:\n",
+                self.detailed_log.len().min(50)
+            ));
             for (i, rec) in self.detailed_log.iter().take(50).enumerate() {
                 s.push_str(&format!(
                     "  {:4}: cycle {:8} | 0x{:06X} <- 0x{:02X}\n",
@@ -332,7 +342,10 @@ impl WriteTracer {
                 ));
             }
             if self.detailed_log.len() > 50 {
-                s.push_str(&format!("  ... and {} more\n", self.detailed_log.len() - 50));
+                s.push_str(&format!(
+                    "  ... and {} more\n",
+                    self.detailed_log.len() - 50
+                ));
             }
         }
 
@@ -515,9 +528,9 @@ pub struct Bus {
 impl Bus {
     /// Wait states for different memory regions
     /// These affect CPU timing for accurate emulation (must match CEmu exactly)
-    pub const FLASH_READ_CYCLES: u64 = 10;  // flash.waitStates default
-    pub const RAM_READ_CYCLES: u64 = 4;     // sched_process_pending_dma(4)
-    pub const RAM_WRITE_CYCLES: u64 = 2;    // sched_process_pending_dma(2)
+    pub const FLASH_READ_CYCLES: u64 = 10; // flash.waitStates default
+    pub const RAM_READ_CYCLES: u64 = 4; // sched_process_pending_dma(4)
+    pub const RAM_WRITE_CYCLES: u64 = 2; // sched_process_pending_dma(2)
 
     /// Unmapped region timing depends on flash mode
     /// Serial flash: 2 cycles
@@ -543,8 +556,8 @@ impl Bus {
 
     /// Unmapped MMIO timing (addresses that don't map to valid ports)
     /// CEmu: 0xFB0000-0xFEFFFF = 3 cycles, other = 2 cycles
-    const UNMAPPED_MMIO_PROTECTED_CYCLES: u64 = 3;  // 0xFB0000-0xFEFFFF
-    const UNMAPPED_MMIO_OTHER_CYCLES: u64 = 2;       // other unmapped MMIO
+    const UNMAPPED_MMIO_PROTECTED_CYCLES: u64 = 3; // 0xFB0000-0xFEFFFF
+    const UNMAPPED_MMIO_OTHER_CYCLES: u64 = 2; // other unmapped MMIO
 
     /// Create a new bus with fresh memory
     /// Defaults to parallel flash mode (older TI-84 CE models, more compatible)
@@ -560,7 +573,7 @@ impl Bus {
             fetch_buffer: [0; FETCH_BUFFER_SIZE],
             fetch_index: 0,
             write_tracer: WriteTracer::new(),
-            serial_flash: false,  // Default to parallel flash (10 cycles, more compatible)
+            serial_flash: false, // Default to parallel flash (10 cycles, more compatible)
             flash_cache: FlashCache::new(),
             // I/O tracing fields
             full_trace_enabled: false,
@@ -618,10 +631,14 @@ impl Bus {
     }
 
     /// Get the address that triggered the last NMI
-    pub fn nmi_violation_addr(&self) -> u32 { self.nmi_violation_addr }
+    pub fn nmi_violation_addr(&self) -> u32 {
+        self.nmi_violation_addr
+    }
 
     /// Get the PC that triggered the last NMI
-    pub fn nmi_violation_pc(&self) -> u32 { self.nmi_violation_pc }
+    pub fn nmi_violation_pc(&self) -> u32 {
+        self.nmi_violation_pc
+    }
 
     /// Get the SPI controller for scheduler operations
     pub fn spi(&mut self) -> &mut SpiController {
@@ -729,15 +746,23 @@ impl Bus {
                     // SPI lives on bus.spi (not bus.ports), intercept its MMIO range
                     if port_range == 0xD {
                         let offset = (port_offset & 0x7F) as u32;
-                        (self.spi.read(offset, self.cycles, self.ports.control.cpu_speed()), Some(IoTarget::MmioPort))
+                        (
+                            self.spi
+                                .read(offset, self.cycles, self.ports.control.cpu_speed()),
+                            Some(IoTarget::MmioPort),
+                        )
                     } else {
                         let keys = *self.ports.key_state();
-                        (self.ports.read(port_offset, &keys, self.cycles), Some(IoTarget::MmioPort))
+                        (
+                            self.ports.read(port_offset, &keys, self.cycles),
+                            Some(IoTarget::MmioPort),
+                        )
                     }
                 } else {
                     // Unmapped MMIO: CEmu leaves the default read value at 0.
                     if addr >= 0xFB0000 && addr < 0xFF0000 {
-                        self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES; // 3
+                        self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES;
+                    // 3
                     } else {
                         self.mem_cycles += Self::UNMAPPED_MMIO_OTHER_CYCLES; // 2
                     }
@@ -751,7 +776,7 @@ impl Bus {
                 } else {
                     self.mem_cycles += Self::UNMAPPED_PARALLEL_CYCLES;
                 }
-                (self.rng.next(), None)  // Don't record unmapped reads
+                (self.rng.next(), None) // Don't record unmapped reads
             }
         };
 
@@ -865,7 +890,6 @@ impl Bus {
         true
     }
 
-
     /// Write a byte to the bus
     ///
     /// # Arguments
@@ -912,8 +936,12 @@ impl Bus {
                     // Use flash controller's configured wait states
                     self.mem_cycles += self.ports.flash.cached_total_wait_cycles() as u64;
                     if self.ports.control.flash_unlocked() {
-                        // Record flash write with old value
-                        let old_value = self.flash.read(addr);
+                        // Capture the pre-write value for I/O tracing WITHOUT side effects.
+                        // Flash::read() advances the SectorErase poll countdown; CEmu's
+                        // mem_write_flash never touches that countdown (only reads do), so
+                        // use the side-effect-free peek_status() here to avoid clearing the
+                        // 0x80 "busy" status one poll early during an interleaved erase.
+                        let old_value = self.flash.peek_status(addr);
                         self.flash.write_cpu(addr, value);
                         self.record_io_op(IoOpType::Write, IoTarget::Flash, addr, old_value, value);
                     }
@@ -950,7 +978,8 @@ impl Bus {
                             if value == 0x00 && addr == 0xFB0000 {
                                 // Null at base address = explicit termination sentinel
                                 if !self.debug_stdout_buf.is_empty() {
-                                    let line = String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
+                                    let line =
+                                        String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
                                     self.debug_stdout_lines.push(line);
                                     self.debug_stdout_buf.clear();
                                 }
@@ -958,13 +987,15 @@ impl Bus {
                             } else if value == 0x00 {
                                 // Null at other offsets = sprintf string terminator, flush buffer
                                 if !self.debug_stdout_buf.is_empty() {
-                                    let line = String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
+                                    let line =
+                                        String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
                                     self.debug_stdout_lines.push(line);
                                     self.debug_stdout_buf.clear();
                                 }
                             } else if value == b'\n' {
                                 self.debug_stdout_buf.push(value);
-                                let line = String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
+                                let line =
+                                    String::from_utf8_lossy(&self.debug_stdout_buf).to_string();
                                 self.debug_stdout_lines.push(line);
                                 self.debug_stdout_buf.clear();
                             } else {
@@ -974,13 +1005,15 @@ impl Bus {
                             // stderr range
                             if value == 0x00 {
                                 if !self.debug_stderr_buf.is_empty() {
-                                    let line = String::from_utf8_lossy(&self.debug_stderr_buf).to_string();
+                                    let line =
+                                        String::from_utf8_lossy(&self.debug_stderr_buf).to_string();
                                     self.debug_stderr_lines.push(line);
                                     self.debug_stderr_buf.clear();
                                 }
                             } else if value == b'\n' {
                                 self.debug_stderr_buf.push(value);
-                                let line = String::from_utf8_lossy(&self.debug_stderr_buf).to_string();
+                                let line =
+                                    String::from_utf8_lossy(&self.debug_stderr_buf).to_string();
                                 self.debug_stderr_lines.push(line);
                                 self.debug_stderr_buf.clear();
                             } else {
@@ -997,7 +1030,8 @@ impl Bus {
 
                     // Unmapped MMIO: writes ignored, only cycle penalty
                     if addr >= 0xFB0000 && addr < 0xFF0000 {
-                        self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES; // 3
+                        self.mem_cycles += Self::UNMAPPED_MMIO_PROTECTED_CYCLES;
+                    // 3
                     } else {
                         self.mem_cycles += Self::UNMAPPED_MMIO_OTHER_CYCLES; // 2
                     }
@@ -1017,8 +1051,15 @@ impl Bus {
                     let old_value;
                     if port_range == 0xD {
                         let offset = (port_offset & 0x7F) as u32;
-                        old_value = self.spi.read(offset, self.cycles, self.ports.control.cpu_speed());
-                        let needs_schedule = self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
+                        old_value =
+                            self.spi
+                                .read(offset, self.cycles, self.ports.control.cpu_speed());
+                        let needs_schedule = self.spi.write(
+                            offset,
+                            value,
+                            self.cycles,
+                            self.ports.control.cpu_speed(),
+                        );
                         if needs_schedule {
                             self.spi_needs_schedule = true;
                         }
@@ -1104,9 +1145,7 @@ impl Bus {
 
         match Self::decode_address(addr) {
             MemoryRegion::Flash => self.flash.peek(addr),
-            MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.ram.read(addr - addr::RAM_START)
-            }
+            MemoryRegion::Ram | MemoryRegion::Vram => self.ram.read(addr - addr::RAM_START),
             MemoryRegion::Ports => {
                 let keys = *self.ports.key_state();
                 // Use 0 for cycles in debug peek (no timing effects)
@@ -1121,9 +1160,7 @@ impl Bus {
         let addr = addr & addr::ADDR_MASK;
         match Self::decode_address(addr) {
             MemoryRegion::Flash => self.flash.peek_status(addr),
-            MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.ram.read(addr - addr::RAM_START)
-            }
+            MemoryRegion::Ram | MemoryRegion::Vram => self.ram.read(addr - addr::RAM_START),
             MemoryRegion::Ports => {
                 let keys = *self.ports.key_state();
                 // Use 0 for cycles in debug peek (no timing effects)
@@ -1265,7 +1302,9 @@ impl Bus {
             0x8 => {
                 // RTC - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
-                self.ports.rtc.read(offset, self.cycles, self.ports.control.cpu_speed())
+                self.ports
+                    .rtc
+                    .read(offset, self.cycles, self.ports.control.cpu_speed())
             }
             0xA => {
                 // Keypad - mask with 0x7F
@@ -1280,7 +1319,8 @@ impl Bus {
             0xD => {
                 // SPI - mask with 0x7F (CEmu port_mirrors)
                 let offset = (port & 0x7F) as u32;
-                self.spi.read(offset, self.cycles, self.ports.control.cpu_speed())
+                self.spi
+                    .read(offset, self.cycles, self.ports.control.cpu_speed())
             }
             // CEmu: port_map[0xF] = fxxx (debug handler), not Control
             // Control ports are only accessible via IN0/OUT0 (port range 0x0)
@@ -1343,10 +1383,22 @@ impl Bus {
                     // CEmu formula: cycles += (base - 2) where base varies by speed
                     // The -2 accounts for port_write_cycles already added
                     let delay = match cpu_speed {
-                        0 => 10 - 2,  // 6 MHz
-                        1 => 12 - 2,  // 12 MHz
-                        2 => if self.serial_flash { 14 - 2 } else { 16 - 2 }, // 24 MHz
-                        3 | _ => if self.serial_flash { 23 - 2 } else { 21 - 2 }, // 48 MHz
+                        0 => 10 - 2, // 6 MHz
+                        1 => 12 - 2, // 12 MHz
+                        2 => {
+                            if self.serial_flash {
+                                14 - 2
+                            } else {
+                                16 - 2
+                            }
+                        } // 24 MHz
+                        3 | _ => {
+                            if self.serial_flash {
+                                23 - 2
+                            } else {
+                                21 - 2
+                            }
+                        } // 48 MHz
                     };
                     self.cycles += delay as u64;
                     // CEmu: At 48 MHz with non-serial flash, align CPU to LCD clock
@@ -1374,7 +1426,9 @@ impl Bus {
             0x8 => {
                 // RTC - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
-                self.ports.rtc.write(offset, value, self.cycles, self.ports.control.cpu_speed());
+                self.ports
+                    .rtc
+                    .write(offset, value, self.cycles, self.ports.control.cpu_speed());
             }
             0xA => {
                 // Keypad - mask with 0x7F
@@ -1390,9 +1444,13 @@ impl Bus {
                     let should_interrupt = self.ports.keypad.any_key_check(&key_state);
 
                     if should_interrupt {
-                        self.ports.interrupt.raise(crate::peripherals::interrupt::sources::KEYPAD);
+                        self.ports
+                            .interrupt
+                            .raise(crate::peripherals::interrupt::sources::KEYPAD);
                     } else {
-                        self.ports.interrupt.clear_raw(crate::peripherals::interrupt::sources::KEYPAD);
+                        self.ports
+                            .interrupt
+                            .clear_raw(crate::peripherals::interrupt::sources::KEYPAD);
                     }
                 }
             }
@@ -1404,7 +1462,9 @@ impl Bus {
             0xD => {
                 // SPI - mask with 0x7F
                 let offset = (port & 0x7F) as u32;
-                let needs_schedule = self.spi.write(offset, value, self.cycles, self.ports.control.cpu_speed());
+                let needs_schedule =
+                    self.spi
+                        .write(offset, value, self.cycles, self.ports.control.cpu_speed());
                 if needs_schedule {
                     self.spi_needs_schedule = true;
                 }
@@ -1506,7 +1566,9 @@ impl Bus {
     }
 
     /// Get key state reference (delegates to peripherals)
-    pub fn key_state(&self) -> &[[bool; crate::peripherals::KEYPAD_COLS]; crate::peripherals::KEYPAD_ROWS] {
+    pub fn key_state(
+        &self,
+    ) -> &[[bool; crate::peripherals::KEYPAD_COLS]; crate::peripherals::KEYPAD_ROWS] {
         self.ports.key_state()
     }
 
@@ -1568,8 +1630,17 @@ impl Bus {
     const MAX_IO_OPS_PER_INSTRUCTION: usize = 256;
 
     /// Record an I/O operation (internal helper)
-    fn record_io_op(&mut self, op_type: IoOpType, target: IoTarget, addr: u32, old_value: u8, new_value: u8) {
-        if self.full_trace_enabled && self.instruction_io_ops.len() < Self::MAX_IO_OPS_PER_INSTRUCTION {
+    fn record_io_op(
+        &mut self,
+        op_type: IoOpType,
+        target: IoTarget,
+        addr: u32,
+        old_value: u8,
+        new_value: u8,
+    ) {
+        if self.full_trace_enabled
+            && self.instruction_io_ops.len() < Self::MAX_IO_OPS_PER_INSTRUCTION
+        {
             self.instruction_io_ops.push(IoRecord {
                 op_type,
                 target,

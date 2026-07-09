@@ -22,7 +22,9 @@ macro_rules! log_evt {
 
 #[cfg(target_arch = "wasm32")]
 macro_rules! log_evt {
-    ($($arg:tt)*) => { /* no-op in WASM */ };
+    ($($arg:tt)*) => {
+        /* no-op in WASM */
+    };
 }
 
 pub(crate) use log_evt;
@@ -206,7 +208,9 @@ impl ExecutionHistory {
 static LOG_CALLBACK: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(ptr::null_mut());
 
 pub(crate) fn set_log_callback(cb: Option<extern "C" fn(*const c_char)>) {
-    let ptr = cb.map(|f| f as *mut std::ffi::c_void).unwrap_or(ptr::null_mut());
+    let ptr = cb
+        .map(|f| f as *mut std::ffi::c_void)
+        .unwrap_or(ptr::null_mut());
     LOG_CALLBACK.store(ptr, Ordering::SeqCst);
 }
 
@@ -224,7 +228,11 @@ pub fn log_event(message: &str) {
     }
 
     // Fallback: append to emu.log
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open("emu.log") {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("emu.log")
+    {
         let _ = std::io::Write::write_fmt(&mut file, format_args!("{message}\n"));
     }
 }
@@ -340,6 +348,14 @@ pub struct Emu {
     nmi_log_count: u32,
     nmi_log_pc: u32,
     nmi_log_sp: u32,
+
+    /// User-code PC tracker: records last N PCs in a configurable range
+    /// Only records when PC is within [user_text_low, user_text_high)
+    user_text_low: u32,
+    user_text_high: u32,
+    user_pc_ring: [(u32, u32, u32); 32], // (PC, SP, total_cycles_low32)
+    user_pc_write: usize,
+    user_pc_count: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +400,11 @@ impl Emu {
             nmi_log_count: 0,
             nmi_log_pc: 0,
             nmi_log_sp: 0,
+            user_text_low: 0,
+            user_text_high: 0,
+            user_pc_ring: [(0, 0, 0); 32],
+            user_pc_write: 0,
+            user_pc_count: 0,
         }
     }
 
@@ -570,7 +591,9 @@ impl Emu {
         // 2-byte size (LE): byte count of everything after the 3-byte header
         self.bus.flash.write_direct(offset, payload_len as u8);
         offset += 1;
-        self.bus.flash.write_direct(offset, (payload_len >> 8) as u8);
+        self.bus
+            .flash
+            .write_direct(offset, (payload_len >> 8) as u8);
         offset += 1;
         // type1
         self.bus.flash.write_direct(offset, entry.var_type.as_u8());
@@ -734,7 +757,10 @@ impl Emu {
         }
 
         // Soft reset (preserves flash) + power on
-        log_evt!("SEND_FILE_LIVE: soft reset after injecting {} entries", count);
+        log_evt!(
+            "SEND_FILE_LIVE: soft reset after injecting {} entries",
+            count
+        );
         self.reset();
         self.power_on();
 
@@ -765,8 +791,8 @@ impl Emu {
         self.halt_logged = false;
         self.boot_init_done = false;
         self.powered_on = false; // Require ON key press to power on again
-        // Initialize CPU prefetch buffer - charges cycles for first instruction's first byte
-        // This matches CEmu's cpu_inst_start() call at the beginning of cpu_execute()
+                                 // Initialize CPU prefetch buffer - charges cycles for first instruction's first byte
+                                 // This matches CEmu's cpu_inst_start() call at the beginning of cpu_execute()
         self.cpu.init_prefetch(&mut self.bus);
 
         // Account for init_prefetch cycles in total_cycles for trace parity with CEmu
@@ -805,7 +831,9 @@ impl Emu {
         if self.total_cycles != self.bus.total_cycles() {
             log_evt!(
                 "DESYNC at run_cycles entry: emu_total={} bus_total={} bus_mem={}",
-                self.total_cycles, self.bus.total_cycles(), self.bus.mem_cycles()
+                self.total_cycles,
+                self.bus.total_cycles(),
+                self.bus.mem_cycles()
             );
             // Force resync to prevent runaway execution
             self.total_cycles = self.bus.total_cycles();
@@ -879,6 +907,17 @@ impl Emu {
             // Record in history
             self.history.record(pc, &opcode[..opcode_len]);
 
+            // Track user-code PCs
+            if self.user_text_high > 0 && pc >= self.user_text_low && pc < self.user_text_high {
+                let sp = self.cpu.sp();
+                let cyc = self.total_cycles as u32;
+                self.user_pc_ring[self.user_pc_write] = (pc, sp, cyc);
+                self.user_pc_write = (self.user_pc_write + 1) % 32;
+                if self.user_pc_count < 32 {
+                    self.user_pc_count += 1;
+                }
+            }
+
             // Advance scheduler with cycles used at current speed, THEN handle speed change
             cycles_remaining -= cycles_used as i32;
             self.scheduler.advance(cycles_used as u64);
@@ -890,8 +929,18 @@ impl Emu {
             // Check for CPU speed change AFTER advancing scheduler
             let new_cpu_speed = self.bus.ports.control.cpu_speed();
             if new_cpu_speed != cpu_speed {
-                let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
-                let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+                let old_mhz = match cpu_speed {
+                    0 => 6,
+                    1 => 12,
+                    2 => 24,
+                    _ => 48,
+                };
+                let new_mhz = match new_cpu_speed {
+                    0 => 6,
+                    1 => 12,
+                    2 => 24,
+                    _ => 48,
+                };
                 self.scheduler.convert_cpu_events(new_mhz, old_mhz);
                 self.scheduler.set_cpu_speed(new_cpu_speed);
                 // Convert bus.cycles to the new rate (was previously in bus.write_byte,
@@ -953,7 +1002,9 @@ impl Emu {
 
                 loop {
                     // Stop if device went off during this frame (OS wrote POWER bit 6)
-                    if self.is_off() { break; }
+                    if self.is_off() {
+                        break;
+                    }
 
                     let skip = self.scheduler.cycles_until_next_event();
                     if skip == 0 {
@@ -993,7 +1044,9 @@ impl Emu {
                         let batch = HALT_TICK_BATCH
                             .min(to_sched_second.max(1))
                             .min(cycles_remaining.max(0) as u64);
-                        if batch == 0 { break; }
+                        if batch == 0 {
+                            break;
+                        }
                         self.bus.add_cycles(batch);
                         cycles_remaining -= batch as i32;
                         self.scheduler.advance(batch);
@@ -1007,7 +1060,9 @@ impl Emu {
                     }
 
                     let skip = skip.min(cycles_remaining.max(0) as u64);
-                    if skip == 0 { break; }
+                    if skip == 0 {
+                        break;
+                    }
 
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
@@ -1034,9 +1089,15 @@ impl Emu {
                     }
 
                     // Check wake conditions
-                    if self.cpu.irq_pending && self.cpu.iff1 { break; }
-                    if self.cpu.nmi_pending { break; }
-                    if cycles_remaining <= 0 { break; }
+                    if self.cpu.irq_pending && self.cpu.iff1 {
+                        break;
+                    }
+                    if self.cpu.nmi_pending {
+                        break;
+                    }
+                    if cycles_remaining <= 0 {
+                        break;
+                    }
                 }
 
                 // Flush any remaining peripheral debt
@@ -1056,8 +1117,8 @@ impl Emu {
         {
             self.frame_count += 1;
             // Detect stuck-in-ISR: low PC, iff1=false, not halted, actively running
-            let is_stuck_isr = !self.cpu.halted && !self.cpu.iff1 && self.cpu.iff2
-                && self.cpu.pc < 0x002000;
+            let is_stuck_isr =
+                !self.cpu.halted && !self.cpu.iff1 && self.cpu.iff2 && self.cpu.pc < 0x002000;
             // Log every 60 frames (~1 second) or when CPU is stuck
             let is_stuck_halt = self.cpu.halted && !self.cpu.iff1;
             if self.frame_count % 60 == 0 || is_stuck_halt || is_stuck_isr {
@@ -1135,8 +1196,18 @@ impl Emu {
 
             let new_cpu_speed = self.bus.ports.control.cpu_speed();
             if new_cpu_speed != cpu_speed {
-                let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
-                let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+                let old_mhz = match cpu_speed {
+                    0 => 6,
+                    1 => 12,
+                    2 => 24,
+                    _ => 48,
+                };
+                let new_mhz = match new_cpu_speed {
+                    0 => 6,
+                    1 => 12,
+                    2 => 24,
+                    _ => 48,
+                };
                 self.scheduler.convert_cpu_events(new_mhz, old_mhz);
                 self.scheduler.set_cpu_speed(new_cpu_speed);
                 let total = self.bus.total_cycles();
@@ -1182,9 +1253,13 @@ impl Emu {
                 loop {
                     let skip = self.scheduler.cycles_until_next_event();
                     if skip == 0 {
-                        if !self.cpu.iff1 && !self.cpu.nmi_pending { break; }
+                        if !self.cpu.iff1 && !self.cpu.nmi_pending {
+                            break;
+                        }
                         let batch = HALT_TICK_BATCH.min(cycles_remaining.max(0) as u64);
-                        if batch == 0 { break; }
+                        if batch == 0 {
+                            break;
+                        }
                         self.bus.add_cycles(batch);
                         cycles_remaining -= batch as i32;
                         self.scheduler.advance(batch);
@@ -1197,7 +1272,9 @@ impl Emu {
                     }
 
                     let skip = skip.min(cycles_remaining.max(0) as u64);
-                    if skip == 0 { break; }
+                    if skip == 0 {
+                        break;
+                    }
 
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
@@ -1219,9 +1296,15 @@ impl Emu {
                         peripheral_debt = 0;
                     }
 
-                    if self.cpu.irq_pending && self.cpu.iff1 { break; }
-                    if self.cpu.nmi_pending { break; }
-                    if cycles_remaining <= 0 { break; }
+                    if self.cpu.irq_pending && self.cpu.iff1 {
+                        break;
+                    }
+                    if self.cpu.nmi_pending {
+                        break;
+                    }
+                    if cycles_remaining <= 0 {
+                        break;
+                    }
                 }
 
                 if peripheral_debt > 0 {
@@ -1273,8 +1356,12 @@ impl Emu {
 
         // Handle CPU_SIGNAL_ANY_KEY equivalent
         if self.cpu.any_key_wake {
-            log_evt!("ANY_KEY_CHECK: mode={} halted={} iff1={}",
-                self.bus.ports.keypad.mode(), self.cpu.halted, self.cpu.iff1);
+            log_evt!(
+                "ANY_KEY_CHECK: mode={} halted={} iff1={}",
+                self.bus.ports.keypad.mode(),
+                self.cpu.halted,
+                self.cpu.iff1
+            );
             let key_state = self.bus.key_state().clone();
             let should_interrupt = self.bus.ports.keypad.any_key_check(&key_state);
             if should_interrupt {
@@ -1298,8 +1385,18 @@ impl Emu {
 
         let new_cpu_speed = self.bus.ports.control.cpu_speed();
         if new_cpu_speed != cpu_speed {
-            let old_mhz = match cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
-            let new_mhz = match new_cpu_speed { 0 => 6, 1 => 12, 2 => 24, _ => 48 };
+            let old_mhz = match cpu_speed {
+                0 => 6,
+                1 => 12,
+                2 => 24,
+                _ => 48,
+            };
+            let new_mhz = match new_cpu_speed {
+                0 => 6,
+                1 => 12,
+                2 => 24,
+                _ => 48,
+            };
             self.scheduler.convert_cpu_events(new_mhz, old_mhz);
             self.scheduler.set_cpu_speed(new_cpu_speed);
         }
@@ -1340,9 +1437,13 @@ impl Emu {
             loop {
                 let skip = self.scheduler.cycles_until_next_event();
                 if skip == 0 {
-                    if !self.cpu.iff1 && !self.cpu.nmi_pending { break; }
+                    if !self.cpu.iff1 && !self.cpu.nmi_pending {
+                        break;
+                    }
                     let batch = HALT_TICK_BATCH.min(STEP_HALT_CAP - total_advanced);
-                    if batch == 0 { break; }
+                    if batch == 0 {
+                        break;
+                    }
                     self.bus.add_cycles(batch);
                     self.scheduler.advance(batch);
                     self.total_cycles = self.bus.total_cycles();
@@ -1355,7 +1456,9 @@ impl Emu {
                 }
 
                 let skip = skip.min(STEP_HALT_CAP - total_advanced);
-                if skip == 0 { break; }
+                if skip == 0 {
+                    break;
+                }
 
                 self.bus.add_cycles(skip);
                 self.scheduler.advance(skip);
@@ -1372,9 +1475,15 @@ impl Emu {
                     peripheral_debt = 0;
                 }
 
-                if self.cpu.irq_pending && self.cpu.iff1 { break; }
-                if self.cpu.nmi_pending { break; }
-                if total_advanced >= STEP_HALT_CAP { break; }
+                if self.cpu.irq_pending && self.cpu.iff1 {
+                    break;
+                }
+                if self.cpu.nmi_pending {
+                    break;
+                }
+                if total_advanced >= STEP_HALT_CAP {
+                    break;
+                }
             }
 
             if peripheral_debt > 0 {
@@ -1526,9 +1635,8 @@ impl Emu {
                     }
                     // Schedule DMA if needed (relative to this LCD event)
                     if let Some(offset) = result.schedule_dma_offset {
-                        self.scheduler.repeat_relative(
-                            EventId::LcdDma, EventId::Lcd, offset, 0,
-                        );
+                        self.scheduler
+                            .repeat_relative(EventId::LcdDma, EventId::Lcd, offset, 0);
                     }
                     // Reschedule LCD event
                     self.scheduler.repeat(EventId::Lcd, result.duration);
@@ -1554,9 +1662,8 @@ impl Emu {
                         }
                     } else if let Some(offset) = result.schedule_relative {
                         // Schedule relative to LCD event
-                        self.scheduler.repeat_relative(
-                            EventId::LcdDma, EventId::Lcd, offset, 0,
-                        );
+                        self.scheduler
+                            .repeat_relative(EventId::LcdDma, EventId::Lcd, offset, 0);
                     } else {
                         self.scheduler.clear(EventId::LcdDma);
                     }
@@ -1588,8 +1695,9 @@ impl Emu {
             // CEmu: cpu.dmaCycles += div_ceil(last_mem_timestamp, cpu_clock) - cpu.cycles
             let ahead_base_ticks =
                 self.scheduler.dma_last_mem_timestamp - self.scheduler.base_ticks;
-            let stolen_cycles =
-                self.scheduler.base_ticks_to_cpu_cycles_ceil(ahead_base_ticks);
+            let stolen_cycles = self
+                .scheduler
+                .base_ticks_to_cpu_cycles_ceil(ahead_base_ticks);
             if stolen_cycles > 0 {
                 self.scheduler.advance(stolen_cycles);
                 self.bus.add_cycles(stolen_cycles);
@@ -1679,7 +1787,11 @@ impl Emu {
     pub fn set_key(&mut self, row: usize, col: usize, down: bool) {
         // Auto-initialize TI-OS parser on first key press after boot
         // Skip ON key (row 2, col 0) - it's for power management, not normal input
-        if down && !self.boot_init_done && self.total_cycles > BOOT_COMPLETE_CYCLES && !(row == 2 && col == 0) {
+        if down
+            && !self.boot_init_done
+            && self.total_cycles > BOOT_COMPLETE_CYCLES
+            && !(row == 2 && col == 0)
+        {
             // If user's first key IS ENTER, just let it through (don't inject another ENTER)
             // Otherwise, inject ENTER before processing their key
             if row == 6 && col == 0 {
@@ -1688,7 +1800,9 @@ impl Emu {
                 self.disable_apd();
                 // Continue to process user's ENTER press below
             } else {
-                log_evt!("BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER");
+                log_evt!(
+                    "BOOT_INIT: first key press detected, auto-dismissing boot screen with ENTER"
+                );
                 // Press ENTER (row 6, col 0) to dismiss boot screen
                 self.bus.set_key(6, 0, true);
                 self.cpu.any_key_wake = true;
@@ -1728,8 +1842,13 @@ impl Emu {
     /// in the OS system flags area. See APD_FLAGS_ADDR constant for details.
     fn disable_apd(&mut self) {
         let flags = self.bus.peek_byte(APD_FLAGS_ADDR);
-        self.bus.poke_byte(APD_FLAGS_ADDR, flags & !(1 << APD_ABLE_BIT));
-        log_evt!("APD disabled: apdFlags 0x{:02X} -> 0x{:02X}", flags, flags & !(1 << APD_ABLE_BIT));
+        self.bus
+            .poke_byte(APD_FLAGS_ADDR, flags & !(1 << APD_ABLE_BIT));
+        log_evt!(
+            "APD disabled: apdFlags 0x{:02X} -> 0x{:02X}",
+            flags,
+            flags & !(1 << APD_ABLE_BIT)
+        );
     }
 
     /// Get the backlight brightness level (0-255).
@@ -1971,49 +2090,52 @@ impl Emu {
         let mut pos = 0;
 
         // Write header
-        buffer[pos..pos+4].copy_from_slice(&Self::STATE_MAGIC);
+        buffer[pos..pos + 4].copy_from_slice(&Self::STATE_MAGIC);
         pos += 4;
-        buffer[pos..pos+4].copy_from_slice(&Self::STATE_VERSION.to_le_bytes());
+        buffer[pos..pos + 4].copy_from_slice(&Self::STATE_VERSION.to_le_bytes());
         pos += 4;
-        buffer[pos..pos+8].copy_from_slice(&self.compute_rom_hash().to_le_bytes());
+        buffer[pos..pos + 8].copy_from_slice(&self.compute_rom_hash().to_le_bytes());
         pos += 8;
         let data_len = (required - Self::STATE_HEADER_SIZE) as u32;
-        buffer[pos..pos+4].copy_from_slice(&data_len.to_le_bytes());
+        buffer[pos..pos + 4].copy_from_slice(&data_len.to_le_bytes());
         pos += 4;
 
         // Write CPU state
         let cpu_bytes = self.cpu.to_bytes();
-        buffer[pos..pos+Cpu::SNAPSHOT_SIZE].copy_from_slice(&cpu_bytes);
+        buffer[pos..pos + Cpu::SNAPSHOT_SIZE].copy_from_slice(&cpu_bytes);
         pos += Cpu::SNAPSHOT_SIZE;
 
         // Write scheduler state
         let sched_bytes = self.scheduler.to_bytes();
-        buffer[pos..pos+Scheduler::SNAPSHOT_SIZE].copy_from_slice(&sched_bytes);
+        buffer[pos..pos + Scheduler::SNAPSHOT_SIZE].copy_from_slice(&sched_bytes);
         pos += Scheduler::SNAPSHOT_SIZE;
 
         // Write peripheral state
         let periph_bytes = self.bus.ports.to_bytes();
-        buffer[pos..pos+Peripherals::SNAPSHOT_SIZE].copy_from_slice(&periph_bytes);
+        buffer[pos..pos + Peripherals::SNAPSHOT_SIZE].copy_from_slice(&periph_bytes);
         pos += Peripherals::SNAPSHOT_SIZE;
 
         // Write Emu metadata
-        buffer[pos] = if self.powered_on { 1 } else { 0 }; pos += 1;
-        buffer[pos..pos+8].copy_from_slice(&self.total_cycles.to_le_bytes()); pos += 8;
-        buffer[pos] = if self.boot_init_done { 1 } else { 0 }; pos += 1;
+        buffer[pos] = if self.powered_on { 1 } else { 0 };
+        pos += 1;
+        buffer[pos..pos + 8].copy_from_slice(&self.total_cycles.to_le_bytes());
+        pos += 8;
+        buffer[pos] = if self.boot_init_done { 1 } else { 0 };
+        pos += 1;
         pos += 6; // Padding to 16 bytes
 
         // Write RAM. RAM is lazily allocated; an untouched RAM image is all zeroes.
         let ram_data = self.bus.ram.data();
-        buffer[pos..pos+RAM_SIZE].fill(0);
+        buffer[pos..pos + RAM_SIZE].fill(0);
         let ram_len = ram_data.len().min(RAM_SIZE);
-        buffer[pos..pos+ram_len].copy_from_slice(&ram_data[..ram_len]);
+        buffer[pos..pos + ram_len].copy_from_slice(&ram_data[..ram_len]);
         pos += RAM_SIZE;
 
         // Write Flash. Uninitialized flash reads as erased bytes.
         let flash_data = self.bus.flash.data();
-        buffer[pos..pos+FLASH_SIZE].fill(0xFF);
+        buffer[pos..pos + FLASH_SIZE].fill(0xFF);
         let flash_len = flash_data.len().min(FLASH_SIZE);
-        buffer[pos..pos+flash_len].copy_from_slice(&flash_data[..flash_len]);
+        buffer[pos..pos + flash_len].copy_from_slice(&flash_data[..flash_len]);
         pos += FLASH_SIZE;
 
         log_evt!("STATE_SAVED: {} bytes", pos);
@@ -2035,20 +2157,20 @@ impl Emu {
         let mut pos = 0;
 
         // Verify magic
-        if &buffer[pos..pos+4] != &Self::STATE_MAGIC {
+        if &buffer[pos..pos + 4] != &Self::STATE_MAGIC {
             return Err(-102); // Invalid magic
         }
         pos += 4;
 
         // Check version
-        let version = u32::from_le_bytes(buffer[pos..pos+4].try_into().unwrap());
+        let version = u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap());
         if version != Self::STATE_VERSION {
             return Err(-103); // Version mismatch
         }
         pos += 4;
 
         // Verify ROM hash
-        let saved_hash = u64::from_le_bytes(buffer[pos..pos+8].try_into().unwrap());
+        let saved_hash = u64::from_le_bytes(buffer[pos..pos + 8].try_into().unwrap());
         let current_hash = self.compute_rom_hash();
         if saved_hash != current_hash {
             return Err(-104); // ROM mismatch
@@ -2056,39 +2178,50 @@ impl Emu {
         pos += 8;
 
         // Check data length
-        let data_len = u32::from_le_bytes(buffer[pos..pos+4].try_into().unwrap()) as usize;
+        let data_len = u32::from_le_bytes(buffer[pos..pos + 4].try_into().unwrap()) as usize;
         pos += 4;
 
-        let expected_data = Cpu::SNAPSHOT_SIZE + Scheduler::SNAPSHOT_SIZE
-            + Peripherals::SNAPSHOT_SIZE + Self::STATE_META_SIZE + RAM_SIZE + FLASH_SIZE;
+        let expected_data = Cpu::SNAPSHOT_SIZE
+            + Scheduler::SNAPSHOT_SIZE
+            + Peripherals::SNAPSHOT_SIZE
+            + Self::STATE_META_SIZE
+            + RAM_SIZE
+            + FLASH_SIZE;
         if data_len < expected_data || buffer.len() < pos + data_len {
             return Err(-105); // Data corruption
         }
 
         // Load CPU state
-        self.cpu.from_bytes(&buffer[pos..pos+Cpu::SNAPSHOT_SIZE])?;
+        self.cpu
+            .from_bytes(&buffer[pos..pos + Cpu::SNAPSHOT_SIZE])?;
         pos += Cpu::SNAPSHOT_SIZE;
 
         // Load scheduler state
-        self.scheduler.from_bytes(&buffer[pos..pos+Scheduler::SNAPSHOT_SIZE])?;
+        self.scheduler
+            .from_bytes(&buffer[pos..pos + Scheduler::SNAPSHOT_SIZE])?;
         pos += Scheduler::SNAPSHOT_SIZE;
 
         // Load peripheral state
-        self.bus.ports.from_bytes(&buffer[pos..pos+Peripherals::SNAPSHOT_SIZE])?;
+        self.bus
+            .ports
+            .from_bytes(&buffer[pos..pos + Peripherals::SNAPSHOT_SIZE])?;
         pos += Peripherals::SNAPSHOT_SIZE;
 
         // Load Emu metadata
-        self.powered_on = buffer[pos] != 0; pos += 1;
-        self.total_cycles = u64::from_le_bytes(buffer[pos..pos+8].try_into().unwrap()); pos += 8;
-        self.boot_init_done = buffer[pos] != 0; pos += 1;
+        self.powered_on = buffer[pos] != 0;
+        pos += 1;
+        self.total_cycles = u64::from_le_bytes(buffer[pos..pos + 8].try_into().unwrap());
+        pos += 8;
+        self.boot_init_done = buffer[pos] != 0;
+        pos += 1;
         pos += 6; // Skip padding
 
         // Load RAM
-        self.bus.ram.load_data(&buffer[pos..pos+RAM_SIZE]);
+        self.bus.ram.load_data(&buffer[pos..pos + RAM_SIZE]);
         pos += RAM_SIZE;
 
         // Load Flash
-        self.bus.flash.load_data(&buffer[pos..pos+FLASH_SIZE]);
+        self.bus.flash.load_data(&buffer[pos..pos + FLASH_SIZE]);
 
         // Sync bus cycle counter with restored total_cycles.
         // load_rom() → reset() zeroed bus.cycles, but total_cycles was restored
@@ -2306,8 +2439,13 @@ impl Emu {
             let verify_key = self.peek_byte(CE_KBD_KEY);
             let verify_extend = self.peek_byte(CE_KEY_EXTEND);
             let verify_flags = self.peek_byte(CE_GRAPH_FLAGS2);
-            log_evt!("SEND_KEY: key=0x{:04X} wrote kbdKey=0x{:02X} keyExtend=0x{:02X} flags=0x{:02X}",
-                key, verify_key, verify_extend, verify_flags);
+            log_evt!(
+                "SEND_KEY: key=0x{:04X} wrote kbdKey=0x{:02X} keyExtend=0x{:02X} flags=0x{:02X}",
+                key,
+                verify_key,
+                verify_extend,
+                verify_flags
+            );
         }
         true
     }
@@ -2511,7 +2649,11 @@ impl Emu {
             match1: timers.match_val(idx, 0),
             match2: timers.match_val(idx, 1),
             control: ((timers.control_word() >> (idx * 3)) & 0x7) as u8
-                | if timers.control_word() & (1 << (9 + idx)) != 0 { 0x08 } else { 0 },
+                | if timers.control_word() & (1 << (9 + idx)) != 0 {
+                    0x08
+                } else {
+                    0
+                },
         })
     }
 
@@ -2545,6 +2687,34 @@ impl Emu {
     /// Dump control port values for comparison with CEmu
     pub fn dump_control_ports(&self) -> String {
         self.bus.ports.control.dump()
+    }
+
+    /// Set user text range for PC tracking (only PCs in this range are recorded)
+    pub fn set_user_text_range(&mut self, low: u32, high: u32) {
+        self.user_text_low = low;
+        self.user_text_high = high;
+        self.user_pc_write = 0;
+        self.user_pc_count = 0;
+    }
+
+    /// Dump the user-code PC ring buffer
+    pub fn dump_user_pcs(&self) -> String {
+        let mut output = String::new();
+        output.push_str(&format!(
+            "User-code PC history (range {:06X}-{:06X}, {} entries):\n",
+            self.user_text_low, self.user_text_high, self.user_pc_count
+        ));
+        let start = if self.user_pc_count < 32 {
+            0
+        } else {
+            self.user_pc_write
+        };
+        for i in 0..self.user_pc_count {
+            let idx = (start + i) % 32;
+            let (pc, sp, cyc) = self.user_pc_ring[idx];
+            output.push_str(&format!("  PC={:06X} SP={:06X} cyc={}\n", pc, sp, cyc));
+        }
+        output
     }
 
     /// Dump execution history for debugging
@@ -2702,7 +2872,9 @@ impl Emu {
 
     /// Get detailed write log (Vec of (addr, value, cycle))
     pub fn get_write_log(&self) -> Vec<(u32, u8, u64)> {
-        self.bus.write_tracer.detailed_log()
+        self.bus
+            .write_tracer
+            .detailed_log()
             .iter()
             .map(|rec| (rec.addr, rec.value, rec.cycle))
             .collect()
@@ -2840,7 +3012,10 @@ mod tests {
         // The prefetch fetches the first byte at PC=0, which adds flash timing cycles.
         // With serial flash enabled by default, this is typically 10 cycles (cache miss).
         // We just verify it's small and consistent, rather than exactly 0.
-        assert!(emu.total_cycles <= 20, "total_cycles after reset should be small prefetch cost");
+        assert!(
+            emu.total_cycles <= 20,
+            "total_cycles after reset should be small prefetch cost"
+        );
         assert!(!emu.powered_on); // Reset should power off the calculator
     }
 
@@ -2943,16 +3118,22 @@ mod tests {
         emu.press_on_key();
 
         let status = emu.bus.ports.interrupt.read(0x00);
-        assert_ne!(status & (sources::ON_KEY as u8), 0,
-            "ON_KEY status should be set after press");
+        assert_ne!(
+            status & (sources::ON_KEY as u8),
+            0,
+            "ON_KEY status should be set after press"
+        );
 
         // Release ON key — ON_KEY raw clears (matches CEmu: intrpt_set(INT_ON, false))
         emu.release_on_key();
 
         // ON_KEY should clear after release (non-latched follows raw)
         let status_after = emu.bus.ports.interrupt.read(0x00);
-        assert_eq!(status_after & (sources::ON_KEY as u8), 0,
-            "ON_KEY status should clear after release (non-latched)");
+        assert_eq!(
+            status_after & (sources::ON_KEY as u8),
+            0,
+            "ON_KEY status should clear after release (non-latched)"
+        );
     }
 
     #[test]
@@ -2970,16 +3151,25 @@ mod tests {
         // Configure WAKE as inverted (matches what the OS does before sleeping)
         // Inverted register is at offset 0x10 in interrupt controller
         // WAKE is bit 19 → byte 2 (bits 16-23), bit 3
-        emu.bus.ports.interrupt.write(0x12, (sources::WAKE >> 16) as u8);
+        emu.bus
+            .ports
+            .interrupt
+            .write(0x12, (sources::WAKE >> 16) as u8);
 
         // Press ON key — should pulse WAKE and clear off
         emu.press_on_key();
 
-        assert!(!emu.bus.ports.control.is_off(), "off should be cleared after wake");
+        assert!(
+            !emu.bus.ports.control.is_off(),
+            "off should be cleared after wake"
+        );
         // For inverted WAKE, pulse sets status via the clear step
         let wake_byte = emu.bus.ports.interrupt.read(0x02); // status bits 16-23
-        assert_ne!(wake_byte & ((sources::WAKE >> 16) as u8), 0,
-            "WAKE status should be set after pulse (inverted logic)");
+        assert_ne!(
+            wake_byte & ((sources::WAKE >> 16) as u8),
+            0,
+            "WAKE status should be set after pulse (inverted logic)"
+        );
     }
 
     #[test]
@@ -3005,7 +3195,13 @@ mod tests {
     }
 
     /// Helper: create a minimal .8xp from components
-    fn make_test_8xp(var_type: u8, name: &[u8; 8], version: u8, flag: u8, var_data: &[u8]) -> Vec<u8> {
+    fn make_test_8xp(
+        var_type: u8,
+        name: &[u8; 8],
+        version: u8,
+        flag: u8,
+        var_data: &[u8],
+    ) -> Vec<u8> {
         let mut file = Vec::new();
         file.extend_from_slice(b"**TI83F*");
         file.extend_from_slice(&[0x1A, 0x0A, 0x00]);
@@ -3020,7 +3216,9 @@ mod tests {
         file.push(flag);
         file.extend_from_slice(&(var_data.len() as u16).to_le_bytes());
         file.extend_from_slice(var_data);
-        let checksum: u16 = file[55..].iter().fold(0u16, |acc, &b| acc.wrapping_add(b as u16));
+        let checksum: u16 = file[55..]
+            .iter()
+            .fold(0u16, |acc, &b| acc.wrapping_add(b as u16));
         file.extend_from_slice(&checksum.to_le_bytes());
         file
     }
@@ -3099,8 +3297,8 @@ mod tests {
 
         // First entry at 0x0C0000
         assert_eq!(emu.bus.flash.peek(0x0C0000), 0x05); // Program type
-        // Second entry should follow the first
-        // First entry size: 6 + 1 + 5 + 3 = 15 bytes, so next at 0x0C000F
+                                                        // Second entry should follow the first
+                                                        // First entry size: 6 + 1 + 5 + 3 = 15 bytes, so next at 0x0C000F
         let second_start = 0x0C0000u32 + 6 + 1 + 5 + 3;
         assert_eq!(emu.bus.flash.peek(second_start), 0x15); // AppVar type
     }
@@ -3129,7 +3327,7 @@ mod tests {
 
             // Verify the DOOM entry was written at 0x0C0000
             assert_eq!(emu.bus.flash.peek(0x0C0000), 0x06); // Protected program
-            // namelen = 4
+                                                            // namelen = 4
             assert_eq!(emu.bus.flash.peek(0x0C0006), 0x04);
             // name = "DOOM"
             assert_eq!(emu.bus.flash.peek(0x0C0007), b'D');

@@ -1313,7 +1313,7 @@ impl Cpu {
                 self.set_flag_n(false);
                 self.set_flag_pv(bc_val != 0);
                 bus.add_cycles(1); // CEmu: cpu.cycles += internalCycles (1 for LDD)
-                // F3/F5 preserved (CEmu behavior)
+                                   // F3/F5 preserved (CEmu behavior)
                 16
             }
             // LDIR - Load, increment, repeat

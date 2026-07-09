@@ -741,7 +741,7 @@ fn test_z80_mode_ld_a_hl_indirect() {
     setup_z80_mode(&mut cpu);
 
     cpu.hl = 0x1234; // 16-bit address
-    // In Z80 mode, (HL) should access 0xD01234 (MBASE=0xD0)
+                     // In Z80 mode, (HL) should access 0xD01234 (MBASE=0xD0)
     bus.poke_byte(0xD01234, 0x42);
 
     // LD A,(HL) - opcode 0x7E
@@ -1018,7 +1018,11 @@ fn test_z80_mode_rrd_uses_mbase() {
     //      low nibble of A -> high nibble of (HL)
     //      high nibble of (HL) -> low nibble of (HL)
     assert_eq!(cpu.a, 0x14, "A should be 0x14 after RRD");
-    assert_eq!(bus.peek_byte(0xD02000), 0x23, "(HL) should be 0x23 after RRD");
+    assert_eq!(
+        bus.peek_byte(0xD02000),
+        0x23,
+        "(HL) should be 0x23 after RRD"
+    );
 }
 
 #[test]
@@ -1041,7 +1045,11 @@ fn test_z80_mode_rld_uses_mbase() {
     //      low nibble of (HL) -> high nibble of (HL)
     //      low nibble of A -> low nibble of (HL)
     assert_eq!(cpu.a, 0x13, "A should be 0x13 after RLD");
-    assert_eq!(bus.peek_byte(0xD02000), 0x42, "(HL) should be 0x42 after RLD");
+    assert_eq!(
+        bus.peek_byte(0xD02000),
+        0x42,
+        "(HL) should be 0x42 after RLD"
+    );
 }
 
 #[test]
@@ -1115,6 +1123,14 @@ fn test_z80_mode_ex_sp_ix_uses_mbase() {
     step_full(&mut cpu, &mut bus);
 
     assert_eq!(cpu.ix & 0xFFFF, 0x5678, "IX should have value from stack");
-    assert_eq!(bus.peek_byte(0xD04000), 0x34, "Stack low byte should be old IX low");
-    assert_eq!(bus.peek_byte(0xD04001), 0x12, "Stack high byte should be old IX high");
+    assert_eq!(
+        bus.peek_byte(0xD04000),
+        0x34,
+        "Stack low byte should be old IX low"
+    );
+    assert_eq!(
+        bus.peek_byte(0xD04001),
+        0x12,
+        "Stack high byte should be old IX high"
+    );
 }
