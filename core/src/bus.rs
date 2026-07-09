@@ -1429,6 +1429,21 @@ impl Bus {
                 self.ports
                     .rtc
                     .write(offset, value, self.cycles, self.ports.control.cpu_speed());
+
+                // Sync the RTC interrupt line (same as Peripherals.write).
+                // CEmu: rtc_write(0x34) does intrpt_set(INT_RTC, rtc.interrupt &= ~byte)
+                // inside the shared device handler, so the level update must happen on
+                // the port-I/O path too. Without this, the OS acks the RTC interrupt
+                // via OUT0 but the controller line stays high -> IRQ storm at boot.
+                if self.ports.rtc.has_interrupt() {
+                    self.ports
+                        .interrupt
+                        .raise(crate::peripherals::interrupt::sources::RTC);
+                } else {
+                    self.ports
+                        .interrupt
+                        .clear_raw(crate::peripherals::interrupt::sources::RTC);
+                }
             }
             0xA => {
                 // Keypad - mask with 0x7F
