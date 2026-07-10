@@ -111,11 +111,16 @@ interface CalculatorProps {
   autoLaunch?: boolean;
 }
 
-const MIN_KEY_HOLD_MS = 50;
+const MIN_KEY_HOLD_MS = 80;
+const MIN_KEY_GAP_MS = 80;
 
 interface ActiveKeyPress {
+  id: string;
+  row: number;
+  col: number;
   backend: EmulatorBackend;
-  pressedAt: number;
+  pressedAt: number | null;
+  releaseRequested: boolean;
   releaseTimer: ReturnType<typeof setTimeout> | null;
 }
 
@@ -162,7 +167,15 @@ export function Calculator({
   const romHashRef = useRef<string | null>(null);
   const backendTypeRef = useRef<BackendType>(defaultBackend);
   const programInputRef = useRef<HTMLInputElement>(null);
-  const activeKeysRef = useRef<Map<string, ActiveKeyPress>>(new Map());
+  const activeKeysRef = useRef<Map<string, ActiveKeyPress[]>>(new Map());
+  const inputQueueRef = useRef<ActiveKeyPress[]>([]);
+  const currentInputRef = useRef<ActiveKeyPress | null>(null);
+  const inputGapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pumpInputQueueRef = useRef<() => void>(() => {});
+  const syntheticInputTimersRef = useRef<
+    Set<ReturnType<typeof setTimeout>>
+  >(new Set());
+  const releaseAllInputKeysRef = useRef<() => void>(() => {});
   const keyboardKeysRef = useRef<Map<string, [number, number]>>(new Map());
   const suppressSaveRef = useRef(false);
 
@@ -214,6 +227,7 @@ export function Calculator({
       cancelAnimationFrame(oldAnimation);
       animationRef.current = 0;
     }
+    releaseAllInputKeysRef.current();
     if (oldBackend) {
       oldBackend.destroy();
     }
@@ -424,6 +438,7 @@ export function Calculator({
 
     return () => {
       cancelled = true;
+      releaseAllInputKeysRef.current();
       if (animationRef.current) {
         cancelAnimationFrame(animationRef.current);
         animationRef.current = 0;
@@ -447,75 +462,165 @@ export function Calculator({
     }, 500);
   }, [saveState]);
 
-  const pressInputKey = useCallback((row: number, col: number) => {
-    const backend = backendRef.current;
-    if (!backend) return;
+  const removeActiveKey = useCallback((entry: ActiveKeyPress) => {
+    const entries = activeKeysRef.current.get(entry.id);
+    if (!entries) return;
 
-    const id = `${row}:${col}`;
-    const existing = activeKeysRef.current.get(id);
-    if (existing) {
-      if (existing.releaseTimer === null) return;
-      clearTimeout(existing.releaseTimer);
-      try {
-        existing.backend.setKey(row, col, false);
-      } catch {
-        // The previous backend may have been replaced between input events.
-      }
-      activeKeysRef.current.delete(id);
+    const remaining = entries.filter((candidate) => candidate !== entry);
+    if (remaining.length === 0) {
+      activeKeysRef.current.delete(entry.id);
+    } else {
+      activeKeysRef.current.set(entry.id, remaining);
     }
-
-    backend.setKey(row, col, true);
-    activeKeysRef.current.set(id, {
-      backend,
-      pressedAt: performance.now(),
-      releaseTimer: null,
-    });
   }, []);
 
-  const releaseInputKey = useCallback(
-    (row: number, col: number) => {
-      const id = `${row}:${col}`;
-      const entry = activeKeysRef.current.get(id);
-      if (!entry || entry.releaseTimer !== null) return;
+  const finishInputKey = useCallback(
+    (entry: ActiveKeyPress) => {
+      if (currentInputRef.current !== entry) return;
 
-      const finishRelease = () => {
-        if (activeKeysRef.current.get(id) !== entry) return;
-        activeKeysRef.current.delete(id);
-        try {
-          entry.backend.setKey(row, col, false);
-        } catch {
-          // The backend can be destroyed while a delayed release is pending.
-        }
-        debouncedSave();
-      };
+      if (entry.releaseTimer !== null) {
+        clearTimeout(entry.releaseTimer);
+        entry.releaseTimer = null;
+      }
+
+      try {
+        entry.backend.setKey(entry.row, entry.col, false);
+      } catch {
+        // The backend can be destroyed while a delayed release is pending.
+      }
+
+      currentInputRef.current = null;
+      removeActiveKey(entry);
+      debouncedSave();
+
+      inputGapTimerRef.current = setTimeout(() => {
+        inputGapTimerRef.current = null;
+        pumpInputQueueRef.current();
+      }, MIN_KEY_GAP_MS);
+    },
+    [debouncedSave, removeActiveKey],
+  );
+
+  const scheduleInputRelease = useCallback(
+    (entry: ActiveKeyPress) => {
+      if (
+        currentInputRef.current !== entry ||
+        entry.pressedAt === null ||
+        !entry.releaseRequested ||
+        entry.releaseTimer !== null
+      ) {
+        return;
+      }
 
       const elapsed = performance.now() - entry.pressedAt;
       const delay = Math.max(0, MIN_KEY_HOLD_MS - elapsed);
       if (delay === 0) {
-        finishRelease();
+        finishInputKey(entry);
       } else {
-        entry.releaseTimer = setTimeout(finishRelease, delay);
+        entry.releaseTimer = setTimeout(() => finishInputKey(entry), delay);
       }
     },
-    [debouncedSave],
+    [finishInputKey],
+  );
+
+  const pumpInputQueue = useCallback(() => {
+    if (currentInputRef.current || inputGapTimerRef.current) return;
+
+    let entry = inputQueueRef.current.shift();
+    while (entry) {
+      const entries = activeKeysRef.current.get(entry.id);
+      if (!entries?.includes(entry)) {
+        entry = inputQueueRef.current.shift();
+        continue;
+      }
+
+      currentInputRef.current = entry;
+      entry.pressedAt = performance.now();
+      try {
+        entry.backend.setKey(entry.row, entry.col, true);
+      } catch {
+        currentInputRef.current = null;
+        removeActiveKey(entry);
+        entry = inputQueueRef.current.shift();
+        continue;
+      }
+
+      scheduleInputRelease(entry);
+      return;
+    }
+  }, [removeActiveKey, scheduleInputRelease]);
+
+  pumpInputQueueRef.current = pumpInputQueue;
+
+  const pressInputKey = useCallback(
+    (row: number, col: number, sourceId = `pointer:${row}:${col}`) => {
+      const backend = backendRef.current;
+      if (!backend) return;
+
+      const id = sourceId;
+      const entries = activeKeysRef.current.get(id) ?? [];
+      if (entries.some((entry) => !entry.releaseRequested)) return;
+
+      const entry: ActiveKeyPress = {
+        id,
+        row,
+        col,
+        backend,
+        pressedAt: null,
+        releaseRequested: false,
+        releaseTimer: null,
+      };
+      entries.push(entry);
+      activeKeysRef.current.set(id, entries);
+      inputQueueRef.current.push(entry);
+      pumpInputQueue();
+    },
+    [pumpInputQueue],
+  );
+
+  const releaseInputKey = useCallback(
+    (row: number, col: number, sourceId = `pointer:${row}:${col}`) => {
+      const entries = activeKeysRef.current.get(sourceId);
+      const entry = entries?.find((candidate) => !candidate.releaseRequested);
+      if (!entry) return;
+
+      entry.releaseRequested = true;
+      scheduleInputRelease(entry);
+    },
+    [scheduleInputRelease],
   );
 
   const releaseAllInputKeys = useCallback(() => {
-    const activeKeys = activeKeysRef.current;
+    for (const timer of syntheticInputTimersRef.current) {
+      clearTimeout(timer);
+    }
+    syntheticInputTimersRef.current.clear();
 
-    for (const [id, entry] of activeKeys) {
-      if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
-      const [row, col] = id.split(":").map(Number);
-      try {
-        entry.backend.setKey(row, col, false);
-      } catch {
-        // The backend can already be gone during effect cleanup.
+    if (inputGapTimerRef.current !== null) {
+      clearTimeout(inputGapTimerRef.current);
+      inputGapTimerRef.current = null;
+    }
+
+    for (const entries of activeKeysRef.current.values()) {
+      for (const entry of entries) {
+        if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
+        if (entry.pressedAt !== null) {
+          try {
+            entry.backend.setKey(entry.row, entry.col, false);
+          } catch {
+            // The backend can already be gone during effect cleanup.
+          }
+        }
       }
     }
 
-    activeKeys.clear();
+    activeKeysRef.current.clear();
+    inputQueueRef.current = [];
+    currentInputRef.current = null;
     keyboardKeysRef.current.clear();
   }, []);
+
+  releaseAllInputKeysRef.current = releaseAllInputKeys;
 
   // Auto-save on visibility change and page unload
   useEffect(() => {
@@ -556,6 +661,8 @@ export function Calculator({
 
   // Handle ROM file loading
   const handleRomLoad = useCallback(async (file: File) => {
+    releaseAllInputKeys();
+
     const backend = backendRef.current;
     const storage = storageRef.current;
     if (!backend || !storage) return;
@@ -601,7 +708,7 @@ export function Calculator({
       }
       setError(`Failed to read ROM file: ${err}`);
     }
-  }, []);
+  }, [releaseAllInputKeys]);
 
   // Render frame to canvas
   const renderFrame = useCallback(() => {
@@ -775,10 +882,12 @@ export function Calculator({
         // Square root: 2nd + x²
         pressInputKey(1, 5);
         releaseInputKey(1, 5);
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          syntheticInputTimersRef.current.delete(timer);
           pressInputKey(2, 4);
           releaseInputKey(2, 4);
         }, MIN_KEY_HOLD_MS + 10);
+        syntheticInputTimersRef.current.add(timer);
         return;
       }
 
@@ -828,7 +937,7 @@ export function Calculator({
         e.preventDefault();
         if (!keyboardKeysRef.current.has(e.code)) {
           keyboardKeysRef.current.set(e.code, mapping);
-          pressInputKey(mapping[0], mapping[1]);
+          pressInputKey(mapping[0], mapping[1], `keyboard:${e.code}`);
         }
       }
     };
@@ -845,11 +954,11 @@ export function Calculator({
         return;
       }
 
-      const mapping = keyboardKeysRef.current.get(e.code) ?? KEY_MAP[e.key];
+      const mapping = keyboardKeysRef.current.get(e.code);
       if (mapping) {
         e.preventDefault();
         keyboardKeysRef.current.delete(e.code);
-        releaseInputKey(mapping[0], mapping[1]);
+        releaseInputKey(mapping[0], mapping[1], `keyboard:${e.code}`);
       }
     };
 
@@ -877,6 +986,8 @@ export function Calculator({
   };
 
   const handleReset = async () => {
+    releaseAllInputKeys();
+
     const storage = storageRef.current;
     const romHash = romHashRef.current;
 
@@ -895,6 +1006,8 @@ export function Calculator({
   };
 
   const handleEjectRom = async () => {
+    releaseAllInputKeys();
+
     // Save state before ejecting
     await saveState();
 
@@ -910,6 +1023,8 @@ export function Calculator({
   // Core logic for injecting .8xp/.8xv program files
   const loadProgramFiles = useCallback(async (files: File[]) => {
     if (files.length === 0) return;
+
+    releaseAllInputKeys();
 
     const romData = romDataRef.current;
     if (!romData) {
@@ -1013,7 +1128,7 @@ export function Calculator({
       console.error("[Program] Error:", err);
       setError(`Failed to load programs: ${err}`);
     }
-  }, []);
+  }, [releaseAllInputKeys]);
 
   // Resend last program files — re-reads from disk via FileSystemFileHandle if available
   const resendPrograms = useCallback(async () => {
