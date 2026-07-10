@@ -400,32 +400,11 @@ impl KeypadController {
         result
     }
 
-    /// Check if keypad interrupt should fire based on mode and key state
-    /// Returns true in mode 1 (any-key mode) or mode 2 (continuous) when any key is pressed
-    /// Note: CPU wake is handled separately via the any_key_wake signal
-    pub fn check_interrupt(&self, key_state: &[[bool; KEYPAD_COLS]; KEYPAD_ROWS]) -> bool {
-        // CEmu's keypad_any_check() runs when mode == 1 (any-key detection mode)
-        // Mode 2 (continuous) also generates interrupts via the scan mechanism
-        // The TI-OS typically uses mode 1 for key detection
-        let m = self.mode();
-        if m != mode::SINGLE && m != mode::CONTINUOUS {
-            return false;
-        }
-
-        // Check if any key is pressed (excluding ON key which has its own handling)
-        for (row_idx, row) in key_state.iter().enumerate() {
-            for (col_idx, &pressed) in row.iter().enumerate() {
-                // Skip ON key (row 2, col 0) - handled separately
-                if row_idx == 2 && col_idx == 0 {
-                    continue;
-                }
-                if pressed {
-                    return true;
-                }
-            }
-        }
-
-        false
+    /// Whether the controller's latched status requests an interrupt.
+    /// Matches CEmu's `keypad_intrpt_check`: the line remains asserted until
+    /// software acknowledges the enabled status bits.
+    pub fn interrupt_pending(&self) -> bool {
+        (self.status & self.enable) != 0
     }
 
     // ========== Register read/write ==========
@@ -760,47 +739,19 @@ mod tests {
     }
 
     #[test]
-    fn test_interrupt_check() {
+    fn test_interrupt_pending_uses_latched_status() {
         let mut kp = KeypadController::new();
-        let mut keys = empty_key_state();
+        kp.enable = status::ANY_KEY;
+        kp.status = status::ANY_KEY;
 
-        // No keys, no interrupt
-        assert!(!kp.check_interrupt(&keys));
+        assert!(kp.interrupt_pending());
 
-        // Enable continuous mode and interrupt mask
-        kp.write(regs::CONTROL, mode::CONTINUOUS);
-        kp.enable = 0x04;
+        // Releasing a key changes the live matrix, not the latched IRQ status.
+        kp.set_key_edge(0, 0, false);
+        assert!(kp.interrupt_pending());
 
-        // Still no keys
-        assert!(!kp.check_interrupt(&keys));
-
-        // Press a key
-        keys[0][0] = true;
-        assert!(kp.check_interrupt(&keys));
-    }
-
-    #[test]
-    fn test_interrupt_different_modes() {
-        let mut kp = KeypadController::new();
-        let mut keys = empty_key_state();
-        keys[0][0] = true;
-        kp.enable = 0x04; // Enable any key interrupt
-
-        // IDLE mode - no interrupt
-        kp.write(regs::CONTROL, mode::IDLE);
-        assert!(!kp.check_interrupt(&keys));
-
-        // SINGLE mode (mode 1) - interrupt! (CEmu's keypad_any_check runs for mode 1)
-        kp.write(regs::CONTROL, mode::SINGLE);
-        assert!(kp.check_interrupt(&keys));
-
-        // CONTINUOUS mode - interrupt!
-        kp.write(regs::CONTROL, mode::CONTINUOUS);
-        assert!(kp.check_interrupt(&keys));
-
-        // MULTI_GROUP mode - no interrupt (handled differently)
-        kp.write(regs::CONTROL, mode::MULTI_GROUP);
-        assert!(!kp.check_interrupt(&keys));
+        kp.write(regs::INT_STATUS, status::ANY_KEY);
+        assert!(!kp.interrupt_pending());
     }
 
     #[test]

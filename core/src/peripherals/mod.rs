@@ -126,7 +126,7 @@ impl Peripherals {
     }
 
     /// Update keypad state from emulator
-    /// Sets key_state and edge flag, and raises keypad interrupt on press.
+    /// Sets the live key state and edge flag, then signals the CPU separately.
     ///
     /// CEmu's emu_keypad_event sets the atomic flags and signals CPU.
     /// The TI-OS then checks keypad registers during interrupt handling.
@@ -138,12 +138,6 @@ impl Peripherals {
             // Edge flag persists until queried by any_key_check, allowing
             // detection of quick press/release even if released before query
             self.keypad.set_key_edge(row, col, pressed);
-
-            // Raise keypad interrupt on key press so TI-OS will check the keypad
-            // This is critical for TI-OS to detect keys when the keypad is in mode 0
-            if pressed {
-                self.interrupt.raise(sources::KEYPAD);
-            }
         }
     }
 
@@ -369,9 +363,8 @@ impl Peripherals {
 
         // Tick keypad scan timing and update interrupt state
         // CEmu calls intrpt_set(INT_KEYPAD, status & enable) which sets OR clears raw
-        let keypad_scan_irq = self.keypad.tick(cycles, &self.key_state);
-        let keypad_any_irq = self.keypad.check_interrupt(&self.key_state);
-        if keypad_scan_irq || keypad_any_irq {
+        self.keypad.tick(cycles, &self.key_state);
+        if self.keypad.interrupt_pending() {
             self.interrupt.raise(sources::KEYPAD);
         } else {
             self.interrupt.clear_raw(sources::KEYPAD);
@@ -1084,6 +1077,27 @@ mod tests {
         // Tick should detect key and raise interrupt
         let pending = p.tick(1, 0);
         assert!(pending);
+    }
+
+    #[test]
+    fn test_tick_preserves_quick_key_interrupt_until_ack() {
+        let mut p = Peripherals::new();
+
+        p.write_test(KEYPAD_BASE + 0x00, 0x01); // Any-key mode
+        p.write_test(KEYPAD_BASE + 0x0C, 0x04); // Enable any-key status
+        p.write_test(INT_BASE + 0x05, (sources::KEYPAD >> 8) as u8);
+
+        // Web input can press and release entirely between emulator frames.
+        p.set_key(0, 0, true);
+        p.set_key(0, 0, false);
+        let key_state = p.key_state;
+        assert!(p.keypad.any_key_check(&key_state));
+
+        p.tick(1, 0);
+        assert!(p.interrupt.irq_pending());
+
+        p.write_test(KEYPAD_BASE + 0x08, 0x04);
+        assert!(!p.interrupt.irq_pending());
     }
 
     #[test]
