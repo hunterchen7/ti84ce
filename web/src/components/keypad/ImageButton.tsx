@@ -17,7 +17,7 @@ export function ImageButton({ region, onDown, onUp }: ImageButtonProps) {
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
       setIsPressed(true);
       onDown();
     },
@@ -27,18 +27,30 @@ export function ImageButton({ region, onDown, onUp }: ImageButtonProps) {
   const handlePointerUp = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       setIsPressed(false);
       onUp();
+      const target = e.currentTarget as HTMLElement;
+      if (
+        typeof target.hasPointerCapture === "function" &&
+        target.hasPointerCapture(e.pointerId)
+      ) {
+        target.releasePointerCapture(e.pointerId);
+      }
     },
     [onUp],
   );
 
   const handlePointerCancel = useCallback(
     (e: React.PointerEvent) => {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       setIsPressed(false);
       onUp();
+      const target = e.currentTarget as HTMLElement;
+      if (
+        typeof target.hasPointerCapture === "function" &&
+        target.hasPointerCapture(e.pointerId)
+      ) {
+        target.releasePointerCapture(e.pointerId);
+      }
     },
     [onUp],
   );

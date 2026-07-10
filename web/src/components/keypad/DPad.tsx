@@ -233,7 +233,7 @@ export function DPad({ onKeyDown, onKeyUp }: DPadProps) {
   const handlePointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
       const hit = hitTest(e.clientX, e.clientY);
       if (hit) {
@@ -269,11 +269,17 @@ export function DPad({ onKeyDown, onKeyUp }: DPadProps) {
 
   const handlePointerUp = useCallback(
     (e: React.PointerEvent) => {
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       if (pressedDirection) {
         const coords = DIRECTION_COORDS[pressedDirection];
         onKeyUp(coords[0], coords[1]);
         setPressedDirection(null);
+      }
+      const target = e.currentTarget as HTMLElement;
+      if (
+        typeof target.hasPointerCapture === "function" &&
+        target.hasPointerCapture(e.pointerId)
+      ) {
+        target.releasePointerCapture(e.pointerId);
       }
     },
     [pressedDirection, onKeyUp],

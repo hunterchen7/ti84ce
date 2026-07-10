@@ -111,6 +111,14 @@ interface CalculatorProps {
   autoLaunch?: boolean;
 }
 
+const MIN_KEY_HOLD_MS = 50;
+
+interface ActiveKeyPress {
+  backend: EmulatorBackend;
+  pressedAt: number;
+  releaseTimer: ReturnType<typeof setTimeout> | null;
+}
+
 export function Calculator({
   className,
   defaultBackend = "rust",
@@ -154,6 +162,9 @@ export function Calculator({
   const romHashRef = useRef<string | null>(null);
   const backendTypeRef = useRef<BackendType>(defaultBackend);
   const programInputRef = useRef<HTMLInputElement>(null);
+  const activeKeysRef = useRef<Map<string, ActiveKeyPress>>(new Map());
+  const keyboardKeysRef = useRef<Map<string, [number, number]>>(new Map());
+  const suppressSaveRef = useRef(false);
 
   // Keep backendTypeRef in sync
   useEffect(() => {
@@ -166,7 +177,14 @@ export function Calculator({
     const storage = storageRef.current;
     const romHash = romHashRef.current;
 
-    if (!backend || !storage || !romHash || !romLoaded) return;
+    if (
+      suppressSaveRef.current ||
+      !backend ||
+      !storage ||
+      !romHash ||
+      !romLoaded
+    )
+      return;
 
     try {
       const t0 = performance.now();
@@ -429,30 +447,112 @@ export function Calculator({
     }, 500);
   }, [saveState]);
 
+  const pressInputKey = useCallback((row: number, col: number) => {
+    const backend = backendRef.current;
+    if (!backend) return;
+
+    const id = `${row}:${col}`;
+    const existing = activeKeysRef.current.get(id);
+    if (existing) {
+      if (existing.releaseTimer === null) return;
+      clearTimeout(existing.releaseTimer);
+      try {
+        existing.backend.setKey(row, col, false);
+      } catch {
+        // The previous backend may have been replaced between input events.
+      }
+      activeKeysRef.current.delete(id);
+    }
+
+    backend.setKey(row, col, true);
+    activeKeysRef.current.set(id, {
+      backend,
+      pressedAt: performance.now(),
+      releaseTimer: null,
+    });
+  }, []);
+
+  const releaseInputKey = useCallback(
+    (row: number, col: number) => {
+      const id = `${row}:${col}`;
+      const entry = activeKeysRef.current.get(id);
+      if (!entry || entry.releaseTimer !== null) return;
+
+      const finishRelease = () => {
+        if (activeKeysRef.current.get(id) !== entry) return;
+        activeKeysRef.current.delete(id);
+        try {
+          entry.backend.setKey(row, col, false);
+        } catch {
+          // The backend can be destroyed while a delayed release is pending.
+        }
+        debouncedSave();
+      };
+
+      const elapsed = performance.now() - entry.pressedAt;
+      const delay = Math.max(0, MIN_KEY_HOLD_MS - elapsed);
+      if (delay === 0) {
+        finishRelease();
+      } else {
+        entry.releaseTimer = setTimeout(finishRelease, delay);
+      }
+    },
+    [debouncedSave],
+  );
+
+  const releaseAllInputKeys = useCallback(() => {
+    const activeKeys = activeKeysRef.current;
+
+    for (const [id, entry] of activeKeys) {
+      if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
+      const [row, col] = id.split(":").map(Number);
+      try {
+        entry.backend.setKey(row, col, false);
+      } catch {
+        // The backend can already be gone during effect cleanup.
+      }
+    }
+
+    activeKeys.clear();
+    keyboardKeysRef.current.clear();
+  }, []);
+
   // Auto-save on visibility change and page unload
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.visibilityState === "hidden") {
+        releaseAllInputKeys();
         saveState();
       }
     };
 
     const handleBeforeUnload = () => {
+      releaseAllInputKeys();
+      saveState();
+    };
+
+    const handlePageHide = () => {
+      releaseAllInputKeys();
       saveState();
     };
 
     const autoSaveInterval = setInterval(() => saveState(), 10_000);
 
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("blur", releaseAllInputKeys);
     window.addEventListener("beforeunload", handleBeforeUnload);
+    window.addEventListener("pagehide", handlePageHide);
 
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("blur", releaseAllInputKeys);
       window.removeEventListener("beforeunload", handleBeforeUnload);
+      window.removeEventListener("pagehide", handlePageHide);
       clearInterval(autoSaveInterval);
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      releaseAllInputKeys();
     };
-  }, [saveState]);
+  }, [releaseAllInputKeys, saveState]);
 
   // Handle ROM file loading
   const handleRomLoad = useCallback(async (file: File) => {
@@ -642,8 +742,7 @@ export function Calculator({
 
   // Keyboard event handling
   useEffect(() => {
-    const backend = backendRef.current;
-    if (!backend || !romLoaded) return;
+    if (!backendRef.current || !romLoaded) return;
 
     // Track if Shift was pressed alone (for 2nd key)
     let shiftPressedAlone = false;
@@ -652,12 +751,14 @@ export function Calculator({
       // Control shortcuts
       if (e.key === " ") {
         e.preventDefault();
+        if (e.repeat) return;
         setIsRunning((prev) => !prev);
         return;
       }
 
       // Track Shift for 2nd key - only trigger on release if pressed alone
       if (e.key === "Shift") {
+        if (e.repeat) return;
         shiftPressedAlone = true;
         return;
       }
@@ -670,19 +771,22 @@ export function Calculator({
       // Special combo keys (2nd + key sequences)
       if (e.key === "v" || e.key === "V") {
         e.preventDefault();
+        if (e.repeat) return;
         // Square root: 2nd + x²
-        backend.setKey(1, 5, true); // 2nd down
+        pressInputKey(1, 5);
+        releaseInputKey(1, 5);
         setTimeout(() => {
-          backend.setKey(1, 5, false); // 2nd up
-          backend.setKey(2, 4, true); // x² down
-          setTimeout(() => backend.setKey(2, 4, false), 50); // x² up
-        }, 50);
+          pressInputKey(2, 4);
+          releaseInputKey(2, 4);
+        }, MIN_KEY_HOLD_MS + 10);
         return;
       }
 
       // Shift+R: clear saved state and reload page (hard refresh for dev)
       if (e.shiftKey && (e.key === "r" || e.key === "R")) {
         e.preventDefault();
+        suppressSaveRef.current = true;
+        releaseAllInputKeys();
         const storage = storageRef.current;
         const romHash = romHashRef.current;
         if (storage && romHash) {
@@ -722,7 +826,10 @@ export function Calculator({
       const mapping = KEY_MAP[e.key];
       if (mapping) {
         e.preventDefault();
-        backend.setKey(mapping[0], mapping[1], true);
+        if (!keyboardKeysRef.current.has(e.code)) {
+          keyboardKeysRef.current.set(e.code, mapping);
+          pressInputKey(mapping[0], mapping[1]);
+        }
       }
     };
 
@@ -731,18 +838,18 @@ export function Calculator({
       if (e.key === "Shift") {
         if (shiftPressedAlone) {
           // Tap 2nd key (press and release)
-          backend.setKey(1, 5, true);
-          setTimeout(() => backend.setKey(1, 5, false), 50);
+          pressInputKey(1, 5);
+          releaseInputKey(1, 5);
         }
         shiftPressedAlone = false;
         return;
       }
 
-      const mapping = KEY_MAP[e.key];
+      const mapping = keyboardKeysRef.current.get(e.code) ?? KEY_MAP[e.key];
       if (mapping) {
         e.preventDefault();
-        backend.setKey(mapping[0], mapping[1], false);
-        debouncedSave();
+        keyboardKeysRef.current.delete(e.code);
+        releaseInputKey(mapping[0], mapping[1]);
       }
     };
 
@@ -752,8 +859,15 @@ export function Calculator({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
+      releaseAllInputKeys();
     };
-  }, [romLoaded, backendType, debouncedSave]);
+  }, [
+    romLoaded,
+    backendType,
+    pressInputKey,
+    releaseInputKey,
+    releaseAllInputKeys,
+  ]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -1071,19 +1185,14 @@ export function Calculator({
 
   // Keypad handlers
   const handleKeypadDown = useCallback((row: number, col: number) => {
-    if (backendRef.current) {
-      backendRef.current.setKey(row, col, true);
-    }
-  }, []);
+    pressInputKey(row, col);
+  }, [pressInputKey]);
 
   const handleKeypadUp = useCallback(
     (row: number, col: number) => {
-      if (backendRef.current) {
-        backendRef.current.setKey(row, col, false);
-        debouncedSave();
-      }
+      releaseInputKey(row, col);
     },
-    [debouncedSave],
+    [releaseInputKey],
   );
 
   // Calculate container width based on fullscreen mode
