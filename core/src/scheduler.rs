@@ -241,16 +241,30 @@ impl Scheduler {
         self.recalc_next_event();
     }
 
-    /// Advance time by the given number of CPU cycles (delta, not absolute)
+    /// Advance time by the given number of CPU cycles (delta, not absolute).
+    /// Returns true if a SCHED_SECOND rebase occurred (caller must rebase any
+    /// externally-held absolute timestamps, e.g. the bus DMA scheduler state).
     #[inline(always)]
-    pub fn advance(&mut self, delta_cpu_cycles: u64) {
+    pub fn advance(&mut self, delta_cpu_cycles: u64) -> bool {
         self.base_ticks += delta_cpu_cycles * self.cached_cpu_base_ticks;
 
         // SCHED_SECOND: prevent overflow by subtracting one second's worth of
         // base ticks from all timestamps every second (matches CEmu schedule.c:393-410)
         if self.base_ticks >= SCHED_BASE_CLOCK_RATE {
             self.process_second();
+            true
+        } else {
+            false
         }
+    }
+
+    /// Check whether advancing by `delta_cpu_cycles` would trigger a
+    /// SCHED_SECOND rebase. CEmu's sched_second flushes pending DMA
+    /// (sched_process_pending_dma(0)) BEFORE rebasing timestamps; callers use
+    /// this to perform the same flush before calling advance().
+    #[inline(always)]
+    pub fn would_cross_second(&self, delta_cpu_cycles: u64) -> bool {
+        self.base_ticks + delta_cpu_cycles * self.cached_cpu_base_ticks >= SCHED_BASE_CLOCK_RATE
     }
 
     /// CPU cycles remaining before the next SCHED_SECOND event fires.
@@ -280,6 +294,16 @@ impl Scheduler {
         self.dma_last_mem_timestamp = self.dma_last_mem_timestamp.saturating_sub(SCHED_BASE_CLOCK_RATE);
 
         self.recalc_next_event();
+    }
+
+    /// Schedule an event at an absolute base-tick timestamp.
+    /// Used for CEmu-exact scheduling where the timestamp was captured
+    /// mid-instruction (e.g. sched_set(SCHED_LCD, 0) at an LCD enable).
+    pub fn set_raw(&mut self, event: EventId, ts: u64) {
+        self.items[event as usize].timestamp = ts;
+        if ts < self.next_event_ticks {
+            self.next_event_ticks = ts;
+        }
     }
 
     /// Schedule an event to fire after `ticks` clock ticks
@@ -457,6 +481,18 @@ impl Scheduler {
         } else {
             None
         }
+    }
+
+    /// Get the raw timestamp (including the bit-63 inactive flag) for an event.
+    /// Used to mirror event timestamps into the bus DMA scheduler state.
+    pub fn raw_timestamp(&self, event: EventId) -> u64 {
+        self.items[event as usize].timestamp
+    }
+
+    /// Base ticks per CPU cycle at the current speed (CEmu: sched.clocks[CLOCK_CPU].tick_unit).
+    #[inline(always)]
+    pub fn cpu_tick_unit(&self) -> u64 {
+        self.cached_cpu_base_ticks
     }
 
     /// Convert base ticks to CPU cycles (ceiling division).

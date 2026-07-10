@@ -801,6 +801,7 @@ impl Emu {
 
         // Sync scheduler with initial cycles before scheduling RTC
         self.scheduler.advance(self.total_cycles);
+        self.refresh_dma_anchor();
 
         // Initialize RTC 1-second cycle from boot
         // CEmu's rtc_reset() does: sched_repeat_relative(SCHED_RTC, SCHED_SECOND, 0, LATCH_TICK_OFFSET)
@@ -898,6 +899,10 @@ impl Emu {
                 }
             }
 
+            // Anchor the bus DMA state so mid-instruction RAM accesses can
+            // compute exact CPU timestamps (CEmu sched_process_pending_dma)
+            self.refresh_dma_anchor();
+
             // Execute one instruction
             let cycles_used = self.cpu.step(&mut self.bus);
 
@@ -920,7 +925,7 @@ impl Emu {
 
             // Advance scheduler with cycles used at current speed, THEN handle speed change
             cycles_remaining -= cycles_used as i32;
-            self.scheduler.advance(cycles_used as u64);
+            self.advance_scheduler(cycles_used as u64);
 
             // Sync total_cycles with bus BEFORE any speed conversion
             // (cpu.step() no longer rescales bus.cycles, so delta is always clean)
@@ -956,12 +961,6 @@ impl Emu {
 
             // Process pending scheduler events
             self.process_scheduler_events();
-
-            // DMA cycle stealing: if LCD DMA consumed bus time, steal CPU cycles
-            let dma_stolen = self.process_dma_stealing();
-            if dma_stolen > 0 {
-                cycles_remaining -= dma_stolen as i32;
-            }
 
             // Check if SPI needs initial scheduling (state changed via port write)
             if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
@@ -1018,17 +1017,10 @@ impl Emu {
                             break; // Nothing can wake the CPU
                         }
 
-                        // Process any pending events first (e.g. LcdDma in the
-                        // past after DMA stealing advanced base_ticks). Without
-                        // this, the batch path would advance base_ticks further
-                        // without processing the pending event, growing the gap
-                        // and causing a DMA catch-up storm on HALT exit.
+                        // Process any pending events first. Without this, the
+                        // batch path would advance base_ticks further without
+                        // processing the pending event.
                         self.process_scheduler_events();
-                        let dma_stolen = self.process_dma_stealing();
-                        if dma_stolen > 0 {
-                            cycles_remaining -= dma_stolen as i32;
-                            peripheral_debt += dma_stolen;
-                        }
 
                         // Check if processing events made a future event available
                         let new_skip = self.scheduler.cycles_until_next_event();
@@ -1049,7 +1041,7 @@ impl Emu {
                         }
                         self.bus.add_cycles(batch);
                         cycles_remaining -= batch as i32;
-                        self.scheduler.advance(batch);
+                        self.advance_scheduler(batch);
                         self.total_cycles = self.bus.total_cycles();
                         if self.tick_peripherals(batch as u32) {
                             self.cpu.irq_pending = true;
@@ -1066,19 +1058,13 @@ impl Emu {
 
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
-                    self.scheduler.advance(skip);
+                    self.advance_scheduler(skip);
                     self.total_cycles = self.bus.total_cycles();
 
-                    // Process events (DMA, LCD state machine, timers, etc.)
+                    // Process events (LCD state machine, timers, etc.)
                     self.process_scheduler_events();
 
-                    // DMA cycle stealing
-                    let dma_stolen = self.process_dma_stealing();
-                    if dma_stolen > 0 {
-                        cycles_remaining -= dma_stolen as i32;
-                    }
-
-                    peripheral_debt += skip + dma_stolen;
+                    peripheral_debt += skip;
 
                     // Periodically tick peripherals (OS Timer, keypad, etc.)
                     if peripheral_debt >= HALT_TICK_BATCH {
@@ -1185,12 +1171,13 @@ impl Emu {
             }
 
             let was_halted = self.cpu.halted;
+            self.refresh_dma_anchor();
             let cycles_used = self.cpu.step(&mut self.bus);
             check_armed_trace_on_wake(was_halted, self.cpu.halted);
 
             // Advance scheduler with cycles used at current speed, then handle speed change
             cycles_remaining -= cycles_used as i32;
-            self.scheduler.advance(cycles_used as u64);
+            self.advance_scheduler(cycles_used as u64);
 
             self.total_cycles = self.bus.total_cycles();
 
@@ -1217,12 +1204,6 @@ impl Emu {
                 start_cycles = start_cycles * new_mhz as u64 / old_mhz as u64;
             }
             self.process_scheduler_events();
-
-            // DMA cycle stealing
-            let dma_stolen = self.process_dma_stealing();
-            if dma_stolen > 0 {
-                cycles_remaining -= dma_stolen as i32;
-            }
 
             // Check if SPI needs initial scheduling (state changed via port write)
             if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
@@ -1262,7 +1243,7 @@ impl Emu {
                         }
                         self.bus.add_cycles(batch);
                         cycles_remaining -= batch as i32;
-                        self.scheduler.advance(batch);
+                        self.advance_scheduler(batch);
                         self.total_cycles = self.bus.total_cycles();
                         if self.tick_peripherals(batch as u32) {
                             self.cpu.irq_pending = true;
@@ -1278,16 +1259,11 @@ impl Emu {
 
                     self.bus.add_cycles(skip);
                     cycles_remaining -= skip as i32;
-                    self.scheduler.advance(skip);
+                    self.advance_scheduler(skip);
                     self.total_cycles = self.bus.total_cycles();
                     self.process_scheduler_events();
 
-                    let dma_stolen = self.process_dma_stealing();
-                    if dma_stolen > 0 {
-                        cycles_remaining -= dma_stolen as i32;
-                    }
-
-                    peripheral_debt += skip + dma_stolen;
+                    peripheral_debt += skip;
 
                     if peripheral_debt >= HALT_TICK_BATCH {
                         if self.tick_peripherals(peripheral_debt as u32) {
@@ -1372,6 +1348,7 @@ impl Emu {
         }
 
         // Execute one instruction
+        self.refresh_dma_anchor();
         let cycles_used = self.cpu.step(&mut self.bus);
 
         // Check for wake event
@@ -1381,7 +1358,7 @@ impl Emu {
         self.history.record(pc, &opcode[..opcode_len]);
 
         // Advance scheduler with cycles used at current speed, then handle speed change
-        self.scheduler.advance(cycles_used as u64);
+        self.advance_scheduler(cycles_used as u64);
 
         let new_cpu_speed = self.bus.ports.control.cpu_speed();
         if new_cpu_speed != cpu_speed {
@@ -1405,9 +1382,6 @@ impl Emu {
 
         // Process pending scheduler events
         self.process_scheduler_events();
-
-        // DMA cycle stealing
-        self.process_dma_stealing();
 
         // Check if SPI needs initial scheduling (state changed via port write)
         if self.bus.take_spi_schedule_flag() && !self.scheduler.is_active(EventId::Spi) {
@@ -1445,7 +1419,7 @@ impl Emu {
                         break;
                     }
                     self.bus.add_cycles(batch);
-                    self.scheduler.advance(batch);
+                    self.advance_scheduler(batch);
                     self.total_cycles = self.bus.total_cycles();
                     total_advanced += batch;
                     if self.tick_peripherals(batch as u32) {
@@ -1461,11 +1435,10 @@ impl Emu {
                 }
 
                 self.bus.add_cycles(skip);
-                self.scheduler.advance(skip);
+                self.advance_scheduler(skip);
                 self.total_cycles = self.bus.total_cycles();
                 total_advanced += skip;
                 self.process_scheduler_events();
-                self.process_dma_stealing();
 
                 peripheral_debt += skip;
                 if peripheral_debt >= HALT_TICK_BATCH {
@@ -1537,14 +1510,20 @@ impl Emu {
         // Check LCD scheduling flags (set by control register writes)
         if self.bus.ports.lcd.needs_lcd_event {
             self.bus.ports.lcd.needs_lcd_event = false;
-            // LCD just enabled — schedule immediate LCD event (sched_set(SCHED_LCD, 0))
-            self.scheduler.set(EventId::Lcd, 0);
+            // LCD just enabled — schedule the LCD event at the exact timestamp
+            // captured at the port write (CEmu: sched_set(SCHED_LCD, 0) rounds
+            // the mid-instruction cpu timestamp down to the 24 MHz grid).
+            match self.bus.take_lcd_enable_timestamp() {
+                Some(ts) => self.scheduler.set_raw(EventId::Lcd, ts),
+                None => self.scheduler.set(EventId::Lcd, 0),
+            }
         }
         if self.bus.ports.lcd.needs_lcd_clear {
             self.bus.ports.lcd.needs_lcd_clear = false;
-            // LCD just disabled — clear LCD and LCD DMA events
+            // LCD just disabled — clear the LCD event.
+            // CEmu only clears SCHED_LCD here (lcd.c control write); a pending
+            // LCD DMA item keeps running lazily until its frame completes.
             self.scheduler.clear(EventId::Lcd);
-            self.scheduler.clear(EventId::LcdDma);
         }
 
         irq
@@ -1553,6 +1532,11 @@ impl Emu {
     /// Process any pending scheduler events
     fn process_scheduler_events(&mut self) {
         use crate::peripherals::interrupt::sources;
+
+        // Keep the bus DMA anchor fresh: this function runs at points where
+        // scheduler.base_ticks corresponds to bus.total_cycles(), and the Lcd
+        // event handler flushes pending DMA which needs exact CPU timestamps.
+        self.refresh_dma_anchor();
 
         // Process all pending events
         while let Some(event) = self.scheduler.next_pending_event() {
@@ -1622,7 +1606,11 @@ impl Emu {
                     self.scheduler.clear(EventId::OsTimer);
                 }
                 EventId::Lcd => {
-                    // LCD event state machine — matches CEmu's lcd_event()
+                    // LCD event state machine — matches CEmu's lcd_event().
+                    // CEmu lcd_event() first flushes pending DMA transfers
+                    // (sched_process_pending_dma(0)) so lazily-deferred DMA runs
+                    // with the pre-transition LCD state.
+                    self.bus.process_pending_dma(0);
                     let result = self.bus.ports.lcd.process_event();
                     // Update interrupt controller based on lcd.ris & lcd.imsc
                     if result.interrupt_changed {
@@ -1633,40 +1621,20 @@ impl Emu {
                         }
                         self.cpu.irq_pending = self.bus.ports.interrupt.irq_pending();
                     }
-                    // Schedule DMA if needed (relative to this LCD event)
+                    // Schedule the lazy DMA item if needed, relative to this LCD
+                    // event's (pre-repeat) timestamp.
+                    // CEmu: sched_repeat_relative(SCHED_LCD_DMA, SCHED_LCD, offset, 0)
                     if let Some(offset) = result.schedule_dma_offset {
-                        self.scheduler
-                            .repeat_relative(EventId::LcdDma, EventId::Lcd, offset, 0);
+                        let lcd_ts = self.scheduler.raw_timestamp(EventId::Lcd) & !(1u64 << 63);
+                        self.bus.dma_sched.dma_timestamp = lcd_ts
+                            + offset
+                                * crate::scheduler::ClockId::Clock24M
+                                    .base_ticks_per_tick(self.scheduler.cpu_speed());
                     }
-                    // Reschedule LCD event
+                    // Reschedule LCD event and refresh the bus-side mirror
                     self.scheduler.repeat(EventId::Lcd, result.duration);
-                }
-                EventId::LcdDma => {
-                    // LCD DMA — reads VRAM and advances UPCURR.
-                    // DMA consumes bus time tracked via dma_last_mem_timestamp.
-                    // CEmu: last_mem_timestamp += callback.dma(id) * tick_unit
-                    let result = self.bus.ports.lcd.process_dma();
-                    let tick_unit = crate::scheduler::ClockId::Clock48M
-                        .base_ticks_per_tick(self.scheduler.cpu_speed());
-                    self.scheduler.dma_last_mem_timestamp += result.bus_ticks * tick_unit;
-                    if let Some(ticks) = result.repeat_ticks {
-                        let skipped = self.scheduler.repeat_catchup(EventId::LcdDma, ticks);
-                        if skipped > 0 {
-                            // Fast-forward LCD DMA state for the skipped events
-                            // (advances cur_col, cur_row, upcurr in O(1)).
-                            // Do NOT add dma_last_mem_timestamp for skipped events:
-                            // the bus contention didn't actually happen, and adding
-                            // it would cause process_dma_stealing to advance base_ticks
-                            // past the rescheduled event, creating a feedback loop.
-                            self.bus.ports.lcd.fast_forward_dma_events(skipped);
-                        }
-                    } else if let Some(offset) = result.schedule_relative {
-                        // Schedule relative to LCD event
-                        self.scheduler
-                            .repeat_relative(EventId::LcdDma, EventId::Lcd, offset, 0);
-                    } else {
-                        self.scheduler.clear(EventId::LcdDma);
-                    }
+                    self.bus.dma_sched.lcd_event_timestamp =
+                        self.scheduler.raw_timestamp(EventId::Lcd);
                 }
                 _ => {
                     // Unknown event - clear it
@@ -1676,42 +1644,31 @@ impl Emu {
         }
     }
 
-    /// Process DMA cycle stealing.
-    ///
-    /// CEmu's `sched_process_pending_dma()` checks if DMA has consumed bus time
-    /// ahead of the CPU. If so, CPU cycles are "stolen" by advancing the cycle
-    /// counter. This is called after `process_scheduler_events()` at instruction
-    /// boundaries.
-    ///
-    /// Returns the number of CPU cycles stolen by DMA.
-    fn process_dma_stealing(&mut self) -> u64 {
-        // Sync DMA timestamp to CPU time if behind (CEmu initializes to cpu_timestamp)
-        if self.scheduler.dma_last_mem_timestamp < self.scheduler.base_ticks {
-            self.scheduler.dma_last_mem_timestamp = self.scheduler.base_ticks;
+    /// Re-anchor the bus DMA scheduler state to the current scheduler time.
+    /// Must only be called when scheduler.base_ticks corresponds to the current
+    /// bus.total_cycles() (i.e. between instructions, after advance/rescale).
+    /// This lets the bus compute exact mid-instruction CPU timestamps for
+    /// CEmu's sched_process_pending_dma() at every RAM access.
+    fn refresh_dma_anchor(&mut self) {
+        let base_ticks = self.scheduler.base_ticks;
+        let unit = self.scheduler.cpu_tick_unit();
+        let lcd_ts = self.scheduler.raw_timestamp(EventId::Lcd);
+        self.bus.refresh_dma_anchor(base_ticks, unit, lcd_ts);
+    }
+
+    /// Advance the scheduler, handling the SCHED_SECOND rebase exactly like
+    /// CEmu's sched_second(): flush pending DMA first (sched_process_pending_dma(0)),
+    /// then shift the bus-held absolute DMA timestamps along with the rebase.
+    fn advance_scheduler(&mut self, delta_cpu_cycles: u64) {
+        if self.scheduler.would_cross_second(delta_cpu_cycles) {
+            // CEmu sched_second: process pending DMA before rebasing so no
+            // due DMA item timestamp underflows the subtraction.
+            self.bus.process_pending_dma(0);
         }
-
-        let stolen = if self.scheduler.dma_last_mem_timestamp > self.scheduler.base_ticks {
-            // DMA is ahead of CPU — steal cycles
-            // CEmu: cpu.dmaCycles += div_ceil(last_mem_timestamp, cpu_clock) - cpu.cycles
-            let ahead_base_ticks =
-                self.scheduler.dma_last_mem_timestamp - self.scheduler.base_ticks;
-            let stolen_cycles = self
-                .scheduler
-                .base_ticks_to_cpu_cycles_ceil(ahead_base_ticks);
-            if stolen_cycles > 0 {
-                self.scheduler.advance(stolen_cycles);
-                self.bus.add_cycles(stolen_cycles);
-                self.total_cycles = self.bus.total_cycles();
-            }
-            stolen_cycles
-        } else {
-            0
-        };
-
-        // Reset DMA timestamp to current CPU time (CEmu: last_mem = cpu_timestamp after access)
-        self.scheduler.dma_last_mem_timestamp = self.scheduler.base_ticks;
-
-        stolen
+        if self.scheduler.advance(delta_cpu_cycles) {
+            self.bus
+                .rebase_dma_sched(crate::scheduler::SCHED_BASE_CLOCK_RATE);
+        }
     }
 
     /// Peek at opcode bytes at address without affecting state
@@ -2106,7 +2063,18 @@ impl Emu {
         pos += Cpu::SNAPSHOT_SIZE;
 
         // Write scheduler state
-        let sched_bytes = self.scheduler.to_bytes();
+        let mut sched_bytes = self.scheduler.to_bytes();
+        // The LCD DMA item timestamp and last_mem_timestamp now live on the bus
+        // (lazy DMA engine). Patch them into their scheduler snapshot slots to
+        // keep the state format unchanged. Layout (see Scheduler::to_bytes):
+        // base_ticks(8) + cpu_speed(1) + 9 item timestamps (LcdDma = index 8)
+        // + dma_last_mem_timestamp(8).
+        let lcd_dma_off = 8 + 1 + (EventId::LcdDma as usize) * 8;
+        let last_mem_off = 8 + 1 + 9 * 8;
+        sched_bytes[lcd_dma_off..lcd_dma_off + 8]
+            .copy_from_slice(&self.bus.dma_sched.dma_timestamp.to_le_bytes());
+        sched_bytes[last_mem_off..last_mem_off + 8]
+            .copy_from_slice(&self.bus.dma_sched.last_mem_timestamp.to_le_bytes());
         buffer[pos..pos + Scheduler::SNAPSHOT_SIZE].copy_from_slice(&sched_bytes);
         pos += Scheduler::SNAPSHOT_SIZE;
 
@@ -2201,6 +2169,13 @@ impl Emu {
             .from_bytes(&buffer[pos..pos + Scheduler::SNAPSHOT_SIZE])?;
         pos += Scheduler::SNAPSHOT_SIZE;
 
+        // Move the LCD DMA item + last_mem_timestamp into the bus lazy-DMA
+        // engine (they are stored in the scheduler snapshot slots for format
+        // compatibility, but the scheduler no longer dispatches LcdDma).
+        self.bus.dma_sched.dma_timestamp = self.scheduler.raw_timestamp(EventId::LcdDma);
+        self.bus.dma_sched.last_mem_timestamp = self.scheduler.dma_last_mem_timestamp;
+        self.scheduler.clear(EventId::LcdDma);
+
         // Load peripheral state
         self.bus
             .ports
@@ -2230,6 +2205,9 @@ impl Emu {
         // value, causing the `executed` return to wrap.
         self.bus.set_total_cycles(self.total_cycles);
 
+        // Re-anchor the bus DMA timestamp mapping to the restored state
+        self.refresh_dma_anchor();
+
         // Clear stale cpu_speed_written flag left by from_bytes calling
         // control.write(0x01, ...).  Without this, the next control-port
         // write would trigger a spurious cycle conversion on already-correct
@@ -2247,7 +2225,7 @@ impl Emu {
             self.total_cycles,
             self.bus.total_cycles(),
             self.scheduler.base_ticks,
-            self.scheduler.dma_last_mem_timestamp,
+            self.bus.dma_sched.last_mem_timestamp,
             self.scheduler.cpu_speed(),
             self.cpu.pc
         );

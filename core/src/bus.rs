@@ -458,8 +458,68 @@ impl Default for FlashCache {
     }
 }
 
+/// Lazy LCD DMA scheduling state, mirroring CEmu's `sched.dma` plus the
+/// SCHED_LCD_DMA item (CEmu schedule.c / lcd.c).
+///
+/// CEmu processes LCD DMA transfers lazily: the DMA item is NOT a regular
+/// scheduler event. It is consumed by `sched_process_pending_dma(duration)`,
+/// which is invoked at every CPU RAM access (mem.c: read=4, write=2 cycles)
+/// and with duration=0 at LCD register access points and SCHED_SECOND.
+/// The CPU is only stalled when a RAM access collides with the DMA bus
+/// reservation window.
+#[derive(Debug, Clone)]
+pub struct DmaSched {
+    /// LCD DMA item timestamp in base ticks. Bit 63 set = inactive.
+    /// CEmu: sched.items[SCHED_LCD_DMA].timestamp
+    pub dma_timestamp: u64,
+    /// Timestamp (base ticks) when the memory bus becomes free.
+    /// CEmu: sched.dma.last_mem_timestamp
+    pub last_mem_timestamp: u64,
+    /// Mirror of the LCD event's raw timestamp (bit 63 = inactive).
+    /// Needed for sched_repeat_relative(SCHED_LCD_DMA, SCHED_LCD, ...) when
+    /// prefill completes mid-instruction. Refreshed by Emu before each step.
+    pub lcd_event_timestamp: u64,
+    /// scheduler.base_ticks at the last anchor sync point
+    pub base_ticks_sync: u64,
+    /// bus.total_cycles() at the last anchor sync point
+    pub cycles_sync: u64,
+    /// Base ticks per CPU cycle at the current speed (CEmu: CLOCK_CPU tick_unit)
+    pub cpu_tick_unit: u64,
+}
+
+/// Bit 63 set indicates an inactive scheduler item (matches scheduler.rs)
+const DMA_INACTIVE_FLAG: u64 = 1 << 63;
+/// Base ticks per 48 MHz tick (LCD DMA clock)
+const DMA_TICK_48M: u64 = 160;
+/// Base ticks per 24 MHz tick (LCD event clock)
+const DMA_TICK_24M: u64 = 320;
+
+impl DmaSched {
+    fn new() -> Self {
+        Self {
+            dma_timestamp: DMA_INACTIVE_FLAG,
+            last_mem_timestamp: 0,
+            lcd_event_timestamp: DMA_INACTIVE_FLAG,
+            base_ticks_sync: 0,
+            cycles_sync: 0,
+            cpu_tick_unit: crate::scheduler::ClockId::Cpu.base_ticks_per_tick(0),
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 /// System bus connecting CPU to memory subsystems
 pub struct Bus {
+    /// Lazy LCD DMA scheduling state (CEmu sched.dma + SCHED_LCD_DMA item)
+    pub dma_sched: DmaSched,
+    /// Exact timestamp (base ticks) for a pending LCD enable, captured
+    /// mid-instruction at the port write like CEmu's sched_set(SCHED_LCD, 0)
+    /// (cpu timestamp floored to the 24 MHz clock grid, before the port-write
+    /// rewind). Consumed by Emu when it schedules the Lcd event.
+    lcd_enable_timestamp: Option<u64>,
     /// Flash memory
     pub flash: Flash,
     /// RAM (including VRAM)
@@ -563,6 +623,8 @@ impl Bus {
     /// Defaults to parallel flash mode (older TI-84 CE models, more compatible)
     pub fn new() -> Self {
         Self {
+            dma_sched: DmaSched::new(),
+            lcd_enable_timestamp: None,
             flash: Flash::new(),
             ram: Ram::new(),
             ports: Ports::new(),
@@ -725,7 +787,8 @@ impl Bus {
                 (self.flash.read(addr), Some(IoTarget::Flash))
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.mem_cycles += Self::RAM_READ_CYCLES;
+                // CEmu mem_read_cpu: sched_process_pending_dma(4)
+                self.process_pending_dma(Self::RAM_READ_CYCLES);
                 (self.ram.read(addr - addr::RAM_START), Some(IoTarget::Ram))
             }
             MemoryRegion::Ports => {
@@ -743,6 +806,11 @@ impl Bus {
                     let port_offset = addr - addr::PORT_START;
                     let port_range = (port_offset >> 12) & 0xF;
                     self.mem_cycles += Self::PORT_READ_CYCLES[port_range as usize];
+                    // CEmu lcd_read: flush pending LCD DMA before reading UPCURR
+                    // so lazily-deferred DMA transfers advance it first.
+                    if (0xE3002C..0xE30030).contains(&addr) {
+                        self.process_pending_dma(0);
+                    }
                     // SPI lives on bus.spi (not bus.ports), intercept its MMIO range
                     if port_range == 0xD {
                         let offset = (port_offset & 0x7F) as u32;
@@ -814,7 +882,8 @@ impl Bus {
                 self.flash.read(addr)
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.mem_cycles += Self::RAM_READ_CYCLES;
+                // CEmu mem_read_cpu (fetch): sched_process_pending_dma(4)
+                self.process_pending_dma(Self::RAM_READ_CYCLES);
                 self.ram.read(addr - addr::RAM_START)
             }
             MemoryRegion::Ports => {
@@ -948,7 +1017,8 @@ impl Bus {
                 }
             }
             MemoryRegion::Ram | MemoryRegion::Vram => {
-                self.mem_cycles += Self::RAM_WRITE_CYCLES;
+                // CEmu mem_write_cpu: sched_process_pending_dma(2)
+                self.process_pending_dma(Self::RAM_WRITE_CYCLES);
                 // Get old value for tracing
                 let old_value = self.ram.read(addr - addr::RAM_START);
                 // Record write for simple tracing (before actually writing)
@@ -1047,6 +1117,20 @@ impl Bus {
                     // Add delay before port write (like CEmu)
                     self.mem_cycles += PORT_WRITE_DELAY;
 
+                    // CEmu lcd_write: flush pending LCD DMA before writes that
+                    // affect or observe DMA state (control, palette, cursor).
+                    if (0xE30000..0xE31000).contains(&addr) {
+                        let index = (addr - 0xE30000) & 0xFFC;
+                        let flush = index == 0x018
+                            || (0x200..0x400).contains(&index)
+                            || ((0x800..0xC00).contains(&index)
+                                && self.ports.lcd.cursor_enabled())
+                            || (0xC00..0xC18).contains(&index);
+                        if flush {
+                            self.process_pending_dma(0);
+                        }
+                    }
+
                     // SPI lives on bus.spi (not bus.ports), intercept its MMIO range
                     let old_value;
                     if port_range == 0xD {
@@ -1068,6 +1152,16 @@ impl Bus {
                         let keys = *self.ports.key_state();
                         old_value = self.ports.read(port_offset, &keys, self.cycles);
                         self.ports.write(port_offset, value, self.cycles);
+                        // CEmu sched_set(SCHED_LCD, 0) on LCD enable: capture the
+                        // exact mid-instruction timestamp (see port_write()).
+                        // TODO: this MMIO path is missing CEmu's lcd_write_ctrl_delay()
+                        // cycles for LCD timing/control writes (lcd.c:632); the boot ROM
+                        // only uses the OUT path, but memory-mapped LCD writes would
+                        // currently be undercharged (Milestone: exact-parity polish).
+                        if self.ports.lcd.needs_lcd_event && self.lcd_enable_timestamp.is_none() {
+                            self.lcd_enable_timestamp =
+                                Some(self.dma_cpu_timestamp() / DMA_TICK_24M * DMA_TICK_24M);
+                        }
                     }
                     // Record for comprehensive I/O tracing
                     self.record_io_op(IoOpType::Write, IoTarget::MmioPort, addr, old_value, value);
@@ -1213,6 +1307,9 @@ impl Bus {
     pub fn reset_cycles(&mut self) {
         self.cycles = 0;
         self.mem_cycles = 0;
+        // Rewinding the clock invalidates the DMA bus-reservation timestamps;
+        // reset them so a past RAM access isn't mistaken for a pending reservation.
+        self.dma_sched.reset();
     }
 
     /// Add CPU cycles (for internal CPU operations like branch taken, HALT, etc.)
@@ -1229,6 +1326,113 @@ impl Bus {
     /// Add memory timing cycles (for memory access wait states)
     pub fn add_mem_cycles(&mut self, count: u64) {
         self.mem_cycles += count;
+    }
+
+    /// Current CPU timestamp in scheduler base ticks, valid mid-instruction.
+    /// CEmu: sched_cpu_timestamp() = cpu.cycles * tick_unit.
+    /// Anchored via (base_ticks_sync, cycles_sync) which Emu refreshes at
+    /// points where scheduler.base_ticks corresponds to bus.total_cycles().
+    #[inline(always)]
+    fn dma_cpu_timestamp(&self) -> u64 {
+        self.dma_sched.base_ticks_sync.wrapping_add(
+            (self.cycles + self.mem_cycles - self.dma_sched.cycles_sync)
+                * self.dma_sched.cpu_tick_unit,
+        )
+    }
+
+    /// Process pending LCD DMA transfers and charge a CPU memory access.
+    ///
+    /// Exact port of CEmu's sched_process_pending_dma(duration) (schedule.c:359):
+    /// - Processes due DMA items lazily (item timestamp <= current CPU timestamp),
+    ///   each reserving the memory bus for `bus_ticks` 48 MHz ticks starting at
+    ///   max(last_mem_timestamp, item timestamp).
+    /// - If the bus is still reserved at the CPU timestamp and `duration != 0`
+    ///   (a real RAM access), the CPU stalls until the reservation ends, rounded
+    ///   up to the next CPU clock edge (div_ceil on the absolute cycle grid).
+    /// - `duration != 0` then charges the access itself and marks the bus busy
+    ///   until the end of the access.
+    ///
+    /// duration: 4 for RAM reads, 2 for RAM writes, 0 for flush-only calls
+    /// (LCD register access points, SCHED_SECOND).
+    pub fn process_pending_dma(&mut self, duration: u64) {
+        let cpu_timestamp = self.dma_cpu_timestamp();
+        let mut last_mem = self.dma_sched.last_mem_timestamp;
+        loop {
+            if cpu_timestamp < last_mem {
+                if duration != 0 {
+                    // Stall: round the bus-free timestamp up to the CPU cycle grid
+                    // CEmu: prev_cycle = div_ceil(last_mem_timestamp, CLOCK_CPU);
+                    //       cpu.dmaCycles += prev_cycle - cpu.cycles;
+                    //       cpu.cycles = prev_cycle;
+                    let unit = self.dma_sched.cpu_tick_unit;
+                    let prev_cycle = (last_mem + unit - 1) / unit;
+                    let cur_cycle = cpu_timestamp / unit;
+                    self.mem_cycles += prev_cycle - cur_cycle;
+                }
+                break;
+            }
+            let ts = self.dma_sched.dma_timestamp;
+            if ts >= DMA_INACTIVE_FLAG || cpu_timestamp < ts {
+                break;
+            }
+            if last_mem < ts {
+                last_mem = ts;
+            }
+            // Deactivate before the callback (which may reschedule)
+            self.dma_sched.dma_timestamp = ts | DMA_INACTIVE_FLAG;
+            let result = self.ports.lcd.process_dma();
+            if let Some(repeat) = result.repeat_ticks {
+                // CEmu sched_repeat: relative to the item's own timestamp
+                self.dma_sched.dma_timestamp = ts + repeat * DMA_TICK_48M;
+            } else if let Some(offset) = result.schedule_relative {
+                // CEmu sched_repeat_relative(SCHED_LCD_DMA, SCHED_LCD, offset, 0)
+                if self.dma_sched.lcd_event_timestamp < DMA_INACTIVE_FLAG {
+                    self.dma_sched.dma_timestamp =
+                        self.dma_sched.lcd_event_timestamp + offset * DMA_TICK_24M;
+                }
+            }
+            last_mem += result.bus_ticks * DMA_TICK_48M;
+        }
+        if duration != 0 {
+            self.mem_cycles += duration;
+            // Bus is busy until the end of the CPU access
+            last_mem = self.dma_cpu_timestamp();
+        }
+        self.dma_sched.last_mem_timestamp = last_mem;
+    }
+
+    /// Take the pending LCD-enable timestamp (base ticks), if any.
+    /// Captured at the exact port-write moment like CEmu's sched_set(SCHED_LCD, 0).
+    pub fn take_lcd_enable_timestamp(&mut self) -> Option<u64> {
+        self.lcd_enable_timestamp.take()
+    }
+
+    /// Re-anchor the DMA timestamp mapping. Must be called at points where
+    /// `base_ticks` corresponds to the current bus.total_cycles() (i.e. right
+    /// before an instruction or right after scheduler.advance()).
+    pub fn refresh_dma_anchor(&mut self, base_ticks: u64, cpu_tick_unit: u64, lcd_event_ts: u64) {
+        self.dma_sched.base_ticks_sync = base_ticks;
+        self.dma_sched.cycles_sync = self.cycles + self.mem_cycles;
+        self.dma_sched.cpu_tick_unit = cpu_tick_unit;
+        self.dma_sched.lcd_event_timestamp = lcd_event_ts;
+    }
+
+    /// Apply a SCHED_SECOND rebase to the DMA scheduler state (subtract one
+    /// second of base ticks from all absolute timestamps). Matches CEmu's
+    /// sched_second() handling of DMA items and last_mem_timestamp.
+    pub fn rebase_dma_sched(&mut self, rate: u64) {
+        if self.dma_sched.dma_timestamp < DMA_INACTIVE_FLAG {
+            self.dma_sched.dma_timestamp = self.dma_sched.dma_timestamp.saturating_sub(rate);
+        }
+        if self.dma_sched.lcd_event_timestamp < DMA_INACTIVE_FLAG {
+            self.dma_sched.lcd_event_timestamp =
+                self.dma_sched.lcd_event_timestamp.saturating_sub(rate);
+        }
+        // CEmu: sched.dma.last_mem_timestamp = timestamp_diff(last_mem, RATE)
+        self.dma_sched.last_mem_timestamp = self.dma_sched.last_mem_timestamp.saturating_sub(rate);
+        // The anchor must shift with base_ticks; wrapping keeps the affine
+        // mapping correct even if the sync point predates the rebase.
+        self.dma_sched.base_ticks_sync = self.dma_sched.base_ticks_sync.wrapping_sub(rate);
     }
 
     /// Get direct access to VRAM for LCD rendering
@@ -1282,6 +1486,10 @@ impl Bus {
             0x4 => {
                 // LCD controller - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
+                // CEmu lcd_read: flush pending LCD DMA before reading UPCURR
+                if (0x2C..0x30).contains(&offset) {
+                    self.process_pending_dma(0);
+                }
                 self.ports.lcd.read(offset)
             }
             0x5 => {
@@ -1402,11 +1610,23 @@ impl Bus {
                     };
                     self.cycles += delay as u64;
                     // CEmu: At 48 MHz with non-serial flash, align CPU to LCD clock
-                    if cpu_speed == 3 && !self.serial_flash {
-                        self.cycles |= 1;
+                    // (cpu.cycles |= 1 — force the TOTAL cycle count odd)
+                    if cpu_speed == 3 && !self.serial_flash && (self.cycles + self.mem_cycles) & 1 == 0 {
+                        self.cycles += 1;
                     }
                 }
+                // CEmu lcd_write: flush pending LCD DMA before control writes
+                if aligned_offset == 0x18 {
+                    self.process_pending_dma(0);
+                }
                 self.ports.lcd.write(offset, value);
+                // CEmu sched_set(SCHED_LCD, 0) on LCD enable: capture the exact
+                // mid-instruction timestamp (floored to the 24 MHz grid, BEFORE
+                // the port-write rewind). Emu consumes this when scheduling.
+                if self.ports.lcd.needs_lcd_event && self.lcd_enable_timestamp.is_none() {
+                    self.lcd_enable_timestamp =
+                        Some(self.dma_cpu_timestamp() / DMA_TICK_24M * DMA_TICK_24M);
+                }
             }
             0x5 => {
                 // Interrupt controller - mask with 0xFF (CEmu port_mirrors)
@@ -1556,6 +1776,8 @@ impl Bus {
 
     /// Reset bus and all memory to initial state
     pub fn reset(&mut self) {
+        self.dma_sched.reset();
+        self.lcd_enable_timestamp = None;
         self.ram.reset();
         self.ports.reset();
         self.spi.reset();

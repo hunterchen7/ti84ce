@@ -537,16 +537,26 @@ impl LcdController {
         let fill_bytes: u32 = if self.wtrmrk != 0 { 64 } else { 32 };
         let words: u32 = if self.wtrmrk != 0 { 16 } else { 8 };
 
-        // Process pixels (advance cur_col and cur_row)
+        // Process pixels, accumulating ticks exactly like CEmu's
+        // lcd_words()/lcd_process_pixel() (lcd.c:258): every pixel costs
+        // PCD*2 ticks; crossing an end-of-line adds (HFP+HSW+HBP)*PCD*2.
+        // Pixels past the last line (cur_row >= LPP) still cost PCD*2 but
+        // no longer advance the counters.
         let pixels = words << (5 - self.bpp);
-        self.cur_col += pixels;
-        while self.cur_col >= self.cpl {
-            self.cur_col -= self.cpl;
-            self.cur_row += 1;
+        let mut ticks: u64 = 0;
+        for _ in 0..pixels {
+            ticks += self.pcd as u64 * 2;
+            if self.cur_row < self.lpp {
+                self.cur_col += 1;
+                if self.cur_col >= self.cpl {
+                    self.cur_col = 0;
+                    self.cur_row += 1;
+                    ticks += (self.hfp as u64 + self.hsw as u64 + self.hbp as u64)
+                        * self.pcd as u64
+                        * 2;
+                }
+            }
         }
-
-        // Calculate ticks for lcd_words equivalent
-        let ticks = self.process_words_ticks(words);
         let bus_ticks = if self.wtrmrk != 0 { 19 } else { 11 };
 
         // Fill FIFO (advance upcurr)
@@ -569,68 +579,10 @@ impl LcdController {
         }
     }
 
-    /// Calculate ticks consumed by processing `words` words.
-    /// Simplified: each pixel takes PCD*2 ticks at end-of-line boundaries,
-    /// otherwise just the base processing time.
-    fn process_words_ticks(&self, words: u32) -> u64 {
-        // Base: each word group takes some ticks for pixel processing.
-        // Approximate with scanline-based timing matching CEmu's lcd_words return value.
-        // For each scanline transition, add (HFP + HSW + HBP) * PCD * 2
-        // This is a simplification — full pixel-accurate timing is done in CEmu's lcd_process_pixel.
-        let pixels = words << (5 - self.bpp);
-        let mut ticks = 0u64;
-        let mut col = self.cur_col.wrapping_sub(pixels); // pre-advance column
-
-        for _ in 0..pixels {
-            col += 1;
-            if col >= self.cpl {
-                col = 0;
-                ticks += (self.hfp as u64 + self.hsw as u64 + self.hbp as u64)
-                    * self.pcd as u64 * 2;
-            }
-        }
-
-        // Minimum ticks for the DMA call itself
-        let base_ticks = if self.wtrmrk != 0 { 19 } else { 11 };
-        ticks.max(base_ticks)
-    }
-
-    /// Fast-forward LCD DMA state by `count` events worth of pixel/UPCURR advancement.
-    /// Used to skip bulk catch-up events in O(1) instead of processing each one individually.
-    /// This only advances the pixel/scanline counters and UPCURR — DMA timestamp
-    /// accounting is handled by the caller.
-    pub fn fast_forward_dma_events(&mut self, count: u64) {
-        if self.prefill || count == 0 || self.cpl == 0 {
-            return;
-        }
-
-        let fill_bytes: u32 = if self.wtrmrk != 0 { 64 } else { 32 };
-        let words: u32 = if self.wtrmrk != 0 { 16 } else { 8 };
-        let pixels_per_event = words << (5 - self.bpp);
-
-        // Calculate how many events until frame complete
-        let remaining_pixels = if self.cur_row < self.lpp {
-            (self.lpp - self.cur_row) as u64 * self.cpl as u64
-                - self.cur_col.min(self.cpl) as u64
-        } else {
-            0
-        };
-        let events_to_end = if pixels_per_event > 0 && remaining_pixels > 0 {
-            (remaining_pixels + pixels_per_event as u64 - 1) / pixels_per_event as u64
-        } else {
-            0
-        };
-
-        let actual = count.min(events_to_end);
-        if actual == 0 {
-            return;
-        }
-
-        let total_pixels = actual * pixels_per_event as u64;
-        let new_abs = self.cur_col as u64 + total_pixels;
-        self.cur_col = (new_abs % self.cpl as u64) as u32;
-        self.cur_row += (new_abs / self.cpl as u64) as u32;
-        self.upcurr = self.upcurr.wrapping_add(actual as u32 * fill_bytes);
+    /// Check if the hardware cursor is enabled (CEmu: lcd.crsrControl).
+    /// Used by the bus to decide whether cursor image writes flush pending DMA.
+    pub fn cursor_enabled(&self) -> bool {
+        self.crsr_control & 1 != 0
     }
 
     /// Read a register byte
