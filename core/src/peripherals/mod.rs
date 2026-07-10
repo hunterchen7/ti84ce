@@ -569,17 +569,9 @@ impl Peripherals {
         buf[pos..pos + 8].copy_from_slice(&self.os_timer_cycles.to_le_bytes());
         pos += 8;
 
-        // Key state as bit-packed (8 bytes - 64 bits for 8x8 matrix)
-        for row in 0..KEYPAD_ROWS {
-            let mut row_bits = 0u8;
-            for col in 0..KEYPAD_COLS {
-                if self.key_state[row][col] {
-                    row_bits |= 1 << col;
-                }
-            }
-            buf[pos] = row_bits;
-            pos += 1;
-        }
+        // Host key state is transient and must never survive a state restore.
+        // Keep the reserved bytes zero for snapshot layout compatibility.
+        pos += KEYPAD_ROWS;
 
         // LCD DMA state (32 bytes) — timing registers + DMA progress
         // Without these, LCD DMA runs with zero timing after state restore,
@@ -760,14 +752,10 @@ impl Peripherals {
         self.os_timer_cycles = u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap());
         pos += 8;
 
-        // Key state
-        for row in 0..KEYPAD_ROWS {
-            let row_bits = buf[pos];
-            for col in 0..KEYPAD_COLS {
-                self.key_state[row][col] = (row_bits & (1 << col)) != 0;
-            }
-            pos += 1;
-        }
+        // Ignore legacy host key bits so a missed key-up cannot be restored as
+        // a permanently held physical key.
+        self.key_state = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
+        pos += KEYPAD_ROWS;
 
         // LCD DMA state (32 bytes) — timing registers + DMA progress
         let mut timing = [0u32; 4];
@@ -902,6 +890,18 @@ mod tests {
         assert!(!p.irq_pending());
         assert!(!p.timers.is_enabled(0));
         assert!(!p.key_state()[0][0]);
+    }
+
+    #[test]
+    fn test_snapshot_does_not_restore_host_key_state() {
+        let mut p = Peripherals::new();
+        p.set_key(3, 1, true);
+
+        let snapshot = p.to_bytes();
+        let mut restored = Peripherals::new();
+        restored.from_bytes(&snapshot).unwrap();
+
+        assert!(!restored.key_state()[3][1]);
     }
 
     #[test]
