@@ -247,14 +247,19 @@ export function Calculator({
                 "[State] savedState:",
                 savedState ? `${savedState.length} bytes` : "none",
               );
-              if (savedState && currentBackend.loadState(savedState)) {
-                stateRestored = true;
-                console.log(
-                  "[State] restored, lcdOn:",
-                  currentBackend.isLcdOn(),
-                  "dump:",
-                  (currentBackend as any).dumpState?.(),
-                );
+              if (savedState) {
+                if (currentBackend.loadState(savedState)) {
+                  stateRestored = true;
+                  console.log(
+                    "[State] restored, lcdOn:",
+                    currentBackend.isLcdOn(),
+                    "dump:",
+                    (currentBackend as any).dumpState?.(),
+                  );
+                } else {
+                  console.warn("[State] Discarding incompatible saved state");
+                  await storage.deleteState(romHash, backendType);
+                }
               }
             } catch (e) {
               console.warn(
