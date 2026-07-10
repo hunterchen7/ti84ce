@@ -111,6 +111,10 @@ pub struct KeypadController {
 }
 
 impl KeypadController {
+    /// Serialized controller state. Host key and edge state is intentionally
+    /// excluded because it belongs to the frontend input lifecycle.
+    pub const SNAPSHOT_SIZE: usize = 88;
+
     /// Create a new keypad controller
     pub fn new() -> Self {
         Self {
@@ -405,6 +409,100 @@ impl KeypadController {
     /// software acknowledges the enabled status bits.
     pub fn interrupt_pending(&self) -> bool {
         (self.status & self.enable) != 0
+    }
+
+    /// Serialize hardware registers and the in-progress scan phase.
+    pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
+        let mut buf = [0u8; Self::SNAPSHOT_SIZE];
+        let mut pos = 0;
+
+        buf[pos..pos + 4].copy_from_slice(&self.control.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.size.to_le_bytes());
+        pos += 4;
+        buf[pos] = self.scan_row;
+        pos += 1;
+        buf[pos] = self.status;
+        pos += 1;
+        buf[pos] = self.enable;
+        pos += 1;
+        buf[pos] = u8::from(self.scanning);
+        pos += 1;
+
+        for value in self.data {
+            buf[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
+            pos += 2;
+        }
+
+        buf[pos..pos + 4].copy_from_slice(&self.gpio_enable.to_le_bytes());
+        pos += 4;
+        buf[pos..pos + 4].copy_from_slice(&self.scan_cycles_remaining.to_le_bytes());
+        pos += 4;
+
+        for value in self.prev_scan_data {
+            buf[pos..pos + 2].copy_from_slice(&value.to_le_bytes());
+            pos += 2;
+        }
+
+        buf[pos] = u8::from(self.any_key_in_scan);
+        pos += 1;
+        buf[pos] = u8::from(self.data_changed_in_scan);
+        pos += 1;
+        buf[pos] = u8::from(self.needs_any_key_check);
+        pos += 1;
+        pos += 1; // Reserved
+
+        debug_assert_eq!(pos, Self::SNAPSHOT_SIZE);
+        buf
+    }
+
+    /// Restore hardware state while dropping transient host key edges.
+    pub fn from_bytes(&mut self, buf: &[u8]) -> Result<(), i32> {
+        if buf.len() < Self::SNAPSHOT_SIZE {
+            return Err(-105);
+        }
+
+        let mut pos = 0;
+        self.control = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        self.size = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        self.scan_row = buf[pos];
+        pos += 1;
+        self.status = buf[pos];
+        pos += 1;
+        self.enable = buf[pos];
+        pos += 1;
+        self.scanning = buf[pos] != 0;
+        pos += 1;
+
+        for value in &mut self.data {
+            *value = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap());
+            pos += 2;
+        }
+
+        self.gpio_enable = u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+        self.scan_cycles_remaining =
+            u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap());
+        pos += 4;
+
+        for value in &mut self.prev_scan_data {
+            *value = u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap());
+            pos += 2;
+        }
+
+        self.any_key_in_scan = buf[pos] != 0;
+        pos += 1;
+        self.data_changed_in_scan = buf[pos] != 0;
+        pos += 1;
+        self.needs_any_key_check = buf[pos] != 0;
+        pos += 1;
+        pos += 1; // Reserved
+
+        self.key_edge_flags = [[false; KEYPAD_COLS]; KEYPAD_ROWS];
+        debug_assert_eq!(pos, Self::SNAPSHOT_SIZE);
+        Ok(())
     }
 
     // ========== Register read/write ==========
@@ -846,5 +944,34 @@ mod tests {
         assert_eq!(kp.read(regs::GPIO_ENABLE, &keys), 0xAB);
         assert_eq!(kp.read(regs::GPIO_ENABLE + 1, &keys), 0xCD);
         assert_eq!(kp.gpio_enable, 0x0000CDAB);
+    }
+
+    #[test]
+    fn test_snapshot_preserves_controller_and_scan_phase() {
+        let mut kp = KeypadController::new();
+
+        kp.write(regs::CONTROL, (5 << 2) | mode::CONTINUOUS);
+        kp.write(regs::INT_ACK, status::DATA_CHANGED | status::ANY_KEY);
+        kp.set_key_edge(3, 2, true);
+        kp.tick(2, &empty_key_state());
+
+        let snapshot = kp.to_bytes();
+        let mut restored = KeypadController::new();
+        restored.from_bytes(&snapshot).unwrap();
+
+        assert_eq!(restored.control, kp.control);
+        assert_eq!(restored.size, kp.size);
+        assert_eq!(restored.scan_row, kp.scan_row);
+        assert_eq!(restored.status, kp.status);
+        assert_eq!(restored.enable, kp.enable);
+        assert_eq!(restored.data, kp.data);
+        assert_eq!(restored.gpio_enable, kp.gpio_enable);
+        assert_eq!(restored.scanning, kp.scanning);
+        assert_eq!(restored.scan_cycles_remaining, kp.scan_cycles_remaining);
+        assert_eq!(restored.prev_scan_data, kp.prev_scan_data);
+        assert_eq!(restored.any_key_in_scan, kp.any_key_in_scan);
+        assert_eq!(restored.data_changed_in_scan, kp.data_changed_in_scan);
+        assert_eq!(restored.needs_any_key_check, kp.needs_any_key_check);
+        assert!(!restored.key_edge_flags[3][2]);
     }
 }

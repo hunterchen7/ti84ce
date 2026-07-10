@@ -1967,8 +1967,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version (v9: LCD palette + cursor state in peripheral snapshot)
-    const STATE_VERSION: u32 = 10;
+    /// State format version (v11: keypad controller and scan phase)
+    const STATE_VERSION: u32 = 11;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20

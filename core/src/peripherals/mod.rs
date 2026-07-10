@@ -446,8 +446,8 @@ impl Peripherals {
     // ========== State Persistence ==========
 
     /// Size of peripheral state snapshot in bytes
-    /// V8 base(236) + palette_bgr565(512) + palette_rgb565(512) + cursor_image(1024) + crsr_regs(20) = 2304
-    pub const SNAPSHOT_SIZE: usize = 2304;
+    /// Base state (2304) plus the keypad controller and in-progress scan phase.
+    pub const SNAPSHOT_SIZE: usize = 2304 + KeypadController::SNAPSHOT_SIZE;
 
     /// Save peripheral state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -621,7 +621,11 @@ impl Peripherals {
             pos += 4;
         }
 
-        let _ = pos; // suppress unused warning
+        let keypad = self.keypad.to_bytes();
+        buf[pos..pos + KeypadController::SNAPSHOT_SIZE].copy_from_slice(&keypad);
+        pos += KeypadController::SNAPSHOT_SIZE;
+
+        debug_assert_eq!(pos, Self::SNAPSHOT_SIZE);
         buf
     }
 
@@ -828,7 +832,19 @@ impl Peripherals {
         }
         self.lcd.set_crsr_registers(&crsr_regs);
 
-        let _ = pos; // suppress unused warning
+        self.keypad
+            .from_bytes(&buf[pos..pos + KeypadController::SNAPSHOT_SIZE])?;
+        pos += KeypadController::SNAPSHOT_SIZE;
+
+        // Reconstruct the keypad's level-triggered interrupt line from its
+        // restored status and enable registers.
+        if self.keypad.interrupt_pending() {
+            self.interrupt.raise(sources::KEYPAD);
+        } else {
+            self.interrupt.clear_raw(sources::KEYPAD);
+        }
+
+        debug_assert_eq!(pos, Self::SNAPSHOT_SIZE);
         Ok(())
     }
 }
@@ -902,6 +918,27 @@ mod tests {
         restored.from_bytes(&snapshot).unwrap();
 
         assert!(!restored.key_state()[3][1]);
+    }
+
+    #[test]
+    fn test_snapshot_restores_keypad_controller_state() {
+        let mut p = Peripherals::new();
+        p.write_test(KEYPAD_BASE, (5 << 2) | 3);
+        p.write_test(KEYPAD_BASE + 0x0C, 0x07);
+        p.set_key(3, 2, true);
+        p.tick(2, 0);
+
+        let snapshot = p.to_bytes();
+        let mut restored = Peripherals::new();
+        restored.from_bytes(&snapshot).unwrap();
+
+        assert_eq!(restored.keypad.peek(0, &empty_keys()), (5 << 2) | 3);
+        assert_eq!(restored.keypad.peek(0x0C, &empty_keys()), 0x07);
+        assert_eq!(restored.keypad.peek(0x16, &empty_keys()), 1 << 2);
+        assert!(restored.keypad.is_scanning());
+        assert!(restored.keypad.interrupt_pending());
+        assert_ne!(restored.interrupt.raw() & sources::KEYPAD, 0);
+        assert!(!restored.key_state()[3][2]);
     }
 
     #[test]
