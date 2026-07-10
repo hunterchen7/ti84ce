@@ -1309,7 +1309,9 @@ impl Emu {
 
         // Capture state BEFORE execution
         let pc = self.cpu.pc;
-        let sp = self.cpu.sp();
+        // CEmu's trace tool logs SPL unconditionally (trace.c), not the
+        // mode-selected stack pointer; match it so suffix-opcode steps compare
+        let sp = self.cpu.spl;
         let a = self.cpu.a;
         let f = self.cpu.f;
         let bc = self.cpu.bc;
@@ -2463,6 +2465,11 @@ impl Emu {
     /// Get the CPU's stack pointer
     pub fn sp(&self) -> u32 {
         self.cpu.sp()
+    }
+
+    /// Get the CPU's ADL stack pointer (what CEmu's trace tool logs as SP)
+    pub fn spl(&self) -> u32 {
+        self.cpu.spl
     }
 
     /// Get the CPU's BC register

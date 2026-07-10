@@ -544,7 +544,7 @@ fn cmd_fulltrace(max_steps: u64) {
                 // Create pseudo StepInfo with current state
                 let final_regs = StepInfo {
                     pc: emu.pc(),
-                    sp: emu.sp(),
+                    sp: emu.spl(),
                     a: emu.a(),
                     f: emu.f(),
                     bc: emu.bc(),
@@ -583,7 +583,7 @@ fn cmd_fulltrace(max_steps: u64) {
         // Create a pseudo StepInfo with current emulator state for the final entry's registers
         let final_regs = StepInfo {
             pc: emu.pc(),
-            sp: emu.sp(),
+            sp: emu.spl(),
             a: emu.a(),
             f: emu.f(),
             bc: emu.bc(),
@@ -843,6 +843,7 @@ fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
     let min_entries = ours_entries.len().min(cemu_entries.len());
     let mut first_divergence: Option<usize> = None;
     let mut divergence_count = 0;
+    let mut rebase_boundaries = 0;
 
     println!("\nComparing {} entries...\n", min_entries);
 
@@ -899,13 +900,32 @@ fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
             diffs.push(format!("IFF2: {} vs {}", ours.iff2, cemu.iff2));
         }
 
-        // Compare cycle count
-        if ours.cycle != cemu.cycle {
-            diffs.push(format!("cycles: {} vs {}", ours.cycle, cemu.cycle));
+        // Compare per-instruction cycle cost (delta to the next entry), not the
+        // cumulative counter: CEmu's trace counter rebases whenever the ROM
+        // changes CPU speed (port 0x01), so absolute values diverge by a
+        // constant after every speed change even when timing is identical.
+        if i + 1 < min_entries {
+            let ours_next = &ours_entries[i + 1];
+            let cemu_next = &cemu_entries[i + 1];
+            let ours_delta = ours_next.cycle as i64 - ours.cycle as i64;
+            let cemu_delta = cemu_next.cycle as i64 - cemu.cycle as i64;
+            if cemu_delta < 0 || cemu_delta > ours_delta + 10_000 {
+                // Counter rebase (down on speed decrease, up on increase)
+                rebase_boundaries += 1;
+            } else if ours_delta != cemu_delta {
+                diffs.push(format!(
+                    "cycle-delta: {} vs {} (cumulative {} vs {})",
+                    ours_delta, cemu_delta, ours.cycle, cemu.cycle
+                ));
+            }
         }
 
-        // Compare I/O operations count
-        if ours.io_ops_count != cemu.io_ops_count {
+        // Compare I/O write counts, clamped to the common saturation point:
+        // both tracers cap at 256 logged ops per instruction, but ours logs
+        // reads too, so a saturated block op yields 128 writes for us vs 256
+        // for CEmu. Counts below the clamp still compare exactly.
+        const IO_WRITE_CLAMP: usize = 128;
+        if ours.io_ops_count.min(IO_WRITE_CLAMP) != cemu.io_ops_count.min(IO_WRITE_CLAMP) {
             diffs.push(format!(
                 "io_ops: {} vs {}",
                 ours.io_ops_count, cemu.io_ops_count
@@ -936,6 +956,10 @@ fn cmd_fullcompare(ours_path: &str, cemu_path: &str) {
     println!("=== Summary ===");
     println!("Entries compared: {}", min_entries);
     println!("Divergences: {}", divergence_count);
+    println!(
+        "CEmu cycle-counter rebases skipped (CPU speed changes): {}",
+        rebase_boundaries
+    );
 
     if let Some(idx) = first_divergence {
         println!("First divergence at step: {}", idx);
@@ -973,53 +997,65 @@ struct TraceEntry {
     io_ops_count: usize,
 }
 
-/// Parse trace entries from JSON content (simple regex-based parsing)
+/// Parse trace entries from JSON content (simple line-based parsing)
+///
+/// Entries are delimited by brace depth. The top-level container is a JSON
+/// *array* (brackets, which we don't count), so between entries the brace
+/// depth is 0 and each entry is the depth 0 -> 1 object. Entries contain
+/// nested `opcode`/`regs_before` objects and `io_ops` array elements, so
+/// "line starts with a brace" is NOT an entry boundary.
 fn parse_trace_entries(content: &str) -> Vec<TraceEntry> {
     let mut entries = Vec::new();
     let mut current = TraceEntry::default();
     let mut in_io_ops = false;
+    let mut depth: i32 = 0;
 
     for line in content.lines() {
         let line = line.trim();
+        let opens = line.matches('{').count() as i32;
+        let closes = line.matches('}').count() as i32;
 
-        if line.starts_with("{") && !line.contains("io_ops") {
+        if depth == 0 && opens > closes {
             current = TraceEntry::default();
-        } else if line.starts_with("}") && !in_io_ops {
+        }
+        depth += opens - closes;
+        if depth == 0 && closes > opens {
             entries.push(std::mem::take(&mut current));
+            in_io_ops = false;
         }
 
-        // Parse fields
-        if let Some(v) = extract_json_u64(line, "\"step\"") {
+        // Parse fields (keys include the colon so "cycle" can't match "cycles")
+        if let Some(v) = extract_json_u64(line, "\"step\":") {
             current.step = v;
         }
-        if let Some(v) = extract_json_u64(line, "\"cycle\"") {
+        if let Some(v) = extract_json_u64(line, "\"cycle\":") {
             current.cycle = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"pc\"") {
+        if let Some(v) = extract_json_hex32(line, "\"pc\":") {
             current.pc = v;
         }
-        if let Some(v) = extract_json_hex8(line, "\"A\"") {
+        if let Some(v) = extract_json_hex8(line, "\"A\":") {
             current.a = v;
         }
-        if let Some(v) = extract_json_hex8(line, "\"F\"") {
+        if let Some(v) = extract_json_hex8(line, "\"F\":") {
             current.f = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"BC\"") {
+        if let Some(v) = extract_json_hex32(line, "\"BC\":") {
             current.bc = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"DE\"") {
+        if let Some(v) = extract_json_hex32(line, "\"DE\":") {
             current.de = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"HL\"") {
+        if let Some(v) = extract_json_hex32(line, "\"HL\":") {
             current.hl = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"IX\"") {
+        if let Some(v) = extract_json_hex32(line, "\"IX\":") {
             current.ix = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"IY\"") {
+        if let Some(v) = extract_json_hex32(line, "\"IY\":") {
             current.iy = v;
         }
-        if let Some(v) = extract_json_hex32(line, "\"SP\"") {
+        if let Some(v) = extract_json_hex32(line, "\"SP\":") {
             current.sp = v;
         }
         if line.contains("\"ADL\"") {
@@ -1031,7 +1067,7 @@ fn parse_trace_entries(content: &str) -> Vec<TraceEntry> {
         if line.contains("\"IFF2\"") {
             current.iff2 = line.contains("true");
         }
-        if let Some(v) = extract_json_string(line, "\"bytes\"") {
+        if let Some(v) = extract_json_string(line, "\"bytes\":") {
             current.opcode = v;
         }
 
@@ -1039,7 +1075,8 @@ fn parse_trace_entries(content: &str) -> Vec<TraceEntry> {
         if line.contains("\"io_ops\"") {
             in_io_ops = true;
         }
-        if in_io_ops && line.contains("\"type\"") {
+        // Count only writes: our tracer logs memory reads too, CEmu's does not
+        if in_io_ops && line.contains("\"type\"") && line.contains("write") {
             current.io_ops_count += 1;
         }
         if in_io_ops && line.starts_with("]") {
