@@ -289,17 +289,23 @@ export class StateStorage {
   }
 }
 
-// Singleton instance
-let storageInstance: StateStorage | null = null;
+// Singleton initialization
+let storagePromise: Promise<StateStorage> | null = null;
 
 /**
  * Get the singleton StateStorage instance.
  * Initializes the storage on first call.
  */
-export async function getStateStorage(): Promise<StateStorage> {
-  if (!storageInstance) {
-    storageInstance = new StateStorage();
-    await storageInstance.init();
+export function getStateStorage(): Promise<StateStorage> {
+  if (!storagePromise) {
+    const storage = new StateStorage();
+    storagePromise = storage
+      .init()
+      .then(() => storage)
+      .catch((error) => {
+        storagePromise = null;
+        throw error;
+      });
   }
-  return storageInstance;
+  return storagePromise;
 }
