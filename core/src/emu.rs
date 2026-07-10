@@ -1789,11 +1789,9 @@ impl Emu {
             // This updates keypad data registers
             self.bus.set_key(row, col, down);
 
-            // Set any_key_wake signal to wake CPU from HALT
-            // This allows keys to wake the CPU so the OS can poll the keypad
-            if down {
-                self.cpu.any_key_wake = true;
-            }
+            // CEmu signals CPU_SIGNAL_ANY_KEY on both transitions. TI-OS uses
+            // the release wake to finish debouncing keys such as DEL.
+            self.cpu.any_key_wake = true;
         }
     }
 
@@ -2953,6 +2951,16 @@ mod tests {
         assert!(emu.bus.key_state()[0][0]);
         emu.set_key(0, 0, false);
         assert!(!emu.bus.key_state()[0][0]);
+    }
+
+    #[test]
+    fn test_key_release_signals_any_key_wake() {
+        let mut emu = Emu::new();
+        emu.cpu.any_key_wake = false;
+
+        emu.set_key(1, 7, false);
+
+        assert!(emu.cpu.any_key_wake);
     }
 
     #[test]
