@@ -330,7 +330,11 @@ class EmulatorBridge {
         val buffer = ByteArray(size.toInt())
         val result = nativeSaveState(handle, buffer)
 
-        return if (result >= 0) buffer else null
+        return if (result > 0 && result <= buffer.size) {
+            buffer.copyOf(result)
+        } else {
+            null
+        }
     }
 
     /**

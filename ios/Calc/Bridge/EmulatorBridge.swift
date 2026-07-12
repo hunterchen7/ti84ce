@@ -321,7 +321,8 @@ class EmulatorBridge {
             return emu_save_state(h, ptr, size)
         }
 
-        return result >= 0 ? buffer : nil
+        guard result > 0, Int(result) <= size else { return nil }
+        return Data(buffer.prefix(Int(result)))
     }
 
     /// Load a saved emulator state.
