@@ -1039,24 +1039,24 @@ export function Calculator({
       fileEntries.push({ name: file.name, data: new Uint8Array(buffer) });
     }
 
-    // Store for future resets
-    programDataRef.current = fileEntries;
-    setProgramFiles(fileEntries.map((f) => f.name));
-
     const backend = backendRef.current;
 
     // Live path: emulator is already running — inject + soft reboot in-place
     if (backend?.isRomLoaded) {
       try {
         let totalInjected = 0;
+        const succeeded: typeof fileEntries = [];
+        const failed: string[] = [];
         for (const entry of fileEntries) {
           const count = backend.sendFileLive(entry.data);
           if (count >= 0) {
             totalInjected += count;
+            succeeded.push(entry);
             console.log(
               `[Program Live] Injected ${entry.name}: ${count} entries`,
             );
           } else {
+            failed.push(`${entry.name} (${count})`);
             console.error(
               `[Program Live] Failed to inject ${entry.name}: error ${count}`,
             );
@@ -1065,9 +1065,15 @@ export function Calculator({
         console.log(
           `[Program Live] Total entries injected: ${totalInjected}, soft reboot done`,
         );
-        // Turbo-speed through boot — slightly undershot so user doesn't notice
-        turboUntilRef.current = performance.now() + 300;
-        setError(null);
+        programDataRef.current = succeeded;
+        setProgramFiles(succeeded.map((entry) => entry.name));
+        if (failed.length > 0) {
+          setError(`Failed to inject program files: ${failed.join(", ")}`);
+        } else {
+          // Turbo-speed through boot — slightly undershot so user doesn't notice
+          turboUntilRef.current = performance.now() + 300;
+          setError(null);
+        }
       } catch (err) {
         console.error("[Program Live] Error:", err);
         setError(`Failed to live-send programs: ${err}`);
@@ -1100,12 +1106,16 @@ export function Calculator({
 
       // Inject each program file
       let totalInjected = 0;
+      const succeeded: typeof fileEntries = [];
+      const failed: string[] = [];
       for (const entry of fileEntries) {
         const count = freshBackend.sendFile(entry.data);
         if (count >= 0) {
           totalInjected += count;
+          succeeded.push(entry);
           console.log(`[Program] Injected ${entry.name}: ${count} entries`);
         } else {
+          failed.push(`${entry.name} (${count})`);
           console.error(
             `[Program] Failed to inject ${entry.name}: error ${count}`,
           );
@@ -1121,7 +1131,13 @@ export function Calculator({
       // the normal user flow (hold ON, boot runs, release ON).
       setRomLoaded(true);
       setIsRunning(true);
-      setError(null);
+      programDataRef.current = succeeded;
+      setProgramFiles(succeeded.map((entry) => entry.name));
+      setError(
+        failed.length > 0
+          ? `Failed to inject program files: ${failed.join(", ")}`
+          : null,
+      );
       freshBackend.setKey(2, 0, true); // ON key press → powered_on = true
       setTimeout(() => freshBackend.setKey(2, 0, false), 300); // Release after boot starts
     } catch (err) {
@@ -1140,6 +1156,7 @@ export function Calculator({
       // Re-read fresh bytes from disk
       try {
         let totalInjected = 0;
+        const failed: string[] = [];
         for (const handle of handles) {
           const file = await handle.getFile();
           const data = new Uint8Array(await file.arrayBuffer());
@@ -1148,6 +1165,7 @@ export function Calculator({
             totalInjected += count;
             console.log(`[Resend] Injected ${file.name}: ${count} entries`);
           } else {
+            failed.push(`${file.name} (${count})`);
             console.error(
               `[Resend] Failed to inject ${file.name}: error ${count}`,
             );
@@ -1156,8 +1174,12 @@ export function Calculator({
         console.log(
           `[Resend] Total entries injected: ${totalInjected}, soft reboot done`,
         );
-        turboUntilRef.current = performance.now() + 300;
-        setError(null);
+        if (failed.length > 0) {
+          setError(`Failed to resend program files: ${failed.join(", ")}`);
+        } else {
+          turboUntilRef.current = performance.now() + 300;
+          setError(null);
+        }
       } catch (err) {
         console.error("[Resend] Error:", err);
         setError(`Failed to resend programs: ${err}`);
@@ -1170,6 +1192,7 @@ export function Calculator({
     if (cached.length > 0) {
       try {
         let totalInjected = 0;
+        const failed: string[] = [];
         for (const entry of cached) {
           const count = backend.sendFileLive(entry.data);
           if (count >= 0) {
@@ -1178,6 +1201,7 @@ export function Calculator({
               `[Resend] Injected ${entry.name}: ${count} entries (cached)`,
             );
           } else {
+            failed.push(`${entry.name} (${count})`);
             console.error(
               `[Resend] Failed to inject ${entry.name}: error ${count}`,
             );
@@ -1186,8 +1210,12 @@ export function Calculator({
         console.log(
           `[Resend] Total entries injected: ${totalInjected}, soft reboot done`,
         );
-        turboUntilRef.current = performance.now() + 300;
-        setError(null);
+        if (failed.length > 0) {
+          setError(`Failed to resend program files: ${failed.join(", ")}`);
+        } else {
+          turboUntilRef.current = performance.now() + 300;
+          setError(null);
+        }
       } catch (err) {
         console.error("[Resend] Error:", err);
         setError(`Failed to resend programs: ${err}`);

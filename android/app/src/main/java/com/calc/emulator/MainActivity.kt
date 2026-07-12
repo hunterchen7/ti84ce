@@ -358,12 +358,16 @@ fun EmulatorScreen(
 
             // Inject each program file
             var totalInjected = 0
+            val successfulPrograms = mutableListOf<String>()
+            val failedPrograms = mutableListOf<String>()
             for ((name, bytes) in fileEntries) {
                 val count = emulator.sendFile(bytes)
                 if (count >= 0) {
                     totalInjected += count
+                    successfulPrograms.add(name)
                     Log.i("EmulatorScreen", "Injected $name: $count entries")
                 } else {
+                    failedPrograms.add("$name ($count)")
                     Log.e("EmulatorScreen", "Failed to inject $name: error $count")
                 }
             }
@@ -372,8 +376,12 @@ fun EmulatorScreen(
 
             // Power on and start
             emulator.powerOn()
-            loadedPrograms = fileEntries.map { it.first }
-            loadError = null
+            loadedPrograms = successfulPrograms
+            loadError = if (failedPrograms.isEmpty()) {
+                null
+            } else {
+                "Failed to inject program files: ${failedPrograms.joinToString(", ")}"
+            }
             totalCyclesExecuted = 0L
             frameCounter = 0
             logLines.clear()
