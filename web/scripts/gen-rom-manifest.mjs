@@ -20,7 +20,7 @@ try {
 }
 
 const version = parseInt(process.argv[2] || String(prevVersion + 1));
-const stateVersion = parseInt(process.argv[3] || "10");
+const stateVersion = parseInt(process.argv[3] || "12");
 
 const manifest = {
   version,

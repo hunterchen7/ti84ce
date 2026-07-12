@@ -994,7 +994,7 @@ impl Emu {
 
             // Tick peripherals and check for interrupts
             if self.tick_peripherals(cycles_used) {
-                self.cpu.irq_pending = true;
+                break;
             }
 
             // Stop if device went off (OS wrote POWER bit 6 during this instruction)
@@ -1061,7 +1061,9 @@ impl Emu {
                         self.advance_scheduler(batch);
                         self.total_cycles = self.bus.total_cycles();
                         if self.tick_peripherals(batch as u32) {
-                            self.cpu.irq_pending = true;
+                            break;
+                        }
+                        if self.cpu.irq_pending {
                             break; // Interrupt will wake CPU on next step()
                         }
                         peripheral_debt = 0; // batch already ticked peripherals
@@ -1086,7 +1088,8 @@ impl Emu {
                     // Periodically tick peripherals (OS Timer, keypad, etc.)
                     if peripheral_debt >= HALT_TICK_BATCH {
                         if self.tick_peripherals(peripheral_debt as u32) {
-                            self.cpu.irq_pending = true;
+                            peripheral_debt = 0;
+                            break;
                         }
                         peripheral_debt = 0;
                     }
@@ -1105,9 +1108,7 @@ impl Emu {
 
                 // Flush any remaining peripheral debt
                 if peripheral_debt > 0 {
-                    if self.tick_peripherals(peripheral_debt as u32) {
-                        self.cpu.irq_pending = true;
-                    }
+                    self.tick_peripherals(peripheral_debt as u32);
                 }
             }
         }
@@ -1235,7 +1236,7 @@ impl Emu {
             }
 
             if self.tick_peripherals(cycles_used) {
-                self.cpu.irq_pending = true;
+                break;
             }
 
             // Stop if device went off
@@ -1263,7 +1264,9 @@ impl Emu {
                         self.advance_scheduler(batch);
                         self.total_cycles = self.bus.total_cycles();
                         if self.tick_peripherals(batch as u32) {
-                            self.cpu.irq_pending = true;
+                            break;
+                        }
+                        if self.cpu.irq_pending {
                             break;
                         }
                         continue;
@@ -1284,7 +1287,8 @@ impl Emu {
 
                     if peripheral_debt >= HALT_TICK_BATCH {
                         if self.tick_peripherals(peripheral_debt as u32) {
-                            self.cpu.irq_pending = true;
+                            peripheral_debt = 0;
+                            break;
                         }
                         peripheral_debt = 0;
                     }
@@ -1301,9 +1305,7 @@ impl Emu {
                 }
 
                 if peripheral_debt > 0 {
-                    if self.tick_peripherals(peripheral_debt as u32) {
-                        self.cpu.irq_pending = true;
-                    }
+                    self.tick_peripherals(peripheral_debt as u32);
                 }
             }
         }
@@ -1415,12 +1417,10 @@ impl Emu {
         }
 
         // Tick peripherals and check for interrupts
-        if self.tick_peripherals(cycles_used) {
-            self.cpu.irq_pending = true;
-        }
+        let watchdog_reset = self.tick_peripherals(cycles_used);
 
         // HALT fast-forward: advance to next scheduled event (batched for DMA efficiency)
-        if self.cpu.halted {
+        if self.cpu.halted && !watchdog_reset {
             self.last_stop = StopReason::Halted;
             const HALT_TICK_BATCH: u64 = 10_000;
             const STEP_HALT_CAP: u64 = 10_000_000;
@@ -1442,7 +1442,9 @@ impl Emu {
                     self.total_cycles = self.bus.total_cycles();
                     total_advanced += batch;
                     if self.tick_peripherals(batch as u32) {
-                        self.cpu.irq_pending = true;
+                        break;
+                    }
+                    if self.cpu.irq_pending {
                         break;
                     }
                     continue;
@@ -1462,7 +1464,8 @@ impl Emu {
                 peripheral_debt += skip;
                 if peripheral_debt >= HALT_TICK_BATCH {
                     if self.tick_peripherals(peripheral_debt as u32) {
-                        self.cpu.irq_pending = true;
+                        peripheral_debt = 0;
+                        break;
                     }
                     peripheral_debt = 0;
                 }
@@ -1479,9 +1482,7 @@ impl Emu {
             }
 
             if peripheral_debt > 0 {
-                if self.tick_peripherals(peripheral_debt as u32) {
-                    self.cpu.irq_pending = true;
-                }
+                self.tick_peripherals(peripheral_debt as u32);
             }
         }
 
@@ -1512,11 +1513,12 @@ impl Emu {
     }
 
     /// Tick peripherals and handle timer delay pipeline scheduling.
-    /// Returns true if any interrupt is pending.
+    /// Returns true when the watchdog reset the ASIC.
     fn tick_peripherals(&mut self, cycles: u32) -> bool {
         // Get timer delay remaining for the delay pipeline packing
         let delay_remaining = self.scheduler.ticks_remaining(EventId::TimerDelay);
-        let irq = self.bus.ports.tick(cycles, delay_remaining);
+        let (irq, watchdog_actions) = self.bus.ports.tick(cycles, delay_remaining);
+        self.cpu.irq_pending |= irq;
 
         // If timer tick generated new delay pipeline data, schedule the TimerDelay event
         if self.bus.ports.timers.needs_delay_event {
@@ -1545,7 +1547,31 @@ impl Emu {
             self.scheduler.clear(EventId::Lcd);
         }
 
-        irq
+        use crate::peripherals::watchdog::{WATCHDOG_ACTION_NMI, WATCHDOG_ACTION_RESET};
+
+        if watchdog_actions & WATCHDOG_ACTION_RESET != 0 {
+            self.watchdog_reset();
+            return true;
+        }
+        if watchdog_actions & WATCHDOG_ACTION_NMI != 0 {
+            self.cpu.nmi_pending = true;
+            self.log_nmi();
+        }
+
+        false
+    }
+
+    /// Apply CEmu's ASIC-reset behavior while keeping the host cycle counter monotonic.
+    fn watchdog_reset(&mut self) {
+        let cycles_before_reset = self.total_cycles;
+        log_evt!("WATCHDOG_RESET pc={:06X}", self.cpu.pc);
+        self.reset();
+        self.power_on();
+
+        let reset_cycles = self.total_cycles;
+        self.total_cycles = cycles_before_reset.saturating_add(reset_cycles);
+        self.bus.set_total_cycles(self.total_cycles);
+        self.refresh_dma_anchor();
     }
 
     /// Process any pending scheduler events
@@ -1982,8 +2008,8 @@ impl Emu {
 
     // ========== State Persistence ==========
 
-    /// State format version (v11: keypad controller and scan phase)
-    const STATE_VERSION: u32 = 11;
+    /// State format version (v12: watchdog counter and phase)
+    const STATE_VERSION: u32 = 12;
     /// Magic bytes for state file identification
     const STATE_MAGIC: [u8; 4] = *b"CE84";
     /// Header size: magic(4) + version(4) + rom_hash(8) + data_len(4) = 20

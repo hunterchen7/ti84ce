@@ -331,8 +331,8 @@ impl Peripherals {
 
     /// Tick all peripherals
     /// delay_remaining: CPU cycles remaining until the TimerDelay event fires (0 if not active)
-    /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, cycles: u32, delay_remaining: u64) -> bool {
+    /// Returns the interrupt state and any watchdog reset/NMI actions.
+    pub fn tick(&mut self, cycles: u32, delay_remaining: u64) -> (bool, u8) {
         // Tick timers (pass CPU speed for 32kHz clock source support)
         // Timer interrupts are deferred through the 2-cycle delay pipeline.
         // The caller (emu.rs) checks timers.needs_delay_event and schedules
@@ -373,7 +373,8 @@ impl Peripherals {
         // Tick OS Timer (32KHz crystal-based timer)
         self.tick_os_timer(cycles);
 
-        self.interrupt.irq_pending()
+        let watchdog_actions = self.watchdog.tick(cycles, cpu_speed);
+        (self.interrupt.irq_pending(), watchdog_actions)
     }
 
     /// Tick the OS Timer (32KHz crystal timer, generates bit 4 interrupt)
@@ -446,8 +447,9 @@ impl Peripherals {
     // ========== State Persistence ==========
 
     /// Size of peripheral state snapshot in bytes
-    /// Base state (2304) plus the keypad controller and in-progress scan phase.
-    pub const SNAPSHOT_SIZE: usize = 2304 + KeypadController::SNAPSHOT_SIZE;
+    /// Base state plus keypad scan state and the watchdog phase.
+    pub const SNAPSHOT_SIZE: usize =
+        2304 + KeypadController::SNAPSHOT_SIZE + WatchdogController::SNAPSHOT_SIZE;
 
     /// Save peripheral state to bytes
     pub fn to_bytes(&self) -> [u8; Self::SNAPSHOT_SIZE] {
@@ -624,6 +626,10 @@ impl Peripherals {
         let keypad = self.keypad.to_bytes();
         buf[pos..pos + KeypadController::SNAPSHOT_SIZE].copy_from_slice(&keypad);
         pos += KeypadController::SNAPSHOT_SIZE;
+
+        let watchdog = self.watchdog.to_bytes();
+        buf[pos..pos + WatchdogController::SNAPSHOT_SIZE].copy_from_slice(&watchdog);
+        pos += WatchdogController::SNAPSHOT_SIZE;
 
         debug_assert_eq!(pos, Self::SNAPSHOT_SIZE);
         buf
@@ -835,6 +841,10 @@ impl Peripherals {
         self.keypad
             .from_bytes(&buf[pos..pos + KeypadController::SNAPSHOT_SIZE])?;
         pos += KeypadController::SNAPSHOT_SIZE;
+
+        self.watchdog
+            .from_bytes(&buf[pos..pos + WatchdogController::SNAPSHOT_SIZE])?;
+        pos += WatchdogController::SNAPSHOT_SIZE;
 
         // Reconstruct the keypad's level-triggered interrupt line from its
         // restored status and enable registers.
@@ -1112,7 +1122,7 @@ mod tests {
         p.set_key(0, 0, true);
 
         // Tick should detect key and raise interrupt
-        let pending = p.tick(1, 0);
+        let (pending, _) = p.tick(1, 0);
         assert!(pending);
     }
 
