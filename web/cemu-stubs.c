@@ -7,6 +7,8 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "lcd.h"
+
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #endif
@@ -100,6 +102,11 @@ void EMSCRIPTEN_KEEPALIVE emu_step(unsigned int frames) {
     for (unsigned int i = 0; i < frames; i++) {
         emu_run((uint64_t)1);
     }
+}
+
+/** Return whether the LCD controller is enabled. */
+int EMSCRIPTEN_KEEPALIVE emu_lcd_is_on(void) {
+    return (lcd.control & 1u) != 0;
 }
 
 /* Forward declarations for save/load state */

@@ -18,6 +18,7 @@ interface CEmuModule {
   _emu_step(frames: number): void;
   _emu_reset(): void;
   _lcd_get_frame(): number;
+  _emu_lcd_is_on(): number;
   _emu_keypad_event(row: number, col: number, press: boolean): void;
   _emu_save_state_size(): number;
   _emu_save_state(bufferPtr: number, bufferSize: number): number;
@@ -175,8 +176,7 @@ export class CEmuBackend implements EmulatorBackend {
   }
 
   isLcdOn(): boolean {
-    // CEmu backend doesn't expose LCD state yet — assume on
-    return true;
+    return this.module !== null && this.module._emu_lcd_is_on() !== 0;
   }
 
 
