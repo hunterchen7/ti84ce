@@ -1148,16 +1148,15 @@ impl Bus {
                             self.spi_needs_schedule = true;
                         }
                     } else {
+                        if port_range == 0x4 {
+                            self.apply_lcd_write_ctrl_delay(port_offset & 0xFFF);
+                        }
                         // Get old value for tracing (read without side effects if possible)
                         let keys = *self.ports.key_state();
                         old_value = self.ports.read(port_offset, &keys, self.cycles);
                         self.ports.write(port_offset, value, self.cycles);
                         // CEmu sched_set(SCHED_LCD, 0) on LCD enable: capture the
                         // exact mid-instruction timestamp (see port_write()).
-                        // TODO: this MMIO path is missing CEmu's lcd_write_ctrl_delay()
-                        // cycles for LCD timing/control writes (lcd.c:632); the boot ROM
-                        // only uses the OUT path, but memory-mapped LCD writes would
-                        // currently be undercharged (Milestone: exact-parity polish).
                         if self.ports.lcd.needs_lcd_event && self.lcd_enable_timestamp.is_none() {
                             self.lcd_enable_timestamp =
                                 Some(self.dma_cpu_timestamp() / DMA_TICK_24M * DMA_TICK_24M);
@@ -1581,40 +1580,8 @@ impl Bus {
             0x4 => {
                 // LCD controller - mask with 0xFF
                 let offset = (port & 0xFF) as u32;
-                // CEmu: lcd_write_ctrl_delay() only for specific registers:
-                // - index < 0x10 (timing registers 0x00-0x0F)
-                // - (index & ~3) == 0x18 (control register 0x18-0x1B)
-                // CEmu aligns index to 4-byte boundaries before comparison
+                self.apply_lcd_write_ctrl_delay(offset);
                 let aligned_offset = offset & !3;
-                if offset < 0x10 || aligned_offset == 0x18 {
-                    let cpu_speed = self.ports.control.cpu_speed();
-                    // CEmu formula: cycles += (base - 2) where base varies by speed
-                    // The -2 accounts for port_write_cycles already added
-                    let delay = match cpu_speed {
-                        0 => 10 - 2, // 6 MHz
-                        1 => 12 - 2, // 12 MHz
-                        2 => {
-                            if self.serial_flash {
-                                14 - 2
-                            } else {
-                                16 - 2
-                            }
-                        } // 24 MHz
-                        3 | _ => {
-                            if self.serial_flash {
-                                23 - 2
-                            } else {
-                                21 - 2
-                            }
-                        } // 48 MHz
-                    };
-                    self.cycles += delay as u64;
-                    // CEmu: At 48 MHz with non-serial flash, align CPU to LCD clock
-                    // (cpu.cycles |= 1 — force the TOTAL cycle count odd)
-                    if cpu_speed == 3 && !self.serial_flash && (self.cycles + self.mem_cycles) & 1 == 0 {
-                        self.cycles += 1;
-                    }
-                }
                 // CEmu lcd_write: flush pending LCD DMA before control writes
                 if aligned_offset == 0x18 {
                     self.process_pending_dma(0);
@@ -1717,6 +1684,30 @@ impl Bus {
         // Record for comprehensive I/O tracing (CPU port write)
         let addr = 0xFF0000 | (port as u32);
         self.record_io_op(IoOpType::Write, IoTarget::CpuPort, addr, old_value, value);
+    }
+
+    /// Apply CEmu's speed-dependent delay for LCD timing/control writes.
+    fn apply_lcd_write_ctrl_delay(&mut self, offset: u32) {
+        let aligned_offset = offset & !3;
+        if offset >= 0x10 && aligned_offset != 0x18 {
+            return;
+        }
+
+        let cpu_speed = self.ports.control.cpu_speed();
+        let delay = match cpu_speed {
+            0 => 10 - 2,
+            1 => 12 - 2,
+            2 if self.serial_flash => 14 - 2,
+            2 => 16 - 2,
+            _ if self.serial_flash => 23 - 2,
+            _ => 21 - 2,
+        };
+        self.cycles += delay;
+
+        // At 48 MHz with parallel flash, CEmu aligns the CPU to the LCD clock.
+        if cpu_speed == 3 && !self.serial_flash && (self.cycles + self.mem_cycles) & 1 == 0 {
+            self.cycles += 1;
+        }
     }
 
     /// Read a port value for tracing purposes (without affecting timing)
