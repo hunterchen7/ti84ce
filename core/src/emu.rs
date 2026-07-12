@@ -467,6 +467,12 @@ impl Emu {
         let mut sector = ARCHIVE_START;
         while sector < ARCHIVE_END {
             let status = self.bus.flash.peek(sector);
+            if status == 0xFE {
+                // 0xFE marks the archive swap sector. It is reserved for
+                // garbage collection and must never contain normal entries.
+                sector += SECTOR_SIZE;
+                continue;
+            }
             if status == 0xFF {
                 // Empty sector — write sector status byte + entries start at byte 1
                 return Some(sector);
@@ -544,39 +550,46 @@ impl Emu {
                 break; // Fits in current sector
             }
             // Move to next sector and find free space within it
-            let next_sector = sector_end;
-            if next_sector + 1 + total_len as u32 > ARCHIVE_END {
-                return Err(-12); // No space
-            }
-            let status = self.bus.flash.peek(next_sector);
-            if status == 0xFF {
-                // Empty sector — write status byte, start at byte 1
-                self.bus.flash.write_direct(next_sector, 0xFC);
-                write_addr = next_sector + 1;
-            } else {
-                // Sector already has data — scan for free space within it
-                let mut addr = next_sector + 1;
-                let end = next_sector + SECTOR_SIZE;
-                while addr < end {
-                    let flag = self.bus.flash.peek(addr);
-                    if flag == 0xFF {
-                        break;
-                    }
-                    if flag == 0xFC || flag == 0xF0 || flag == 0xFE {
-                        let size = u16::from_le_bytes([
-                            self.bus.flash.peek(addr + 1),
-                            self.bus.flash.peek(addr + 2),
-                        ]) as u32;
-                        if size > 0 && size < SECTOR_SIZE {
-                            addr += 3 + size;
+            let mut next_sector = sector_end;
+            loop {
+                if next_sector + 1 + total_len as u32 > ARCHIVE_END {
+                    return Err(-12); // No space
+                }
+                let status = self.bus.flash.peek(next_sector);
+                if status == 0xFE {
+                    next_sector += SECTOR_SIZE;
+                    continue;
+                }
+                if status == 0xFF {
+                    // Empty sector — write status byte, start at byte 1
+                    self.bus.flash.write_direct(next_sector, 0xFC);
+                    write_addr = next_sector + 1;
+                } else {
+                    // Sector already has data — scan for free space within it
+                    let mut addr = next_sector + 1;
+                    let end = next_sector + SECTOR_SIZE;
+                    while addr < end {
+                        let flag = self.bus.flash.peek(addr);
+                        if flag == 0xFF {
+                            break;
+                        }
+                        if flag == 0xFC || flag == 0xF0 || flag == 0xFE {
+                            let size = u16::from_le_bytes([
+                                self.bus.flash.peek(addr + 1),
+                                self.bus.flash.peek(addr + 2),
+                            ]) as u32;
+                            if size > 0 && size < SECTOR_SIZE {
+                                addr += 3 + size;
+                            } else {
+                                break;
+                            }
                         } else {
                             break;
                         }
-                    } else {
-                        break;
                     }
+                    write_addr = addr;
                 }
-                write_addr = addr;
+                break;
             }
         }
 
@@ -655,6 +668,10 @@ impl Emu {
         let mut sector = ARCHIVE_START;
         while sector < ARCHIVE_END {
             let status = self.bus.flash.peek(sector);
+            if status == 0xFE {
+                sector += SECTOR_SIZE;
+                continue;
+            }
             if status == 0xFF {
                 // Empty sector — no more entries
                 return None;
