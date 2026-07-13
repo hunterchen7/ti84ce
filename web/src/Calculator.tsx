@@ -111,17 +111,17 @@ interface CalculatorProps {
   autoLaunch?: boolean;
 }
 
-const MIN_KEY_HOLD_MS = 80;
-const MIN_KEY_GAP_MS = 80;
+const MIN_KEY_HOLD_FRAMES = 3;
+const MIN_KEY_GAP_FRAMES = 1;
+const COMMAND_KEY_GAP_FRAMES = 7;
 
 interface ActiveKeyPress {
   id: string;
   row: number;
   col: number;
   backend: EmulatorBackend;
-  pressedAt: number | null;
+  framesHeld: number;
   releaseRequested: boolean;
-  releaseTimer: ReturnType<typeof setTimeout> | null;
 }
 
 export function Calculator({
@@ -170,11 +170,8 @@ export function Calculator({
   const activeKeysRef = useRef<Map<string, ActiveKeyPress[]>>(new Map());
   const inputQueueRef = useRef<ActiveKeyPress[]>([]);
   const currentInputRef = useRef<ActiveKeyPress | null>(null);
-  const inputGapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pumpInputQueueRef = useRef<() => void>(() => {});
-  const syntheticInputTimersRef = useRef<
-    Set<ReturnType<typeof setTimeout>>
-  >(new Set());
+  const inputGapFramesRef = useRef(0);
+  const advanceInputFrameRef = useRef<() => void>(() => {});
   const releaseAllInputKeysRef = useRef<() => void>(() => {});
   const keyboardKeysRef = useRef<Map<string, [number, number]>>(new Map());
   const suppressSaveRef = useRef(false);
@@ -478,11 +475,6 @@ export function Calculator({
     (entry: ActiveKeyPress) => {
       if (currentInputRef.current !== entry) return;
 
-      if (entry.releaseTimer !== null) {
-        clearTimeout(entry.releaseTimer);
-        entry.releaseTimer = null;
-      }
-
       try {
         entry.backend.setKey(entry.row, entry.col, false);
       } catch {
@@ -492,39 +484,32 @@ export function Calculator({
       currentInputRef.current = null;
       removeActiveKey(entry);
       debouncedSave();
-
-      inputGapTimerRef.current = setTimeout(() => {
-        inputGapTimerRef.current = null;
-        pumpInputQueueRef.current();
-      }, MIN_KEY_GAP_MS);
+      const isCommandKey =
+        entry.row === 6 && (entry.col === 0 || entry.col === 6);
+      inputGapFramesRef.current = isCommandKey
+        ? COMMAND_KEY_GAP_FRAMES
+        : MIN_KEY_GAP_FRAMES;
     },
     [debouncedSave, removeActiveKey],
   );
 
-  const scheduleInputRelease = useCallback(
+  const maybeFinishInputKey = useCallback(
     (entry: ActiveKeyPress) => {
       if (
         currentInputRef.current !== entry ||
-        entry.pressedAt === null ||
         !entry.releaseRequested ||
-        entry.releaseTimer !== null
+        entry.framesHeld < MIN_KEY_HOLD_FRAMES
       ) {
         return;
       }
 
-      const elapsed = performance.now() - entry.pressedAt;
-      const delay = Math.max(0, MIN_KEY_HOLD_MS - elapsed);
-      if (delay === 0) {
-        finishInputKey(entry);
-      } else {
-        entry.releaseTimer = setTimeout(() => finishInputKey(entry), delay);
-      }
+      finishInputKey(entry);
     },
     [finishInputKey],
   );
 
   const pumpInputQueue = useCallback(() => {
-    if (currentInputRef.current || inputGapTimerRef.current) return;
+    if (currentInputRef.current || inputGapFramesRef.current > 0) return;
 
     let entry = inputQueueRef.current.shift();
     while (entry) {
@@ -535,7 +520,6 @@ export function Calculator({
       }
 
       currentInputRef.current = entry;
-      entry.pressedAt = performance.now();
       try {
         entry.backend.setKey(entry.row, entry.col, true);
       } catch {
@@ -544,13 +528,27 @@ export function Calculator({
         entry = inputQueueRef.current.shift();
         continue;
       }
-
-      scheduleInputRelease(entry);
       return;
     }
-  }, [removeActiveKey, scheduleInputRelease]);
+  }, [removeActiveKey]);
 
-  pumpInputQueueRef.current = pumpInputQueue;
+  const advanceInputFrame = useCallback(() => {
+    const current = currentInputRef.current;
+    if (current) {
+      current.framesHeld += 1;
+      maybeFinishInputKey(current);
+      return;
+    }
+
+    if (inputGapFramesRef.current > 0) {
+      inputGapFramesRef.current -= 1;
+    }
+    if (inputGapFramesRef.current === 0) {
+      pumpInputQueue();
+    }
+  }, [maybeFinishInputKey, pumpInputQueue]);
+
+  advanceInputFrameRef.current = advanceInputFrame;
 
   const pressInputKey = useCallback(
     (row: number, col: number, sourceId = `pointer:${row}:${col}`) => {
@@ -566,9 +564,8 @@ export function Calculator({
         row,
         col,
         backend,
-        pressedAt: null,
+        framesHeld: 0,
         releaseRequested: false,
-        releaseTimer: null,
       };
       entries.push(entry);
       activeKeysRef.current.set(id, entries);
@@ -585,26 +582,15 @@ export function Calculator({
       if (!entry) return;
 
       entry.releaseRequested = true;
-      scheduleInputRelease(entry);
+      maybeFinishInputKey(entry);
     },
-    [scheduleInputRelease],
+    [maybeFinishInputKey],
   );
 
   const releaseAllInputKeys = useCallback(() => {
-    for (const timer of syntheticInputTimersRef.current) {
-      clearTimeout(timer);
-    }
-    syntheticInputTimersRef.current.clear();
-
-    if (inputGapTimerRef.current !== null) {
-      clearTimeout(inputGapTimerRef.current);
-      inputGapTimerRef.current = null;
-    }
-
     for (const entries of activeKeysRef.current.values()) {
       for (const entry of entries) {
-        if (entry.releaseTimer !== null) clearTimeout(entry.releaseTimer);
-        if (entry.pressedAt !== null) {
+        if (currentInputRef.current === entry) {
           try {
             entry.backend.setKey(entry.row, entry.col, false);
           } catch {
@@ -617,6 +603,7 @@ export function Calculator({
     activeKeysRef.current.clear();
     inputQueueRef.current = [];
     currentInputRef.current = null;
+    inputGapFramesRef.current = 0;
     keyboardKeysRef.current.clear();
   }, []);
 
@@ -785,6 +772,7 @@ export function Calculator({
         while (timeAccumulator >= TARGET_FRAME_MS) {
           const t0 = performance.now();
           backend.runFrame();
+          advanceInputFrameRef.current();
           const elapsed = performance.now() - t0;
           totalFrames++;
           framesThisTick++;
@@ -880,14 +868,10 @@ export function Calculator({
         e.preventDefault();
         if (e.repeat) return;
         // Square root: 2nd + x²
-        pressInputKey(1, 5);
-        releaseInputKey(1, 5);
-        const timer = setTimeout(() => {
-          syntheticInputTimersRef.current.delete(timer);
-          pressInputKey(2, 4);
-          releaseInputKey(2, 4);
-        }, MIN_KEY_HOLD_MS + 10);
-        syntheticInputTimersRef.current.add(timer);
+        pressInputKey(1, 5, "synthetic:sqrt:2nd");
+        releaseInputKey(1, 5, "synthetic:sqrt:2nd");
+        pressInputKey(2, 4, "synthetic:sqrt:square");
+        releaseInputKey(2, 4, "synthetic:sqrt:square");
         return;
       }
 
