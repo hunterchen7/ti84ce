@@ -26,6 +26,7 @@ interface CEmuModule {
   _emu_step(frames: number): void;
   _emu_reset(): void;
   _lcd_get_frame(): number;
+  _emu_lcd_is_on(): number;
   _emu_keypad_event(row: number, col: number, press: boolean): void;
   _sendKey(keyCode: number): void;
   _emu_save_state_size(): number;
